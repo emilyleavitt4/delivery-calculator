@@ -1,0 +1,1089 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Balloon Calc">
+<title>Balloon Delivery Calculator</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --border: rgba(0,0,0,0.1);
+    --border-strong: rgba(0,0,0,0.18);
+    --text: #1a1a1a;
+    --text-secondary: #666;
+    --text-tertiary: #999;
+    --accent: #2d6a4f;
+    --accent-light: #e8f5ee;
+    --accent-border: #52b788;
+    --warning-bg: #fff8e6;
+    --warning-text: #92600a;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --font: -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111110;
+      --surface: #1c1c1a;
+      --border: rgba(255,255,255,0.1);
+      --border-strong: rgba(255,255,255,0.18);
+      --text: #f0ede8;
+      --text-secondary: #999;
+      --text-tertiary: #666;
+      --accent: #52b788;
+      --accent-light: #0d2b1e;
+      --accent-border: #2d6a4f;
+      --warning-bg: #2a1f00;
+      --warning-text: #f0a500;
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+  body {
+    font-family: var(--font);
+    font-size: 16px;
+    color: var(--text);
+    background: var(--bg);
+    min-height: 100vh;
+  }
+
+  .app {
+    max-width: 430px;
+    margin: 0 auto;
+    padding-bottom: 3rem;
+    min-height: 100vh;
+  }
+
+  /* TOP BAR */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem 0.875rem;
+    background: var(--surface);
+    border-bottom: 0.5px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .topbar-left { display: flex; align-items: center; gap: 10px; }
+  .topbar-icon { font-size: 18px; color: var(--accent); }
+  .topbar h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
+
+  .icon-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 8px;
+    color: var(--text-secondary);
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    border-radius: var(--radius-sm);
+    transition: background 0.15s;
+  }
+  .icon-btn:hover, .icon-btn:active { background: var(--bg); }
+
+  /* VIEWS */
+  .view { display: none; padding: 1rem 1.25rem; }
+  .view.active { display: block; }
+
+  /* SECTION LABEL */
+  .section-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 1.25rem 0 0.5rem;
+  }
+
+  /* CARD */
+  .card {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.125rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .card-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  /* ROWS & FIELDS */
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 0.75rem; }
+  .row.single { grid-template-columns: 1fr; }
+
+  .field label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 500;
+  }
+
+  .field input {
+    width: 100%;
+    padding: 10px 11px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    transition: border-color 0.15s, box-shadow 0.15s;
+    -webkit-appearance: none;
+  }
+
+  .field input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(82,183,136,0.15);
+  }
+
+  .field .hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 5px;
+    line-height: 1.4;
+  }
+
+  /* CHECKBOXES / MODIFIERS */
+  .checks { display: flex; flex-direction: column; gap: 8px; margin-top: 0.25rem; }
+
+  .check-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    user-select: none;
+    background: var(--surface);
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .check-item:active { background: var(--bg); }
+  .check-item input[type=checkbox] {
+    width: 18px; height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .check-item span { font-size: 14px; flex: 1; }
+  .check-item .mult { font-size: 12px; color: var(--text-tertiary); }
+  .check-item.active-check {
+    border-color: var(--accent-border);
+    background: var(--accent-light);
+  }
+  .check-item.active-check span { color: var(--accent); font-weight: 500; }
+
+  /* RESULTS BREAKDOWN */
+  .results {
+    background: var(--bg);
+    border-radius: var(--radius-sm);
+    padding: 0.875rem 1rem;
+    margin-bottom: 0.75rem;
+    border: 0.5px solid var(--border);
+  }
+
+  .result-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    border-bottom: 0.5px solid var(--border);
+    font-size: 13.5px;
+  }
+  .result-row:last-child { border-bottom: none; }
+  .result-row .label { color: var(--text-secondary); }
+  .result-row .val { font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  /* TOTAL PRICE CARD */
+  .total-card {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.25rem 1rem;
+    margin-bottom: 0.75rem;
+    text-align: center;
+  }
+
+  .total-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .total-price {
+    font-size: 40px;
+    font-weight: 700;
+    letter-spacing: -1.5px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .modifier-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 20px;
+    background: var(--warning-bg);
+    color: var(--warning-text);
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+    vertical-align: middle;
+    margin-left: 4px;
+  }
+
+  .hint-text {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 6px;
+  }
+
+  /* TRIP TOGGLE */
+  .trip-toggle {
+    display: flex;
+    gap: 6px;
+    margin: 1rem 0;
+    background: var(--bg);
+    padding: 4px;
+    border-radius: var(--radius-sm);
+    border: 0.5px solid var(--border);
+  }
+
+  .trip-btn {
+    flex: 1;
+    padding: 8px 6px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-family: var(--font);
+    font-weight: 500;
+    transition: background 0.15s, color 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+  }
+  .trip-btn.active {
+    background: var(--surface);
+    color: var(--accent);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  }
+
+  /* EXPAND TOGGLE */
+  .expand-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 11px 13px;
+    border: 0.5px dashed var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-family: var(--font);
+    margin-bottom: 0.75rem;
+    transition: background 0.12s;
+  }
+  .expand-toggle:hover, .expand-toggle:active { background: var(--bg); }
+  .expand-toggle .chevron { transition: transform 0.2s; font-size: 14px; }
+  .expand-toggle.open .chevron { transform: rotate(180deg); }
+
+  /* ONSITE PANEL */
+  .onsite-panel {
+    display: none;
+    background: var(--bg);
+    border-radius: var(--radius-sm);
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+    border: 0.5px solid var(--border);
+  }
+  .onsite-panel.open { display: block; }
+
+  .onsite-result-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-top: 0.5px solid var(--border);
+    margin-top: 0.5rem;
+  }
+  .onsite-result-label { font-size: 13px; color: var(--text-secondary); }
+  .onsite-result-val { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .onsite-hint { font-size: 11px; color: var(--text-tertiary); margin-top: 4px; }
+
+  /* COMBINED */
+  .combined-section {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.125rem;
+    margin-bottom: 0.75rem;
+  }
+  .combined-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 0.5px solid var(--border);
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+  }
+  .combined-row:last-child {
+    border-bottom: none;
+    font-weight: 700;
+    font-size: 17px;
+    padding-top: 12px;
+    letter-spacing: -0.3px;
+  }
+  .combined-row.sub {
+    font-size: 12px;
+    color: var(--text-secondary);
+    padding: 3px 0 3px 14px;
+    border-bottom: none;
+  }
+  .combined-empty {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    text-align: center;
+    padding: 0.5rem 0 0.25rem;
+  }
+
+  /* SETTINGS */
+  .settings-back {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 1.25rem;
+  }
+  .settings-back span { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
+
+  .settings-field { margin-bottom: 1rem; }
+  .settings-field:last-child { margin-bottom: 0; }
+  .settings-field label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 500;
+  }
+  .settings-field input {
+    width: 100%;
+    padding: 10px 11px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    -webkit-appearance: none;
+  }
+  .settings-field input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(82,183,136,0.15);
+  }
+  .settings-field .hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 5px;
+    line-height: 1.4;
+  }
+
+  /* SAVE BUTTON */
+  .save-btn {
+    width: 100%;
+    padding: 13px;
+    background: var(--accent);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    color: #fff;
+    font-family: var(--font);
+    margin-top: 0.75rem;
+    transition: opacity 0.15s;
+    letter-spacing: -0.2px;
+  }
+  .save-btn:active { opacity: 0.85; }
+  .saved-msg {
+    text-align: center;
+    font-size: 13px;
+    color: var(--accent);
+    margin-top: 0.625rem;
+    height: 20px;
+    font-weight: 500;
+  }
+
+  /* ADVANCED TOGGLE */
+  .adv-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 13px 14px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    font-family: var(--font);
+    margin: 1rem 0 0;
+    transition: background 0.12s;
+  }
+  .adv-toggle:active { background: var(--border); }
+  .adv-toggle .chevron { transition: transform 0.2s; font-size: 14px; }
+  .adv-toggle.open .chevron { transform: rotate(180deg); }
+
+  .adv-panel { display: none; }
+  .adv-panel.open { display: block; }
+
+  /* CPM CALC */
+  .cpm-result-box {
+    background: var(--accent-light);
+    border: 0.5px solid var(--accent-border);
+    border-radius: var(--radius-sm);
+    padding: 0.875rem 1rem;
+    margin-top: 0.875rem;
+  }
+  .cpm-result-title { font-size: 11px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+  .cpm-result-main { display: flex; align-items: center; justify-content: space-between; }
+  .cpm-result-val { font-size: 18px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .apply-btn {
+    padding: 7px 12px;
+    background: var(--accent);
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    color: #fff;
+    font-family: var(--font);
+    transition: opacity 0.15s;
+  }
+  .apply-btn:active { opacity: 0.8; }
+  .cpm-formula { font-size: 10px; color: var(--accent); opacity: 0.7; margin-top: 5px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <div class="topbar-left">
+      <i class="fa-solid fa-location-dot topbar-icon"></i>
+      <h1>Delivery Calculator</h1>
+    </div>
+    <button class="icon-btn" onclick="showView('settings')" aria-label="Settings">
+      <i class="fa-solid fa-gear"></i>
+    </button>
+  </div>
+
+  <!-- ═══════════════════════════════════════ CALCULATOR VIEW -->
+  <div class="view active" id="view-calc">
+
+    <div class="trip-toggle">
+      <button class="trip-btn active" onclick="showTrip('delivery',this)">
+        <i class="fa-solid fa-truck"></i> Delivery
+      </button>
+      <button class="trip-btn" onclick="showTrip('strike',this)">
+        <i class="fa-solid fa-box-open"></i> Strike
+      </button>
+      <button class="trip-btn" onclick="showTrip('combined',this)">
+        <i class="fa-solid fa-list"></i> Combined
+      </button>
+    </div>
+
+    <!-- ─── DELIVERY TRIP ─── -->
+    <div id="trip-delivery">
+      <div class="card">
+        <div class="card-title">
+          <i class="fa-solid fa-truck" style="color:var(--accent)"></i> Delivery trip
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Miles (one way)</label>
+            <input type="number" id="d-miles" placeholder="0" inputmode="decimal" oninput="syncStaff('d');calc()">
+          </div>
+          <div class="field">
+            <label>Drive time (min)</label>
+            <input type="number" id="d-time" placeholder="0" inputmode="decimal" oninput="calc()">
+          </div>
+        </div>
+        <div class="row single">
+          <div class="field">
+            <label>Travel staff</label>
+            <input type="number" id="d-staff" placeholder="1" inputmode="decimal" oninput="syncStaff('d');calc()">
+          </div>
+        </div>
+        <div class="section-label" style="margin-top:0.125rem">Modifiers</div>
+        <div class="checks">
+          <label class="check-item" id="cd-rush">
+            <input type="checkbox" id="d-rush" onchange="calc()">
+            <span>Rush hour</span>
+            <span class="mult" id="cd-rush-mult"></span>
+          </label>
+          <label class="check-item" id="cd-osh">
+            <input type="checkbox" id="d-osh" onchange="calc()">
+            <span>Outside standard hours</span>
+            <span class="mult" id="cd-osh-mult"></span>
+          </label>
+          <label class="check-item" id="cd-hol">
+            <input type="checkbox" id="d-hol" onchange="calc()">
+            <span>Holiday</span>
+            <span class="mult" id="cd-hol-mult"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="results" id="d-results" style="display:none">
+        <div class="result-row"><span class="label">Gas expense</span><span class="val" id="d-gas">—</span></div>
+        <div class="result-row"><span class="label">Vehicle wear</span><span class="val" id="d-wear">—</span></div>
+        <div class="result-row"><span class="label">Travel labor</span><span class="val" id="d-labor">—</span></div>
+        <div class="result-row"><span class="label">Total direct cost</span><span class="val" id="d-direct">—</span></div>
+      </div>
+
+      <button class="expand-toggle" id="d-expand-btn" onclick="toggleOnsite('d')">
+        <span><i class="fa-regular fa-clock" style="margin-right:7px"></i>Add on-site installation time</span>
+        <i class="fa-solid fa-chevron-down chevron"></i>
+      </button>
+      <div class="onsite-panel" id="d-onsite-panel">
+        <div class="row">
+          <div class="field">
+            <label>Time on site (hrs)</label>
+            <input type="number" id="d-onsite-hrs" placeholder="0" step="0.25" inputmode="decimal" oninput="calc()">
+          </div>
+          <div class="field">
+            <label>On-site staff</label>
+            <input type="number" id="d-onsite-staff" placeholder="1" inputmode="decimal" oninput="calc()">
+          </div>
+        </div>
+        <div class="onsite-result-row" id="d-onsite-result-row" style="display:none">
+          <span class="onsite-result-label">On-site labor price</span>
+          <span class="onsite-result-val" id="d-onsite-cost">—</span>
+        </div>
+        <div class="onsite-hint" id="d-onsite-hint"></div>
+      </div>
+
+      <div class="total-card" id="d-total-card" style="display:none">
+        <div class="total-label">
+          Delivery price
+          <span class="modifier-badge" id="d-mod-badge" style="display:none"></span>
+        </div>
+        <div class="total-price" id="d-total">—</div>
+        <div class="hint-text" id="d-hint"></div>
+      </div>
+    </div>
+
+    <!-- ─── STRIKE TRIP ─── -->
+    <div id="trip-strike" style="display:none">
+      <div class="card">
+        <div class="card-title">
+          <i class="fa-solid fa-box-open" style="color:var(--accent)"></i> Strike trip
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Miles (one way)</label>
+            <input type="number" id="s-miles" placeholder="0" inputmode="decimal" oninput="syncStaff('s');calc()">
+          </div>
+          <div class="field">
+            <label>Drive time (min)</label>
+            <input type="number" id="s-time" placeholder="0" inputmode="decimal" oninput="calc()">
+          </div>
+        </div>
+        <div class="row single">
+          <div class="field">
+            <label>Travel staff</label>
+            <input type="number" id="s-staff" placeholder="1" inputmode="decimal" oninput="syncStaff('s');calc()">
+          </div>
+        </div>
+        <div class="section-label" style="margin-top:0.125rem">Modifiers</div>
+        <div class="checks">
+          <label class="check-item" id="cs-rush">
+            <input type="checkbox" id="s-rush" onchange="calc()">
+            <span>Rush hour</span>
+            <span class="mult" id="cs-rush-mult"></span>
+          </label>
+          <label class="check-item" id="cs-osh">
+            <input type="checkbox" id="s-osh" onchange="calc()">
+            <span>Outside standard hours</span>
+            <span class="mult" id="cs-osh-mult"></span>
+          </label>
+          <label class="check-item" id="cs-hol">
+            <input type="checkbox" id="s-hol" onchange="calc()">
+            <span>Holiday</span>
+            <span class="mult" id="cs-hol-mult"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="results" id="s-results" style="display:none">
+        <div class="result-row"><span class="label">Gas expense</span><span class="val" id="s-gas">—</span></div>
+        <div class="result-row"><span class="label">Vehicle wear</span><span class="val" id="s-wear">—</span></div>
+        <div class="result-row"><span class="label">Travel labor</span><span class="val" id="s-labor">—</span></div>
+        <div class="result-row"><span class="label">Total direct cost</span><span class="val" id="s-direct">—</span></div>
+      </div>
+
+      <button class="expand-toggle" id="s-expand-btn" onclick="toggleOnsite('s')">
+        <span><i class="fa-regular fa-clock" style="margin-right:7px"></i>Add on-site strike time</span>
+        <i class="fa-solid fa-chevron-down chevron"></i>
+      </button>
+      <div class="onsite-panel" id="s-onsite-panel">
+        <div class="row">
+          <div class="field">
+            <label>Time on site (hrs)</label>
+            <input type="number" id="s-onsite-hrs" placeholder="0" step="0.25" inputmode="decimal" oninput="calc()">
+          </div>
+          <div class="field">
+            <label>On-site staff</label>
+            <input type="number" id="s-onsite-staff" placeholder="1" inputmode="decimal" oninput="calc()">
+          </div>
+        </div>
+        <div class="onsite-result-row" id="s-onsite-result-row" style="display:none">
+          <span class="onsite-result-label">On-site labor price</span>
+          <span class="onsite-result-val" id="s-onsite-cost">—</span>
+        </div>
+        <div class="onsite-hint" id="s-onsite-hint"></div>
+      </div>
+
+      <div class="total-card" id="s-total-card" style="display:none">
+        <div class="total-label">
+          Strike price
+          <span class="modifier-badge" id="s-mod-badge" style="display:none"></span>
+        </div>
+        <div class="total-price" id="s-total">—</div>
+        <div class="hint-text" id="s-hint"></div>
+      </div>
+    </div>
+
+    <!-- ─── COMBINED ─── -->
+    <div id="trip-combined" style="display:none">
+      <div class="combined-section">
+        <div class="combined-row">
+          <span style="color:var(--text-secondary)">Delivery trip</span>
+          <span id="c-delivery">—</span>
+        </div>
+        <div class="combined-row sub" id="c-delivery-onsite-row" style="display:none">
+          <span>incl. on-site installation</span>
+          <span id="c-delivery-onsite">—</span>
+        </div>
+        <div class="combined-row">
+          <span style="color:var(--text-secondary)">Strike trip</span>
+          <span id="c-strike">—</span>
+        </div>
+        <div class="combined-row sub" id="c-strike-onsite-row" style="display:none">
+          <span>incl. on-site strike</span>
+          <span id="c-strike-onsite">—</span>
+        </div>
+        <div class="combined-row">
+          <span>Total</span>
+          <span id="c-total">—</span>
+        </div>
+      </div>
+      <p class="combined-empty">Enter details in Delivery and Strike tabs</p>
+    </div>
+
+  </div><!-- end view-calc -->
+
+  <!-- ═══════════════════════════════════════ SETTINGS VIEW -->
+  <div class="view" id="view-settings">
+
+    <div class="settings-back">
+      <button class="icon-btn" onclick="showView('calc')" aria-label="Back">
+        <i class="fa-solid fa-arrow-left"></i>
+      </button>
+      <span>Settings</span>
+    </div>
+
+    <!-- BASIC SETTINGS -->
+    <div class="section-label" style="margin-top:0">Vehicle & fuel</div>
+    <div class="card">
+      <div class="settings-field">
+        <label>Fuel efficiency (MPG)</label>
+        <input type="number" id="set-mpg" placeholder="14" inputmode="decimal">
+      </div>
+      <div class="settings-field">
+        <label>Gas price per gallon ($)</label>
+        <input type="number" id="set-gas" placeholder="4.25" step="0.01" inputmode="decimal">
+      </div>
+      <div class="settings-field">
+        <label>Vehicle cost per mile ($)</label>
+        <input type="number" id="set-cpm" placeholder="0.20" step="0.01" inputmode="decimal">
+        <div class="hint">Wear and depreciation only — fuel is calculated separately above</div>
+      </div>
+    </div>
+
+    <div class="section-label">Labor</div>
+    <div class="card">
+      <div class="settings-field">
+        <label>Staff hourly rate ($)</label>
+        <input type="number" id="set-rate" placeholder="35.00" step="0.01" inputmode="decimal">
+      </div>
+      <div class="settings-field">
+        <label>Profit margin (%)</label>
+        <input type="number" id="set-profit" placeholder="20" inputmode="decimal">
+        <div class="hint">Applied to all costs. Override travel and on-site rates separately in Advanced settings.</div>
+      </div>
+    </div>
+
+    <!-- ADVANCED SETTINGS -->
+    <button class="adv-toggle" id="adv-toggle-btn" onclick="toggleAdvanced()">
+      <span><i class="fa-solid fa-sliders" style="margin-right:9px"></i>Advanced settings</span>
+      <i class="fa-solid fa-chevron-down chevron"></i>
+    </button>
+
+    <div class="adv-panel" id="adv-panel">
+
+      <div class="section-label">Separate profit margins</div>
+      <div class="card">
+        <div class="settings-field">
+          <label>Travel profit margin (%)</label>
+          <input type="number" id="set-travel-profit" placeholder="Leave blank to use general margin" step="1" inputmode="decimal">
+          <div class="hint">Overrides general margin for gas, wear, and drive time.</div>
+        </div>
+        <div class="settings-field">
+          <label>On-site labor profit margin (%)</label>
+          <input type="number" id="set-onsite-profit" placeholder="Leave blank to use general margin" step="1" inputmode="decimal">
+          <div class="hint">Overrides general margin for on-site installation and strike time.</div>
+        </div>
+      </div>
+
+      <div class="section-label">Price modifiers</div>
+      <div class="card">
+        <div class="settings-field">
+          <label>Rush hour multiplier</label>
+          <input type="number" id="set-rush" placeholder="1.25" step="0.05" inputmode="decimal">
+        </div>
+        <div class="settings-field">
+          <label>Outside standard hours multiplier</label>
+          <input type="number" id="set-osh" placeholder="1.60" step="0.05" inputmode="decimal">
+        </div>
+        <div class="settings-field">
+          <label>Holiday multiplier</label>
+          <input type="number" id="set-hol" placeholder="2.00" step="0.05" inputmode="decimal">
+        </div>
+      </div>
+
+      <div class="section-label">Vehicle cost per mile calculator</div>
+      <div class="card">
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:0.875rem;line-height:1.5">
+          Not sure what to put for vehicle cost per mile? Enter your vehicle details and we'll calculate it.
+        </p>
+        <div class="settings-field">
+          <label>Vehicle purchase price ($)</label>
+          <input type="number" id="cpm-purchase" placeholder="28000" inputmode="decimal" oninput="calcCPM()">
+        </div>
+        <div class="settings-field">
+          <label>Estimated resale value ($)</label>
+          <input type="number" id="cpm-resale" placeholder="0" inputmode="decimal" oninput="calcCPM()">
+        </div>
+        <div class="settings-field">
+          <label>Expected lifetime miles</label>
+          <input type="number" id="cpm-miles" placeholder="250000" inputmode="decimal" oninput="calcCPM()">
+        </div>
+        <div class="settings-field">
+          <label>Estimated lifetime repairs ($)</label>
+          <input type="number" id="cpm-repairs" placeholder="22000" inputmode="decimal" oninput="calcCPM()">
+        </div>
+        <div class="cpm-result-box" id="cpm-result-area" style="display:none">
+          <div class="cpm-result-title">Your estimated cost per mile</div>
+          <div class="cpm-result-main">
+            <span class="cpm-result-val" id="cpm-result-val">—</span>
+            <button class="apply-btn" onclick="applyCPM()">Apply to settings</button>
+          </div>
+          <div class="cpm-formula">(purchase − resale + repairs) ÷ lifetime miles</div>
+        </div>
+      </div>
+
+    </div><!-- end adv-panel -->
+
+    <button class="save-btn" onclick="saveSettings()">
+      <i class="fa-solid fa-floppy-disk" style="margin-right:7px"></i>Save defaults
+    </button>
+    <div class="saved-msg" id="saved-msg"></div>
+
+  </div><!-- end view-settings -->
+
+</div><!-- end app -->
+
+<script>
+const DEFAULTS = {
+  mpg: 14, gas: 4.25, cpm: 0.20,
+  rate: 35, profit: 20,
+  travelProfit: null, onsiteProfit: null,
+  rush: 1.25, osh: 1.6, hol: 2.0
+};
+let S = {};
+
+function loadSettings() {
+  try { S = JSON.parse(localStorage.getItem('bdc_v3_settings') || '{}'); } catch(e) { S = {}; }
+  S = Object.assign({}, DEFAULTS, S);
+  document.getElementById('set-mpg').value = S.mpg;
+  document.getElementById('set-gas').value = S.gas;
+  document.getElementById('set-cpm').value = S.cpm;
+  document.getElementById('set-rate').value = S.rate;
+  document.getElementById('set-profit').value = S.profit;
+  document.getElementById('set-travel-profit').value = S.travelProfit != null ? S.travelProfit : '';
+  document.getElementById('set-onsite-profit').value = S.onsiteProfit != null ? S.onsiteProfit : '';
+  document.getElementById('set-rush').value = S.rush;
+  document.getElementById('set-osh').value = S.osh;
+  document.getElementById('set-hol').value = S.hol;
+  updateMultLabels();
+}
+
+function saveSettings() {
+  S.mpg    = parseFloat(document.getElementById('set-mpg').value)    || DEFAULTS.mpg;
+  S.gas    = parseFloat(document.getElementById('set-gas').value)    || DEFAULTS.gas;
+  S.cpm    = parseFloat(document.getElementById('set-cpm').value)    || DEFAULTS.cpm;
+  S.rate   = parseFloat(document.getElementById('set-rate').value)   || DEFAULTS.rate;
+  S.profit = parseFloat(document.getElementById('set-profit').value) || DEFAULTS.profit;
+  S.rush   = parseFloat(document.getElementById('set-rush').value)   || DEFAULTS.rush;
+  S.osh    = parseFloat(document.getElementById('set-osh').value)    || DEFAULTS.osh;
+  S.hol    = parseFloat(document.getElementById('set-hol').value)    || DEFAULTS.hol;
+  const tp = document.getElementById('set-travel-profit').value;
+  const op = document.getElementById('set-onsite-profit').value;
+  S.travelProfit = tp !== '' ? parseFloat(tp) : null;
+  S.onsiteProfit = op !== '' ? parseFloat(op) : null;
+  try { localStorage.setItem('bdc_v3_settings', JSON.stringify(S)); } catch(e) {}
+  updateMultLabels();
+  calc();
+  const msg = document.getElementById('saved-msg');
+  msg.textContent = '✓ Defaults saved to this device';
+  setTimeout(() => msg.textContent = '', 2500);
+}
+
+function effectiveMargin(type) {
+  if (type === 'travel') return S.travelProfit != null ? S.travelProfit : S.profit;
+  if (type === 'onsite') return S.onsiteProfit != null ? S.onsiteProfit : S.profit;
+  return S.profit;
+}
+
+function updateMultLabels() {
+  ['d','s'].forEach(p => {
+    document.getElementById('c'+p+'-rush-mult').textContent = S.rush + 'x';
+    document.getElementById('c'+p+'-osh-mult').textContent  = S.osh  + 'x';
+    document.getElementById('c'+p+'-hol-mult').textContent  = S.hol  + 'x';
+  });
+}
+
+function fmt(n)    { return '$' + Math.ceil(n).toLocaleString('en-US'); }
+function fmtDec(n) { return '$' + n.toFixed(2); }
+
+function syncStaff(p) {
+  const v  = document.getElementById(p+'-staff').value;
+  const el = document.getElementById(p+'-onsite-staff');
+  if (el && !el.dataset.edited) el.value = v;
+}
+
+function toggleOnsite(p) {
+  const btn   = document.getElementById(p+'-expand-btn');
+  const panel = document.getElementById(p+'-onsite-panel');
+  const isOpen = panel.classList.contains('open');
+  panel.classList.toggle('open', !isOpen);
+  btn.classList.toggle('open', !isOpen);
+  if (!isOpen) {
+    const tv = document.getElementById(p+'-staff').value || 1;
+    const el = document.getElementById(p+'-onsite-staff');
+    if (!el.dataset.edited) el.value = tv;
+  }
+  calc();
+}
+
+function toggleAdvanced() {
+  const btn   = document.getElementById('adv-toggle-btn');
+  const panel = document.getElementById('adv-panel');
+  panel.classList.toggle('open', !panel.classList.contains('open'));
+  btn.classList.toggle('open',   !btn.classList.contains('open'));
+}
+
+function calcCPM() {
+  const purchase = parseFloat(document.getElementById('cpm-purchase').value) || 0;
+  const resale   = parseFloat(document.getElementById('cpm-resale').value)   || 0;
+  const miles    = parseFloat(document.getElementById('cpm-miles').value)    || 0;
+  const repairs  = parseFloat(document.getElementById('cpm-repairs').value)  || 0;
+  const area = document.getElementById('cpm-result-area');
+  if (miles > 0) {
+    const cpm = (purchase - resale + repairs) / miles;
+    document.getElementById('cpm-result-val').textContent = '$' + cpm.toFixed(4) + ' / mile';
+    area.style.display = 'block';
+  } else {
+    area.style.display = 'none';
+  }
+}
+
+function applyCPM() {
+  const purchase = parseFloat(document.getElementById('cpm-purchase').value) || 0;
+  const resale   = parseFloat(document.getElementById('cpm-resale').value)   || 0;
+  const miles    = parseFloat(document.getElementById('cpm-miles').value)    || 0;
+  const repairs  = parseFloat(document.getElementById('cpm-repairs').value)  || 0;
+  if (miles > 0) {
+    const cpm = (purchase - resale + repairs) / miles;
+    document.getElementById('set-cpm').value = cpm.toFixed(4);
+    S.cpm = cpm;
+    const msg = document.getElementById('saved-msg');
+    msg.textContent = 'Cost per mile updated — remember to save!';
+    setTimeout(() => msg.textContent = '', 3000);
+    calc();
+  }
+}
+
+function calcTrip(p) {
+  const miles      = parseFloat(document.getElementById(p+'-miles').value) || 0;
+  const mins       = parseFloat(document.getElementById(p+'-time').value)  || 0;
+  const staff      = parseFloat(document.getElementById(p+'-staff').value) || 1;
+  const rush       = document.getElementById(p+'-rush').checked;
+  const osh        = document.getElementById(p+'-osh').checked;
+  const hol        = document.getElementById(p+'-hol').checked;
+  const onsiteOpen = document.getElementById(p+'-onsite-panel').classList.contains('open');
+  const onsiteHrs  = onsiteOpen ? (parseFloat(document.getElementById(p+'-onsite-hrs').value)   || 0) : 0;
+  const onsiteStaff= onsiteOpen ? (parseFloat(document.getElementById(p+'-onsite-staff').value) || 1) : 1;
+
+  const gas         = (miles * 2 / S.mpg) * S.gas;
+  const wear        = miles * 2 * S.cpm;
+  const labor       = (mins * 2 * staff / 60) * S.rate;
+  const onsiteLabor = onsiteHrs * onsiteStaff * S.rate;
+  const direct      = gas + wear + labor;
+
+  const travelPM = 1 / (1 - (effectiveMargin('travel') / 100));
+  const onsitePM = 1 / (1 - (effectiveMargin('onsite') / 100));
+
+  const mults = [];
+  if (rush) mults.push({ v: S.rush, label: 'Rush hour' });
+  if (osh)  mults.push({ v: S.osh,  label: 'After hours' });
+  if (hol)  mults.push({ v: S.hol,  label: 'Holiday' });
+  const topMult  = mults.length > 0 ? mults.reduce((a,b) => a.v > b.v ? a : b) : null;
+  const modifier = topMult ? topMult.v : 1;
+
+  const hasTravel = miles > 0 || mins > 0;
+  const hasOnsite = onsiteOpen && onsiteHrs > 0;
+
+  const travelFinal = hasTravel ? Math.ceil(direct * travelPM * modifier) : 0;
+  const onsiteFinal = hasOnsite ? Math.ceil(onsiteLabor * onsitePM * modifier) : 0;
+  const totalFinal  = travelFinal + onsiteFinal;
+
+  ['rush','osh','hol'].forEach(m => {
+    document.getElementById('c'+p+'-'+m).classList.toggle('active-check', document.getElementById(p+'-'+m).checked);
+  });
+
+  return { gas, wear, labor, direct, travelFinal, onsiteFinal, totalFinal, topMult, hasTravel, hasOnsite, onsiteHrs, modifier };
+}
+
+function calc() {
+  const d = calcTrip('d');
+  const s = calcTrip('s');
+
+  function updateUI(r, p) {
+    const showTravel  = r.hasTravel;
+    const showOnsite  = r.hasOnsite;
+    const showAnything = showTravel || showOnsite;
+
+    document.getElementById(p+'-results').style.display = showTravel ? 'block' : 'none';
+    if (showTravel) {
+      document.getElementById(p+'-gas').textContent    = fmtDec(r.gas);
+      document.getElementById(p+'-wear').textContent   = fmtDec(r.wear);
+      document.getElementById(p+'-labor').textContent  = fmtDec(r.labor);
+      document.getElementById(p+'-direct').textContent = fmtDec(r.direct);
+    }
+
+    const onsiteRow  = document.getElementById(p+'-onsite-result-row');
+    const onsiteHint = document.getElementById(p+'-onsite-hint');
+    if (showOnsite) {
+      onsiteRow.style.display = 'flex';
+      document.getElementById(p+'-onsite-cost').textContent = fmt(r.onsiteFinal);
+      const om = effectiveMargin('onsite');
+      onsiteHint.textContent = om + '% margin · rounded up to nearest $1' + (r.topMult ? ' · ' + r.topMult.label + ' (' + r.topMult.v + 'x)' : '');
+    } else {
+      onsiteRow.style.display = 'none';
+      onsiteHint.textContent  = '';
+    }
+
+    document.getElementById(p+'-total-card').style.display = showAnything ? 'block' : 'none';
+    if (showAnything) {
+      document.getElementById(p+'-total').textContent = fmt(r.totalFinal);
+      const badge = document.getElementById(p+'-mod-badge');
+      if (r.topMult) { badge.textContent = r.topMult.label + ' (' + r.topMult.v + 'x)'; badge.style.display = 'inline-block'; }
+      else badge.style.display = 'none';
+      const tm = effectiveMargin('travel');
+      const om = effectiveMargin('onsite');
+      const note = (S.travelProfit != null || S.onsiteProfit != null)
+        ? 'Travel ' + tm + '% · On-site ' + om + '% margin'
+        : tm + '% margin';
+      document.getElementById(p+'-hint').textContent = note + ' · rounded up to nearest $1';
+    }
+  }
+
+  updateUI(d, 'd');
+  updateUI(s, 's');
+
+  const dShow = d.hasTravel || d.hasOnsite;
+  const sShow = s.hasTravel || s.hasOnsite;
+
+  document.getElementById('c-delivery').textContent = dShow ? fmt(d.totalFinal) : '—';
+  document.getElementById('c-strike').textContent   = sShow ? fmt(s.totalFinal) : '—';
+
+  const dOr = document.getElementById('c-delivery-onsite-row');
+  const sOr = document.getElementById('c-strike-onsite-row');
+  dOr.style.display = (dShow && d.hasOnsite) ? 'flex' : 'none';
+  sOr.style.display = (sShow && s.hasOnsite) ? 'flex' : 'none';
+  document.getElementById('c-delivery-onsite').textContent = d.hasOnsite ? '+ ' + fmt(d.onsiteFinal) : '—';
+  document.getElementById('c-strike-onsite').textContent   = s.hasOnsite ? '+ ' + fmt(s.onsiteFinal) : '—';
+
+  const total = (dShow ? d.totalFinal : 0) + (sShow ? s.totalFinal : 0);
+  document.getElementById('c-total').textContent = (dShow || sShow) ? fmt(total) : '—';
+}
+
+document.querySelectorAll('[id$="-onsite-staff"]').forEach(el => {
+  el.addEventListener('input', () => { el.dataset.edited = '1'; calc(); });
+});
+
+function showView(v) {
+  document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+  document.getElementById('view-' + v).classList.add('active');
+  window.scrollTo(0, 0);
+}
+
+function showTrip(t, btn) {
+  document.querySelectorAll('.trip-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  ['delivery','strike','combined'].forEach(id => {
+    document.getElementById('trip-' + id).style.display = id === t ? 'block' : 'none';
+  });
+}
+
+loadSettings();
+calc();
+</script>
+</body>
+</html>
