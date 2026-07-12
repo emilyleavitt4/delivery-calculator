@@ -643,8 +643,8 @@
 </style>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
-  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
-  import { getFirestore } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+  import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
+  import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyAaOVXNBCXXfO_HpuhTOeFi5dDHZ4hCBro",
@@ -657,15 +657,31 @@
 
   const fbApp = initializeApp(firebaseConfig);
   const auth = getAuth(fbApp);
+  const db = getFirestore(fbApp);
+
+  // One business exists today (yours). Every job lives under this path — so if a second
+  // business is ever added later, it just gets its own BUSINESS_ID and its own jobs
+  // underneath it; this app's code doesn't need to change shape to support that.
+  const BUSINESS_ID = 'utah-balloon-creations';
+  const jobsRef = collection(db, 'businesses', BUSINESS_ID, 'jobs');
 
   // The rest of the app is a plain (non-module) script, so we hand off the pieces
   // it needs via window.* — this is the standard, low-risk way to mix a small
   // Firebase module with the classic script the rest of the app already uses.
   window.fbAuth = auth;
-  window.fbDb = getFirestore(fbApp);
   window.fbGoogleProvider = new GoogleAuthProvider();
-  window.fbSignInWithPopup = () => signInWithPopup(auth, window.fbGoogleProvider);
+  window.fbSignIn = () => signInWithRedirect(auth, window.fbGoogleProvider);
   window.fbSignOut = () => signOut(auth);
+
+  // After Google redirects back to the app post-sign-in, this catches anything that went
+  // wrong during that handoff (rather than it failing silently).
+  getRedirectResult(auth).catch(err => {
+    console.error('Sign-in redirect error:', err);
+  });
+
+  window.fbOnSnapshotJobs = (onNext, onError) => onSnapshot(jobsRef, onNext, onError);
+  window.fbSaveJob = (job) => setDoc(doc(jobsRef, job.id), job);
+  window.fbDeleteJob = (jobId) => deleteDoc(doc(jobsRef, jobId));
 
   const ALLOWED_EMAILS = [
     'emily@utahballooncreations.com',
@@ -1637,12 +1653,39 @@ let JOBS = [];
 let psExpandedProduction = null;
 let psExpandedStaffing = null;
 
-function psLoadJobs() {
-  try { JOBS = JSON.parse(localStorage.getItem('bdc_v3_jobs') || '[]'); } catch (e) { JOBS = []; }
+// A live connection to the shared database: whenever ANYONE on the team adds, edits, or
+// deletes a job — on any device — this fires and refreshes what everyone sees. This is what
+// makes Production and Staffing feel like one shared, always-current board instead of
+// something that only updates when you personally make a change.
+function psStartJobsListener() {
+  window.fbOnSnapshotJobs(
+    (snapshot) => {
+      JOBS = snapshot.docs.map(d => d.data());
+      psRenderAllJobViews();
+    },
+    (err) => {
+      console.error('Jobs sync error:', err);
+    }
+  );
 }
-function psSaveJobs() {
-  try { localStorage.setItem('bdc_v3_jobs', JSON.stringify(JOBS)); } catch (e) {}
+
+// Writes one job's full record to the shared database. We don't touch the local JOBS array
+// or re-render here — the listener above does that automatically once the write lands,
+// which keeps every device (including this one) driven by the same real source of truth.
+function psSaveJob(job) {
+  window.fbSaveJob(job).catch(err => {
+    console.error(err);
+    alert("Couldn't save that change — check your connection and try again.");
+  });
 }
+
+function psDeleteJobRemote(jobId) {
+  window.fbDeleteJob(jobId).catch(err => {
+    console.error(err);
+    alert("Couldn't delete that job — check your connection and try again.");
+  });
+}
+
 function psNewJobId() {
   return 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
 }
@@ -1688,8 +1731,7 @@ function psCycleStatus(jobId) {
   const job = psFindJob(jobId);
   if (!job) return;
   job.status = STATUS_ORDER[(STATUS_ORDER.indexOf(job.status) + 1) % STATUS_ORDER.length];
-  psSaveJobs();
-  psRenderAllJobViews();
+  psSaveJob(job);
 }
 
 function psCycleStaffStatus(jobId) {
@@ -1697,37 +1739,31 @@ function psCycleStaffStatus(jobId) {
   if (!job) return;
   const current = job.staffingStatus || 'open';
   job.staffingStatus = STAFF_STATUS_ORDER[(STAFF_STATUS_ORDER.indexOf(current) + 1) % STAFF_STATUS_ORDER.length];
-  psSaveJobs();
-  psRenderAllJobViews();
+  psSaveJob(job);
 }
 
 function psDeleteJob(jobId) {
   if (!confirm('Delete this job? This removes it from both Production and Staffing. This can\'t be undone.')) return;
-  JOBS = JOBS.filter(j => j.id !== jobId);
   if (psExpandedProduction === jobId) psExpandedProduction = null;
   if (psExpandedStaffing === jobId) psExpandedStaffing = null;
-  psSaveJobs();
-  psRenderAllJobViews();
+  psDeleteJobRemote(jobId);
 }
 
 function psCreateManualJob(view) {
   const nameEl = document.getElementById('pj-new-name-' + view);
   const dateEl = document.getElementById('pj-new-date-' + view);
   const job = psBlankJob({ jobName: nameEl.value.trim(), eventDate: dateEl.value.trim() });
-  JOBS.push(job);
-  psSaveJobs();
   nameEl.value = ''; dateEl.value = '';
   psExpandedProduction = job.id;
   psExpandedStaffing = job.id;
-  psRenderAllJobViews();
+  psSaveJob(job);
 }
 
 function psUpdateJobField(jobId, field, value) {
   const job = psFindJob(jobId);
   if (!job) return;
   job[field] = value;
-  psSaveJobs();
-  psRenderAllJobViews();
+  psSaveJob(job);
 }
 
 function psUpdateStaffingField(jobId, field, value) {
@@ -1735,7 +1771,7 @@ function psUpdateStaffingField(jobId, field, value) {
   if (!job) return;
   if (!job.staffing) job.staffing = {};
   job.staffing[field] = value;
-  psSaveJobs();
+  psSaveJob(job);
 }
 
 // ─── SHARED JOB CARD HEADER (used by both Production and Staffing) ───
@@ -1904,15 +1940,14 @@ function psAddItemToJob(jobId) {
   }
 
   job.productionItems.push({ recipeId: recipe.id, qty, colors, customLinear, design, location, topperNote, notes: '' });
-  psSaveJobs();
-  psRenderProductionJobs();
+  psSaveJob(job);
 }
 
 function psRemoveItemFromJob(jobId, idx) {
   const job = psFindJob(jobId);
   if (!job) return;
   job.productionItems.splice(idx, 1);
-  psSaveJobs();
+  psSaveJob(job);
   psRenderProductionJobs();
 }
 
@@ -1920,7 +1955,7 @@ function psUpdateItemNotes(jobId, idx, value) {
   const job = psFindJob(jobId);
   if (!job) return;
   job.productionItems[idx].notes = value;
-  psSaveJobs();
+  psSaveJob(job);
 }
 
 // ═══════════════════════════════════════ EVENT SCHEDULE & STAFFING VIEW ═══════════════════════════════════════
@@ -1990,9 +2025,7 @@ async function psHandleInvoiceUpload(fileInput) {
       }
     });
 
-    JOBS.push(job);
-    psSaveJobs();
-    psRenderAllJobViews();
+    psSaveJob(job);
 
     let msg = `Created a new job${job.jobName ? ' for ' + psEscape(job.jobName) : ''} — ${matchedCount} decor item${matchedCount === 1 ? '' : 's'} went to Production, event details went to Staffing.`;
     if (unmatched.length) msg += ` Couldn't auto-match (add manually in Production): ${unmatched.join('; ')}.`;
@@ -2037,9 +2070,13 @@ function showTrip(t, btn) {
 
 // ═══════════════════════════════════════ AUTH GATE ═══════════════════════════════════════
 function handleSignInClick() {
-  window.fbSignInWithPopup().catch(err => {
-    console.error(err);
-    if (err.code !== 'auth/popup-closed-by-user') alert('Sign-in failed: ' + err.message);
+  if (!window.fbSignIn) {
+    alert('Still loading — give it a second and tap Sign in again.');
+    return;
+  }
+  window.fbSignIn().catch(err => {
+    console.error('Sign-in error:', err);
+    alert('Sign-in error: ' + (err.code || err.message || err));
   });
 }
 
@@ -2080,11 +2117,12 @@ window.handleAuthStateChanged = handleAuthStateChanged;
 
 // Everything that used to run immediately on page load now waits until sign-in succeeds.
 function bootApp() {
-  loadSettings();
-  calc();
-  setTopBar('home');
-  psLoadJobs();
-  psRenderAllJobViews();
+  // Jobs is the most important shared feature, so it starts first and on its own —
+  // nothing later in this function can block it from connecting.
+  try { psStartJobsListener(); } catch (e) { console.error('Jobs listener failed to start:', e); }
+  try { loadSettings(); } catch (e) { console.error('loadSettings failed:', e); }
+  try { calc(); } catch (e) { console.error('calc failed:', e); }
+  try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
 }
 </script>
 </body>
