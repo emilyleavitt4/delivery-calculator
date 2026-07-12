@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-title" content="Balloon Calc">
 <title>Balloon Delivery Calculator</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   :root {
     --bg: #f7f7f5;
@@ -77,6 +78,17 @@
   .topbar-left { display: flex; align-items: center; gap: 10px; }
   .topbar-icon { font-size: 18px; color: var(--accent); }
   .topbar h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
+  .app-mode-badge {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    background: var(--accent-light);
+    border: 0.5px solid var(--accent-border);
+    border-radius: 5px;
+    padding: 2px 6px;
+  }
 
   .icon-btn {
     background: none;
@@ -113,6 +125,49 @@
     border-radius: var(--radius);
     padding: 1rem 1.125rem;
     margin-bottom: 0.75rem;
+  }
+
+  /* TOOL GRID (home screen) */
+  .tool-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.7rem;
+  }
+  .tool-tile {
+    aspect-ratio: 1 / 1;
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    text-align: center;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .tool-tile:hover, .tool-tile:active { background: var(--accent-light); border-color: var(--accent-border); }
+  .tool-tile-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-light);
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 17px;
+  }
+  .tool-tile-title { font-size: 12px; font-weight: 600; line-height: 1.25; letter-spacing: -0.1px; }
+  .tool-tile.soon { opacity: 0.45; cursor: default; }
+  .tool-tile.soon:hover, .tool-tile.soon:active { background: var(--surface); border-color: var(--border); }
+  .home-footer-note {
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 1rem;
   }
 
   .card-title {
@@ -495,24 +550,234 @@
   }
   .apply-btn:active { opacity: 0.8; }
   .cpm-formula { font-size: 10px; color: var(--accent); opacity: 0.7; margin-top: 5px; }
+
+  /* PRODUCTION SHEET GENERATOR */
+  .settings-field select {
+    width: 100%;
+    padding: 10px 11px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+  }
+  .settings-field textarea {
+    width: 100%;
+    padding: 10px 11px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    resize: vertical;
+  }
+  .ps-order-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+  }
+  .ps-item-block { margin-bottom: 1.25rem; padding-bottom: 1.25rem; border-bottom: 0.5px solid var(--border); }
+  .ps-item-block:last-of-type { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .ps-sub-row { padding-left: 0.75rem; }
+  .ps-sub-row .label { color: var(--text-tertiary); font-size: 12px; }
+  .ps-sub-row .val { font-size: 13px; }
+
+  .ps-check-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0;
+    border-bottom: 0.5px solid var(--border);
+  }
+  .ps-check-row:last-child { border-bottom: none; }
+  .ps-check-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--accent); }
+  .ps-check-row label { font-size: 14px; flex: 1; }
+  .ps-check-row.done label { text-decoration: line-through; color: var(--text-tertiary); }
+  .ps-build-fields { font-size: 13px; color: var(--text-secondary); line-height: 1.7; margin: 0.5rem 0 0.75rem; }
+  .ps-build-fields b { color: var(--text); font-weight: 600; }
+  .ps-pack-note { font-size: 12px; color: var(--text-tertiary); font-style: italic; margin-top: 0.5rem; }
+  #ps-import-status {
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin-top: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border-radius: var(--radius-sm);
+  }
+  #ps-import-status.ok { background: var(--accent-light); color: var(--accent); }
+  #ps-import-status.warn { background: var(--warning-bg); color: var(--warning-text); }
+
+  /* JOB CARDS (Production & Staffing) */
+  .ps-job-card { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius); margin-bottom: 0.75rem; overflow: hidden; }
+  .ps-job-header { display: flex; align-items: center; gap: 0.6rem; padding: 0.875rem 1rem; cursor: pointer; }
+  .ps-job-header-text { flex: 1; min-width: 0; }
+  .ps-job-name { font-size: 14.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ps-job-date { font-size: 12px; color: var(--text-secondary); margin-top: 1px; }
+  .ps-job-chevron { color: var(--text-tertiary); font-size: 13px; }
+  .ps-job-body { padding: 0 1rem 1.125rem; border-top: 0.5px solid var(--border); }
+  .ps-status-btn {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 5px 9px;
+    border-radius: 999px;
+    border: none;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-family: var(--font);
+  }
+  .ps-status-not_started { background: rgba(153,153,153,0.18); color: var(--text-secondary); }
+  .ps-status-in_progress { background: var(--accent-light); color: var(--accent); }
+  .ps-status-waiting { background: var(--warning-bg); color: var(--warning-text); }
+  .ps-status-completed { background: var(--accent); color: #fff; }
+  .ps-staffstatus-open { background: var(--warning-bg); color: var(--warning-text); }
+  .ps-staffstatus-scheduled { background: var(--accent); color: #fff; }
+
+  @media print {
+    .topbar, .no-print, #ps-production-empty, #ps-staffing-empty { display: none !important; }
+  }
 </style>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
+  import { getFirestore } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAaOVXNBCXXfO_HpuhTOeFi5dDHZ4hCBro",
+    authDomain: "balloon-toolbox.firebaseapp.com",
+    projectId: "balloon-toolbox",
+    storageBucket: "balloon-toolbox.firebasestorage.app",
+    messagingSenderId: "681112943095",
+    appId: "1:681112943095:web:8b28759e1fbf52891516f2"
+  };
+
+  const fbApp = initializeApp(firebaseConfig);
+  const auth = getAuth(fbApp);
+
+  // The rest of the app is a plain (non-module) script, so we hand off the pieces
+  // it needs via window.* — this is the standard, low-risk way to mix a small
+  // Firebase module with the classic script the rest of the app already uses.
+  window.fbAuth = auth;
+  window.fbDb = getFirestore(fbApp);
+  window.fbGoogleProvider = new GoogleAuthProvider();
+  window.fbSignInWithPopup = () => signInWithPopup(auth, window.fbGoogleProvider);
+  window.fbSignOut = () => signOut(auth);
+
+  const ALLOWED_EMAILS = [
+    'emily@utahballooncreations.com',
+    'matthew@utahballooncreations.com',
+    'emilyleavitt4@gmail.com',
+    'mbleavitt@gmail.com'
+  ];
+
+  onAuthStateChanged(auth, (user) => {
+    if (window.handleAuthStateChanged) window.handleAuthStateChanged(user, ALLOWED_EMAILS);
+  });
+</script>
 </head>
 <body>
 <div class="app">
 
+  <!-- AUTH GATE — a full-screen overlay that blocks the app until sign-in succeeds -->
+  <div id="auth-gate" style="position:fixed; inset:0; z-index:9999; background:var(--bg); display:flex; align-items:center; justify-content:center; flex-direction:column; padding:2rem; text-align:center;">
+    <div id="auth-gate-signin">
+      <i class="fa-solid fa-toolbox" style="font-size:32px; color:var(--accent); margin-bottom:1rem; display:block;"></i>
+      <div style="font-size:19px; font-weight:700; margin-bottom:0.4rem;">Balloon Business Toolkit</div>
+      <div style="font-size:14px; color:var(--text-secondary); margin-bottom:1.5rem;">Sign in to continue</div>
+      <button class="save-btn" style="width:auto; padding:12px 28px;" onclick="handleSignInClick()">
+        <i class="fa-brands fa-google"></i> Sign in with Google
+      </button>
+    </div>
+    <div id="auth-gate-denied" style="display:none;">
+      <i class="fa-solid fa-lock" style="font-size:32px; color:var(--warning-text); margin-bottom:1rem; display:block;"></i>
+      <div style="font-size:16px; font-weight:700; margin-bottom:0.4rem;">Not authorized</div>
+      <div style="font-size:14px; color:var(--text-secondary); margin-bottom:1.5rem; max-width:320px;">
+        Signed in as <span id="auth-gate-denied-email" style="font-weight:600; color:var(--text);"></span>, which isn't on the approved list for this app yet.
+      </div>
+      <button class="save-btn" style="width:auto; padding:12px 28px;" onclick="handleSignOutClick()">Sign out and try a different account</button>
+    </div>
+  </div>
+
   <!-- TOP BAR -->
   <div class="topbar">
     <div class="topbar-left">
-      <i class="fa-solid fa-location-dot topbar-icon"></i>
-      <h1>Delivery Calculator</h1>
+      <button class="icon-btn" id="topbar-back" onclick="goBack()" aria-label="Back to tools" style="display:none">
+        <i class="fa-solid fa-arrow-left"></i>
+      </button>
+      <i class="fa-solid fa-toolbox topbar-icon" id="topbar-icon"></i>
+      <h1 id="topbar-title">Balloon Business Toolkit</h1>
+      <span class="app-mode-badge">Admin</span>
     </div>
-    <button class="icon-btn" onclick="showView('settings')" aria-label="Settings">
+    <button class="icon-btn" id="topbar-gear" onclick="showView('settings')" aria-label="Settings" style="display:none">
       <i class="fa-solid fa-gear"></i>
     </button>
   </div>
 
+  <!-- ═══════════════════════════════════════ HOME VIEW -->
+  <div class="view active" id="view-home">
+    <div class="section-label" style="margin-top:0">Your tools</div>
+
+    <div class="tool-grid">
+      <div class="tool-tile" onclick="showView('import')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-file-arrow-up"></i></div>
+        <div class="tool-tile-title">Import Job</div>
+      </div>
+
+      <div class="tool-tile" onclick="showView('calc')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-location-dot"></i></div>
+        <div class="tool-tile-title">Delivery Calculator</div>
+      </div>
+
+      <div class="tool-tile" onclick="showView('production')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-clipboard-list"></i></div>
+        <div class="tool-tile-title">Production Sheets</div>
+      </div>
+
+      <div class="tool-tile" onclick="showView('staffing')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-calendar-days"></i></div>
+        <div class="tool-tile-title">Event Schedule &amp; Staffing</div>
+      </div>
+
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-ruler"></i></div>
+        <div class="tool-tile-title">Quantity Calculator</div>
+      </div>
+
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-tags"></i></div>
+        <div class="tool-tile-title">Job Cost Calculator</div>
+      </div>
+
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-font"></i></div>
+        <div class="tool-tile-title">Letter Styling Calculator</div>
+      </div>
+
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-flask"></i></div>
+        <div class="tool-tile-title">Formulas &amp; Recipes</div>
+      </div>
+
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-boxes-stacked"></i></div>
+        <div class="tool-tile-title">Inventory</div>
+      </div>
+
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-car"></i></div>
+        <div class="tool-tile-title">Vehicle Maintenance Log</div>
+      </div>
+    </div>
+
+    <div class="home-footer-note">More tools coming soon</div>
+  </div><!-- end view-home -->
+
   <!-- ═══════════════════════════════════════ CALCULATOR VIEW -->
-  <div class="view active" id="view-calc">
+  <div class="view" id="view-calc">
 
     <div class="trip-toggle">
       <button class="trip-btn active" onclick="showTrip('delivery',this)">
@@ -717,18 +982,92 @@
 
   </div><!-- end view-calc -->
 
+  <!-- ═══════════════════════════════════════ IMPORT JOB VIEW -->
+  <div class="view" id="view-import">
+    <div class="section-label" style="margin-top:0">Upload invoice</div>
+    <div class="card">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Upload invoice PDF</label>
+        <input type="file" id="ps-invoice-file" accept="application/pdf" onchange="psHandleInvoiceUpload(this)">
+      </div>
+      <div id="ps-import-status" style="display:none;"></div>
+      <div id="ps-import-debug-toggle" style="display:none; margin-top:0.5rem;">
+        <button class="icon-btn" style="font-size:11px; width:auto; padding:4px 8px;" onclick="document.getElementById('ps-import-debug-text').style.display = document.getElementById('ps-import-debug-text').style.display === 'none' ? 'block' : 'none';">
+          <i class="fa-solid fa-code"></i> Show what I read from the PDF
+        </button>
+        <textarea id="ps-import-debug-text" readonly rows="10" style="display:none; width:100%; margin-top:0.5rem; font-family:monospace; font-size:11px; padding:8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--bg); color:var(--text);"></textarea>
+      </div>
+    </div>
+    <div class="home-footer-note">Creates one job — decor items go to Production, event details go to Event Schedule &amp; Staffing.</div>
+  </div><!-- end view-import -->
+
+  <!-- ═══════════════════════════════════════ PRODUCTION VIEW -->
+  <div class="view" id="view-production">
+    <div class="section-label" style="margin-top:0">New job</div>
+    <div class="card no-print">
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0">
+          <label>Client / Event name</label>
+          <input type="text" id="pj-new-name-production" placeholder="e.g. Smith Baby Shower">
+        </div>
+        <div class="settings-field" style="margin-bottom:0">
+          <label>Event date</label>
+          <input type="text" id="pj-new-date-production" placeholder="e.g. July 20, 2026">
+        </div>
+      </div>
+      <button class="save-btn" onclick="psCreateManualJob('production')">Create job</button>
+    </div>
+
+    <div class="section-label">Jobs</div>
+    <div id="ps-production-job-list"></div>
+    <div id="ps-production-empty" class="card" style="text-align:center; color:var(--text-secondary); display:none;">
+      No jobs yet. Import an invoice or start one above.
+    </div>
+  </div><!-- end view-production -->
+
+  <!-- ═══════════════════════════════════════ EVENT SCHEDULE & STAFFING VIEW -->
+  <div class="view" id="view-staffing">
+    <div class="section-label" style="margin-top:0">New job</div>
+    <div class="card no-print">
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0">
+          <label>Client / Event name</label>
+          <input type="text" id="pj-new-name-staffing" placeholder="e.g. Smith Baby Shower">
+        </div>
+        <div class="settings-field" style="margin-bottom:0">
+          <label>Event date</label>
+          <input type="text" id="pj-new-date-staffing" placeholder="e.g. July 20, 2026">
+        </div>
+      </div>
+      <button class="save-btn" onclick="psCreateManualJob('staffing')">Create job</button>
+    </div>
+
+    <div class="section-label">Jobs</div>
+    <div id="ps-staffing-job-list"></div>
+    <div id="ps-staffing-empty" class="card" style="text-align:center; color:var(--text-secondary); display:none;">
+      No jobs yet. Import an invoice or start one above.
+    </div>
+  </div><!-- end view-staffing -->
+
   <!-- ═══════════════════════════════════════ SETTINGS VIEW -->
   <div class="view" id="view-settings">
 
     <div class="settings-back">
-      <button class="icon-btn" onclick="showView('calc')" aria-label="Back">
+      <button class="icon-btn" onclick="goBack()" aria-label="Back">
         <i class="fa-solid fa-arrow-left"></i>
       </button>
       <span>Settings</span>
     </div>
 
+    <!-- ACCOUNT -->
+    <div class="section-label" style="margin-top:0">Account</div>
+    <div class="card">
+      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Signed in as <span id="settings-account-email" style="font-weight:600; color:var(--text);"></span></div>
+      <button class="save-btn" onclick="handleSignOutClick()">Sign out</button>
+    </div>
+
     <!-- BASIC SETTINGS -->
-    <div class="section-label" style="margin-top:0">Vehicle & fuel</div>
+    <div class="section-label">Vehicle & fuel</div>
     <div class="card">
       <div class="settings-field">
         <label>Fuel efficiency (MPG)</label>
@@ -1068,10 +1407,624 @@ document.querySelectorAll('[id$="-onsite-staff"]').forEach(el => {
   el.addEventListener('input', () => { el.dataset.edited = '1'; calc(); });
 });
 
+// Metadata for each screen's top bar: what title/icon to show, and whether
+// the back arrow / gear icon should appear. "showBack: false" on home means
+// there's nowhere further back to go.
+const TOOL_META = {
+  home:       { title: 'Balloon Business Toolkit',    icon: 'fa-solid fa-toolbox',            showBack: false, showGear: false },
+  calc:       { title: 'Delivery Calculator',          icon: 'fa-solid fa-location-dot',       showBack: true,  showGear: true  },
+  import:     { title: 'Import Job',                   icon: 'fa-solid fa-file-arrow-up',      showBack: true,  showGear: false },
+  production: { title: 'Production Sheets',            icon: 'fa-solid fa-clipboard-list',     showBack: true,  showGear: false },
+  staffing:   { title: 'Event Schedule & Staffing',    icon: 'fa-solid fa-calendar-days',      showBack: true,  showGear: false },
+  settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
+};
+
+// Remembers the last tool screen (not settings) so Settings' back button
+// returns to whichever tool opened it, instead of always going to Delivery Calculator.
+let lastToolView = 'calc';
+
+// ═══════════════════════════════════════ PRODUCTION SHEET GENERATOR ═══════════════════════════════════════
+//
+// RECIPES holds the balloon-quantity formulas for each standard item, pulled directly from the
+// Quantity Calc tab of the Master Calculators spreadsheet, matched to the exact item names from
+// the 17hats items/services import file (so they match invoice line items exactly).
+//
+// Two formula types:
+//   'classic'  — a single blended ratio of 8 (11") balloons per linear foot. Only 11" balloons.
+//   'freeform' — each balloon size has its own balloons-per-linear-foot rate (the "rates" object).
+//
+// "linearFt" is the actual construction footage used in the math — for columns this is the
+// column's height; for garlands it's the garland's own length; for arches it's the arch's real
+// linear footage, which is NOT the same as its marketed size (e.g. a "12 ft" arch is actually
+// built using 25 linear feet — that's taken straight from your items sheet's description text).
+const RECIPES = [
+  // ---- COLUMNS ----
+  // All columns get a ~2.5 ft topper automatically (per Emily's rule). Starburst and Number
+  // Stack are exceptions (no topper / 34" topper) but aren't built yet — no formula exists
+  // for them, so they're not in this list.
+  { id:'col-classic-std',  display:'Classic Column - Standard',  category:'Column', style:'Classic',  label:'Classic — Standard (7.5 ft)', formula:'classic',  linearFt:7.5, topperFt:2.5 },
+  { id:'col-classic-xl',   display:'Classic Column - XL',        category:'Column', style:'Classic',  label:'Classic — XL (9.5 ft)',       formula:'classic',  linearFt:9.5, topperFt:2.5 },
+  { id:'col-freeform-std', display:'Freeform Column - Standard', category:'Column', style:'Freeform', label:'Freeform — Standard (7.5 ft)',formula:'freeform', linearFt:7.5, topperFt:2.5, rates:{'5"':6.0,'11"':4.3,'18"':2.0} },
+  { id:'col-freeform-xl',  display:'Freeform Column - XL',       category:'Column', style:'Freeform', label:'Freeform — XL (9.5 ft)',      formula:'freeform', linearFt:9.5, topperFt:2.5, rates:{'5"':6.0,'11"':4.3,'18"':2.0} },
+
+  // ---- GARLANDS (all Freeform) ----
+  { id:'gar-6',      display:'Freeform Garland – 6 ft',     category:'Garland', style:'Freeform', label:'6 ft',  formula:'freeform', linearFt:6,  rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
+  { id:'gar-9',      display:'Freeform Garland – 9 ft',     category:'Garland', style:'Freeform', label:'9 ft',  formula:'freeform', linearFt:9,  rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
+  { id:'gar-12',     display:'Freeform Garland – 12 ft',    category:'Garland', style:'Freeform', label:'12 ft', formula:'freeform', linearFt:12, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
+  { id:'gar-15',     display:'Freeform Garland – 15 ft',    category:'Garland', style:'Freeform', label:'15 ft', formula:'freeform', linearFt:15, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
+  { id:'gar-18',     display:'Freeform Garland – 18 ft',    category:'Garland', style:'Freeform', label:'18 ft', formula:'freeform', linearFt:18, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
+  { id:'gar-21',     display:'Freeform Garland – 21 ft',    category:'Garland', style:'Freeform', label:'21 ft', formula:'freeform', linearFt:21, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
+  { id:'gar-24',     display:'Freeform Garland – 24 ft',    category:'Garland', style:'Freeform', label:'24 ft', formula:'freeform', linearFt:24, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
+  { id:'gar-25plus', display:'Freeform Garland – 25+ ft',   category:'Garland', style:'Freeform', label:'25+ ft (enter footage)', formula:'freeform', customLinear:true, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
+
+  // ---- ARCHES ----
+  { id:'arch-classic-8',   display:'Classic Arch – 8 x 8 ft',   category:'Arch', style:'Classic',  label:'Classic — 8 ft (20 linear)',  formula:'classic', linearFt:20 },
+  { id:'arch-classic-12',  display:'Classic Arch – 12 x 12 ft', category:'Arch', style:'Classic',  label:'Classic — 12 ft (25 linear)', formula:'classic', linearFt:25 },
+  { id:'arch-classic-15',  display:'Classic Arch – 15 ft',      category:'Arch', style:'Classic',  label:'Classic — 15 ft (30 linear)', formula:'classic', linearFt:30 },
+  { id:'arch-classic-20',  display:'Classic Arch – 20 ft',      category:'Arch', style:'Classic',  label:'Classic — 20 ft (35 linear)', formula:'classic', linearFt:35 },
+  { id:'arch-classic-28',  display:'Classic Arch – 28 ft',      category:'Arch', style:'Classic',  label:'Classic — 28 ft (42 linear)', formula:'classic', linearFt:42 },
+  { id:'arch-freeform-8',  display:'Freeform Arch – 8 ft',      category:'Arch', style:'Freeform', label:'Freeform — 8 ft (20 linear)',  formula:'freeform', linearFt:20, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
+  { id:'arch-freeform-12', display:'Freeform Arch – 12 ft',     category:'Arch', style:'Freeform', label:'Freeform — 12 ft (25 linear)', formula:'freeform', linearFt:25, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
+  { id:'arch-freeform-15', display:'Freeform Arch – 15 ft',     category:'Arch', style:'Freeform', label:'Freeform — 15 ft (30 linear)', formula:'freeform', linearFt:30, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
+  { id:'arch-freeform-22', display:'Freeform Arch – 22 ft',     category:'Arch', style:'Freeform', label:'Freeform — 22 ft (35 linear)', formula:'freeform', linearFt:35, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
+  { id:'arch-freeform-28', display:'Freeform Arch – 28 ft',     category:'Arch', style:'Freeform', label:'Freeform — 28 ft (42 linear)', formula:'freeform', linearFt:42, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
+];
+
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+
+// ─── INVOICE IMPORT ───
+//
+// Reads the invoice PDF entirely in the browser (nothing uploaded anywhere), reconstructs
+// readable lines from the PDF's raw text positions, then parses those lines into line items.
+// This was tested against a real invoice before being wired in here.
+
+// pdf.js gives us a flat list of text fragments with X/Y coordinates, not lines — so we group
+// fragments into lines by vertical position. Real PDFs often have tiny vertical jitter between
+// characters on the same visual line (bold text, kerning), so this clusters positions within a
+// few units of each other rather than requiring an exact match.
+async function psExtractPdfText(file) {
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  let fullText = '';
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const items = content.items.slice().sort((a, b) => {
+      const dy = b.transform[5] - a.transform[5];
+      return Math.abs(dy) > 2 ? dy : a.transform[4] - b.transform[4];
+    });
+    const lines = [];
+    let currentLine = [];
+    let currentY = null;
+    items.forEach(item => {
+      if (currentY === null || Math.abs(item.transform[5] - currentY) <= 2) {
+        currentLine.push(item);
+        if (currentY === null) currentY = item.transform[5];
+      } else {
+        lines.push(currentLine);
+        currentLine = [item];
+        currentY = item.transform[5];
+      }
+    });
+    if (currentLine.length) lines.push(currentLine);
+    lines.forEach(lineItems => { fullText += lineItems.map(i => i.str).join(' ') + '\n'; });
+  }
+  return fullText;
+}
+
+// A line like "Freeform Garland – 9 ft   1   $260.00   $260.00" marks the end of an item's
+// name and the start of its Qty/Price/Total. Everything before it (since the last item) is
+// the name; everything after it, up until the NEXT such line, is "Key: Value" detail fields.
+const PS_QTY_LINE_RE = /^(.*?)\s*(\d+)\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})\s*$/;
+const PS_KV_LINE_RE = /^([A-Za-z][A-Za-z \-\/]{1,30}):\s*(.+)$/;
+const PS_STOP_RE = /^(ITEM\s+QUANTITY|Subtotal|Invoice\s*:|Total\s*:|Current .* Tax|Card Processing)/i;
+
+function psParseInvoiceText(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const items = [];
+  let pendingName = [];
+  let current = null;
+  let currentHasDetails = false;
+
+  lines.forEach(line => {
+    if (PS_STOP_RE.test(line)) { current = null; pendingName = []; return; }
+    const qtyMatch = line.match(PS_QTY_LINE_RE);
+    if (qtyMatch) {
+      const inlineName = qtyMatch[1].trim();
+      const fullName = (pendingName.join(' ') + ' ' + inlineName).trim();
+      current = { name: fullName, qty: parseInt(qtyMatch[2], 10), details: {} };
+      items.push(current);
+      pendingName = [];
+      currentHasDetails = false;
+      return;
+    }
+    const kvMatch = line.match(PS_KV_LINE_RE);
+    if (kvMatch && current) {
+      current.details[kvMatch[1].trim()] = kvMatch[2].trim();
+      currentHasDetails = true;
+      return;
+    }
+    // Neither a qty line nor a detail line. If we just created an item and haven't
+    // seen any of its detail fields yet, this is almost certainly the wrapped tail
+    // of ITS name (e.g. "Take Down" landing on its own line right after the price
+    // columns) — not the start of the next item's name.
+    if (current && !currentHasDetails) {
+      current.name = (current.name + ' ' + line).trim();
+    } else {
+      pendingName.push(line);
+    }
+  });
+  return items;
+}
+
+// Treats en-dashes/hyphens and extra whitespace as equivalent so "Freeform Garland – 9 ft"
+// matches even if a PDF renders its dash slightly differently.
+function psNormalize(str) {
+  return str.toLowerCase().replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim();
+}
+
+// Best-effort: your invoices put "From: Utah Balloon Creations" and "To: [client]" as two
+// columns at the same height, so pdf.js often merges them onto shared lines like
+// "Utah Balloon Creations   Just Ingredients." Anchoring on your own business name pulls
+// whatever follows it on that line. Falls back to the old isolated "To" line pattern for
+// any invoice that happens to extract differently.
+function psExtractClientName(text) {
+  const lines = text.split('\n').map(l => l.trim());
+  const marker = 'Utah Balloon Creations';
+  for (const line of lines) {
+    const idx = line.indexOf(marker);
+    if (idx >= 0) {
+      const after = line.slice(idx + marker.length).trim();
+      if (after) return after;
+    }
+  }
+  const toIdx = lines.findIndex(l => l === 'To');
+  return (toIdx >= 0 && lines[toIdx + 1]) ? lines[toIdx + 1] : '';
+}
+
+function psEscape(str) {
+  const div = document.createElement('div');
+  div.textContent = str || '';
+  return div.innerHTML;
+}
+
+// Sizes always listed big to small, matching how you read a pull list.
+const SIZE_ORDER = ['36"', '24"', '18"', '11"', '5"'];
+
+// Every color gets the SAME count, rounded UP — so a 3-color split of 40.5 balloons becomes
+// 14/14/14 (42 total) rather than an uneven 14/14/13. This intentionally builds in a small
+// buffer per color, matching "pack extras of each size/color."
+function psColorCount(total, numColors) {
+  return Math.ceil(total / numColors);
+}
+
+// How much height a topper takes off the balloon-spiral body — read directly from each
+// recipe's own topperFt (2.5 ft for standard columns, 0 for anything without a topper).
+function psComputeTotals(recipe, qty, customLinear) {
+  let linear = recipe.customLinear ? customLinear : recipe.linearFt;
+  if (recipe.topperFt) linear = Math.max(0, linear - recipe.topperFt);
+  const totalLinear = linear * qty;
+  const totals = {};
+  if (recipe.formula === 'classic') {
+    totals['11"'] = Math.ceil(totalLinear * 8);
+  } else {
+    Object.keys(recipe.rates).forEach(size => {
+      const v = recipe.rates[size] * totalLinear;
+      if (v > 0.001) totals[size] = Math.ceil(v);
+    });
+  }
+  return totals;
+}
+
+// ═══════════════════════════════════════ JOBS (shared by Production & Staffing) ═══════════════════════════════════════
+//
+// A "Job" is one client/event. It holds two independent halves of data — productionItems
+// (decor + math, shown in Production) and staffing (event logistics, shown in Event Schedule
+// & Staffing) — plus a shared status. Jobs persist in localStorage so they build up into a
+// real, ongoing schedule rather than resetting each session.
+
+const STATUS_ORDER = ['not_started', 'in_progress', 'waiting', 'completed'];
+const STATUS_LABELS = { not_started: 'Not Started', in_progress: 'In Progress', waiting: 'Waiting', completed: 'Completed' };
+
+// Staffing tracks a different thing than Production — whether the crew is locked in yet,
+// not build progress — so it gets its own, simpler two-state status.
+const STAFF_STATUS_ORDER = ['open', 'scheduled'];
+const STAFF_STATUS_LABELS = { open: 'Open Availability', scheduled: 'Scheduled' };
+
+let JOBS = [];
+let psExpandedProduction = null;
+let psExpandedStaffing = null;
+
+function psLoadJobs() {
+  try { JOBS = JSON.parse(localStorage.getItem('bdc_v3_jobs') || '[]'); } catch (e) { JOBS = []; }
+}
+function psSaveJobs() {
+  try { localStorage.setItem('bdc_v3_jobs', JSON.stringify(JOBS)); } catch (e) {}
+}
+function psNewJobId() {
+  return 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+function psFindJob(jobId) {
+  return JOBS.find(j => j.id === jobId);
+}
+function psBlankJob(overrides) {
+  return Object.assign({
+    id: psNewJobId(),
+    jobName: '',
+    eventDate: '',
+    status: 'not_started',
+    staffingStatus: 'open',
+    createdAt: Date.now(),
+    staffing: { setupTime: '', eventStartTime: '', eventTakeDown: '', eventLocation: '', dayOfContact: '', notes: '' },
+    productionItems: []
+  }, overrides || {});
+}
+
+// Jobs with a real, parseable date sort chronologically first; anything without a usable
+// date (blank, or free text that isn't a date) sorts to the bottom by creation order.
+function psJobDateValue(job) {
+  if (!job.eventDate) return null;
+  const d = new Date(job.eventDate);
+  return isNaN(d.getTime()) ? null : d.getTime();
+}
+function psSortedJobs() {
+  return [...JOBS].sort((a, b) => {
+    const da = psJobDateValue(a), db = psJobDateValue(b);
+    if (da === null && db === null) return a.createdAt - b.createdAt;
+    if (da === null) return 1;
+    if (db === null) return -1;
+    return da - db;
+  });
+}
+
+function psRenderAllJobViews() {
+  psRenderProductionJobs();
+  psRenderStaffingJobs();
+}
+
+function psCycleStatus(jobId) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  job.status = STATUS_ORDER[(STATUS_ORDER.indexOf(job.status) + 1) % STATUS_ORDER.length];
+  psSaveJobs();
+  psRenderAllJobViews();
+}
+
+function psCycleStaffStatus(jobId) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const current = job.staffingStatus || 'open';
+  job.staffingStatus = STAFF_STATUS_ORDER[(STAFF_STATUS_ORDER.indexOf(current) + 1) % STAFF_STATUS_ORDER.length];
+  psSaveJobs();
+  psRenderAllJobViews();
+}
+
+function psDeleteJob(jobId) {
+  if (!confirm('Delete this job? This removes it from both Production and Staffing. This can\'t be undone.')) return;
+  JOBS = JOBS.filter(j => j.id !== jobId);
+  if (psExpandedProduction === jobId) psExpandedProduction = null;
+  if (psExpandedStaffing === jobId) psExpandedStaffing = null;
+  psSaveJobs();
+  psRenderAllJobViews();
+}
+
+function psCreateManualJob(view) {
+  const nameEl = document.getElementById('pj-new-name-' + view);
+  const dateEl = document.getElementById('pj-new-date-' + view);
+  const job = psBlankJob({ jobName: nameEl.value.trim(), eventDate: dateEl.value.trim() });
+  JOBS.push(job);
+  psSaveJobs();
+  nameEl.value = ''; dateEl.value = '';
+  psExpandedProduction = job.id;
+  psExpandedStaffing = job.id;
+  psRenderAllJobViews();
+}
+
+function psUpdateJobField(jobId, field, value) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  job[field] = value;
+  psSaveJobs();
+  psRenderAllJobViews();
+}
+
+function psUpdateStaffingField(jobId, field, value) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  if (!job.staffing) job.staffing = {};
+  job.staffing[field] = value;
+  psSaveJobs();
+}
+
+// ─── SHARED JOB CARD HEADER (used by both Production and Staffing) ───
+function psStatusBtnHtml(job, view) {
+  if (view === 'staffing') {
+    const s = job.staffingStatus || 'open';
+    return `<button class="ps-status-btn ps-staffstatus-${s}" onclick="event.stopPropagation(); psCycleStaffStatus('${job.id}')">${STAFF_STATUS_LABELS[s]}</button>`;
+  }
+  return `<button class="ps-status-btn ps-status-${job.status}" onclick="event.stopPropagation(); psCycleStatus('${job.id}')">${STATUS_LABELS[job.status]}</button>`;
+}
+function psJobHeaderHtml(job, view, expanded) {
+  const deleteBtn = `<button class="icon-btn" onclick="event.stopPropagation(); psDeleteJob('${job.id}')" aria-label="Delete job"><i class="fa-solid fa-trash"></i></button>`;
+  return `<div class="ps-job-header" onclick="psToggleExpand('${view}','${job.id}')">
+    <div class="ps-job-header-text">
+      <div class="ps-job-name">${psEscape(job.jobName) || '(untitled job)'}</div>
+      <div class="ps-job-date">${psEscape(job.eventDate) || 'No date set'}</div>
+    </div>
+    ${psStatusBtnHtml(job, view)}
+    ${deleteBtn}
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} ps-job-chevron"></i>
+  </div>`;
+}
+function psToggleExpand(view, jobId) {
+  if (view === 'production') {
+    psExpandedProduction = (psExpandedProduction === jobId) ? null : jobId;
+    psRenderProductionJobs();
+  } else {
+    psExpandedStaffing = (psExpandedStaffing === jobId) ? null : jobId;
+    psRenderStaffingJobs();
+  }
+}
+
+// ═══════════════════════════════════════ PRODUCTION VIEW ═══════════════════════════════════════
+function psItemOptionsHtml() {
+  const groups = {};
+  RECIPES.forEach(r => { (groups[r.category] = groups[r.category] || []).push(r); });
+  return Object.keys(groups).map(cat =>
+    `<optgroup label="${cat}s">` + groups[cat].map(r => `<option value="${r.id}">${psEscape(r.label)}</option>`).join('') + `</optgroup>`
+  ).join('');
+}
+
+function psRenderProductionJobs() {
+  const container = document.getElementById('ps-production-job-list');
+  const empty = document.getElementById('ps-production-empty');
+  const jobs = psSortedJobs();
+  if (jobs.length === 0) { container.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  container.innerHTML = jobs.map(job => {
+    const expanded = psExpandedProduction === job.id;
+    const body = expanded ? `<div class="ps-job-body">${psProductionBodyHtml(job)}</div>` : '';
+    return `<div class="ps-job-card">${psJobHeaderHtml(job, 'production', expanded)}${body}</div>`;
+  }).join('');
+  if (psExpandedProduction) psItemFieldsChanged(psExpandedProduction);
+}
+
+function psProductionBodyHtml(job) {
+  let html = '';
+
+  html += `<div class="section-label" style="margin-top:0.75rem;">Pull</div>`;
+  if (job.productionItems.length === 0) {
+    html += `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.5rem;">No items yet — add one below.</div>`;
+  } else {
+    job.productionItems.forEach(line => {
+      const r = RECIPES.find(x => x.id === line.recipeId);
+      if (!r) return;
+      const totals = psComputeTotals(r, line.qty, line.customLinear);
+      const nColors = line.colors.length;
+      html += `<div style="font-size:14px; font-weight:700; margin-bottom:2px;">${psEscape(r.display)} <span style="font-weight:400; color:var(--text-secondary);">× ${line.qty}</span></div>`;
+      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.3rem;">Colors: ${psEscape(line.colors.join(' / '))}</div>`;
+      SIZE_ORDER.forEach(size => {
+        if (!totals[size]) return;
+        const perColor = psColorCount(totals[size], nColors);
+        const text = nColors > 1 ? `${perColor} – ${size} of each color` : `${perColor} – ${size}`;
+        html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>${text}</label></div>`;
+      });
+      if (line.topperNote) {
+        html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>Topper: ${psEscape(line.topperNote)}</label></div>`;
+      }
+    });
+    html += `<div class="ps-pack-note">Pack extras of each size/color.</div>`;
+  }
+
+  if (job.productionItems.length > 0) {
+    html += `<div class="section-label">Inflate &amp; build</div>`;
+    job.productionItems.forEach((line, idx) => {
+      const r = RECIPES.find(x => x.id === line.recipeId);
+      if (!r) return;
+      html += `<div class="ps-item-block">`;
+      html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
+        <div style="font-size:14px; font-weight:700;">${psEscape(r.display)}</div>
+        <button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>
+      </div>`;
+      html += `<div class="ps-build-fields">`;
+      html += `<b>Size:</b> ${psEscape(r.label)}<br><b>Qty:</b> ${line.qty}<br><b>Style:</b> ${psEscape(r.style || r.category)}<br>`;
+      if (r.topperFt) html += `<b>Topper:</b> ~${r.topperFt} ft included${line.topperNote ? ' (' + psEscape(line.topperNote) + ')' : ''}<br>`;
+      if (line.design) html += `<b>Design:</b> ${psEscape(line.design)}<br>`;
+      if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
+      html += `</div>`;
+      html += `<div class="settings-field no-print" style="margin-top:0.5rem;">
+        <label>Build notes</label>
+        <textarea rows="2" placeholder="Add construction notes..." onchange="psUpdateItemNotes('${job.id}', ${idx}, this.value)">${line.notes ? psEscape(line.notes) : ''}</textarea>
+      </div>`;
+      html += `</div>`;
+    });
+  }
+
+  html += `<div class="no-print">`;
+  html += `<div class="section-label">Add an item</div>`;
+  html += `<div class="settings-field">
+    <label>Item</label>
+    <select id="pi-item-${job.id}" onchange="psItemFieldsChanged('${job.id}')">${psItemOptionsHtml()}</select>
+  </div>`;
+  html += `<div class="settings-field" id="pi-linear-field-${job.id}" style="display:none">
+    <label>Actual footage</label>
+    <input type="number" id="pi-linear-${job.id}" inputmode="decimal" placeholder="e.g. 30">
+  </div>`;
+  html += `<div class="row">
+    <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" id="pi-qty-${job.id}" value="1" min="1" inputmode="numeric"></div>
+    <div class="settings-field" style="margin-bottom:0"><label>Colors</label><input type="text" id="pi-colors-${job.id}" placeholder="White, Pink, Fuchsia"></div>
+  </div>`;
+  html += `<div class="row">
+    <div class="settings-field" style="margin-bottom:0"><label>Design (optional)</label><input type="text" id="pi-design-${job.id}" placeholder="e.g. Small Color Block"></div>
+    <div class="settings-field" style="margin-bottom:0"><label>Location (optional)</label><input type="text" id="pi-location-${job.id}" placeholder="e.g. Indoor"></div>
+  </div>`;
+  html += `<div id="pi-topper-field-${job.id}" style="display:none">
+    <div class="settings-field" style="margin-bottom:0"><label>Topper balloons (optional note)</label><input type="text" id="pi-topper-${job.id}" placeholder="e.g. 2 – 36in jumbo"></div>
+  </div>`;
+  html += `<button class="save-btn" onclick="psAddItemToJob('${job.id}')">Add to order</button>`;
+
+  html += `<div class="section-label">Job details</div>
+  <div class="row">
+    <div class="settings-field" style="margin-bottom:0"><label>Client / Event name</label><input type="text" value="${psEscape(job.jobName)}" onchange="psUpdateJobField('${job.id}','jobName',this.value)"></div>
+    <div class="settings-field" style="margin-bottom:0"><label>Event date</label><input type="text" value="${psEscape(job.eventDate)}" onchange="psUpdateJobField('${job.id}','eventDate',this.value)"></div>
+  </div></div>`;
+
+  if (job.productionItems.length > 0) {
+    html += `<button class="save-btn no-print" onclick="window.print()"><i class="fa-solid fa-print"></i> Print / Save as PDF</button>`;
+  }
+
+  return html;
+}
+
+function psItemFieldsChanged(jobId) {
+  const sel = document.getElementById('pi-item-' + jobId);
+  if (!sel) return;
+  const r = RECIPES.find(x => x.id === sel.value);
+  document.getElementById('pi-linear-field-' + jobId).style.display = (r && r.customLinear) ? 'block' : 'none';
+  document.getElementById('pi-topper-field-' + jobId).style.display = (r && r.category === 'Column') ? 'block' : 'none';
+}
+
+function psAddItemToJob(jobId) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const recipe = RECIPES.find(r => r.id === document.getElementById('pi-item-' + jobId).value);
+  const qty = parseFloat(document.getElementById('pi-qty-' + jobId).value) || 1;
+  const colorsRaw = document.getElementById('pi-colors-' + jobId).value.trim();
+  const colors = colorsRaw ? colorsRaw.split(',').map(c => c.trim()).filter(Boolean) : ['Unspecified'];
+  const design = document.getElementById('pi-design-' + jobId).value.trim();
+  const location = document.getElementById('pi-location-' + jobId).value.trim();
+  const topperNote = recipe.category === 'Column' ? document.getElementById('pi-topper-' + jobId).value.trim() : '';
+
+  let customLinear = null;
+  if (recipe.customLinear) {
+    customLinear = parseFloat(document.getElementById('pi-linear-' + jobId).value);
+    if (!customLinear || customLinear <= 0) { alert('Enter the actual footage for this garland.'); return; }
+  }
+
+  job.productionItems.push({ recipeId: recipe.id, qty, colors, customLinear, design, location, topperNote, notes: '' });
+  psSaveJobs();
+  psRenderProductionJobs();
+}
+
+function psRemoveItemFromJob(jobId, idx) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  job.productionItems.splice(idx, 1);
+  psSaveJobs();
+  psRenderProductionJobs();
+}
+
+function psUpdateItemNotes(jobId, idx, value) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  job.productionItems[idx].notes = value;
+  psSaveJobs();
+}
+
+// ═══════════════════════════════════════ EVENT SCHEDULE & STAFFING VIEW ═══════════════════════════════════════
+function psRenderStaffingJobs() {
+  const container = document.getElementById('ps-staffing-job-list');
+  const empty = document.getElementById('ps-staffing-empty');
+  const jobs = psSortedJobs();
+  if (jobs.length === 0) { container.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  container.innerHTML = jobs.map(job => {
+    const expanded = psExpandedStaffing === job.id;
+    const body = expanded ? `<div class="ps-job-body">${psStaffingBodyHtml(job)}</div>` : '';
+    return `<div class="ps-job-card">${psJobHeaderHtml(job, 'staffing', expanded)}${body}</div>`;
+  }).join('');
+}
+
+function psStaffingBodyHtml(job) {
+  const s = job.staffing || {};
+  let html = `<div class="row" style="margin-top:0.75rem;">
+    <div class="settings-field" style="margin-bottom:0.75rem"><label>Client / Event name</label><input type="text" value="${psEscape(job.jobName)}" onchange="psUpdateJobField('${job.id}','jobName',this.value)"></div>
+    <div class="settings-field" style="margin-bottom:0.75rem"><label>Event date</label><input type="text" value="${psEscape(job.eventDate)}" onchange="psUpdateJobField('${job.id}','eventDate',this.value)"></div>
+  </div>`;
+  [['setupTime', 'Setup time'], ['eventStartTime', 'Event start time'], ['eventTakeDown', 'Event take-down'],
+   ['eventLocation', 'Event location'], ['dayOfContact', 'Day-of contact']].forEach(([key, label]) => {
+    html += `<div class="settings-field"><label>${label}</label><input type="text" value="${psEscape(s[key] || '')}" onchange="psUpdateStaffingField('${job.id}','${key}',this.value)"></div>`;
+  });
+  html += `<div class="settings-field" style="margin-bottom:0"><label>Notes</label><textarea rows="2" onchange="psUpdateStaffingField('${job.id}','notes',this.value)">${psEscape(s.notes || '')}</textarea></div>`;
+  return html;
+}
+
+// ═══════════════════════════════════════ INVOICE IMPORT → creates a Job ═══════════════════════════════════════
+async function psHandleInvoiceUpload(fileInput) {
+  const file = fileInput.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('ps-import-status');
+  statusEl.style.display = 'block';
+  statusEl.className = '';
+  statusEl.textContent = 'Reading invoice…';
+
+  try {
+    const text = await psExtractPdfText(file);
+    document.getElementById('ps-import-debug-text').value = text;
+    document.getElementById('ps-import-debug-toggle').style.display = 'block';
+    const parsedItems = psParseInvoiceText(text);
+    const job = psBlankJob({ jobName: psExtractClientName(text) });
+
+    let matchedCount = 0;
+    const unmatched = [];
+
+    parsedItems.forEach(pItem => {
+      if (pItem.details['Event Date']) {
+        job.eventDate = pItem.details['Event Date'];
+        job.staffing.setupTime = pItem.details['Setup Time'] || '';
+        job.staffing.eventStartTime = pItem.details['Event Start Time'] || '';
+        job.staffing.eventTakeDown = pItem.details['Event Take Down'] || '';
+        job.staffing.eventLocation = pItem.details['Event Location'] || '';
+        job.staffing.dayOfContact = pItem.details['Day-of Contact'] || '';
+        return;
+      }
+      const recipe = RECIPES.find(r => psNormalize(r.display) === psNormalize(pItem.name));
+      if (recipe) {
+        const colors = pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : ['Unspecified'];
+        job.productionItems.push({ recipeId: recipe.id, qty: pItem.qty, colors, customLinear: null, design: '', location: pItem.details['Location'] || '', topperNote: '', notes: '' });
+        matchedCount++;
+      } else {
+        unmatched.push(`${pItem.name} × ${pItem.qty}`);
+      }
+    });
+
+    JOBS.push(job);
+    psSaveJobs();
+    psRenderAllJobViews();
+
+    let msg = `Created a new job${job.jobName ? ' for ' + psEscape(job.jobName) : ''} — ${matchedCount} decor item${matchedCount === 1 ? '' : 's'} went to Production, event details went to Staffing.`;
+    if (unmatched.length) msg += ` Couldn't auto-match (add manually in Production): ${unmatched.join('; ')}.`;
+    statusEl.textContent = msg;
+    statusEl.className = unmatched.length ? 'warn' : 'ok';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "Couldn't read that PDF. Try again, or start a new job manually.";
+    statusEl.className = 'warn';
+  }
+  fileInput.value = '';
+}
+
 function showView(v) {
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.getElementById('view-' + v).classList.add('active');
   window.scrollTo(0, 0);
+  if (v !== 'settings') lastToolView = v;
+  setTopBar(v);
+}
+
+function setTopBar(v) {
+  const meta = TOOL_META[v] || TOOL_META.home;
+  document.getElementById('topbar-title').textContent = meta.title;
+  document.getElementById('topbar-icon').className = meta.icon + ' topbar-icon';
+  document.getElementById('topbar-back').style.display = meta.showBack ? 'flex' : 'none';
+  document.getElementById('topbar-gear').style.display = meta.showGear ? 'flex' : 'none';
+}
+
+function goBack() {
+  const inSettings = document.getElementById('view-settings').classList.contains('active');
+  showView(inSettings ? lastToolView : 'home');
 }
 
 function showTrip(t, btn) {
@@ -1082,8 +2035,57 @@ function showTrip(t, btn) {
   });
 }
 
-loadSettings();
-calc();
+// ═══════════════════════════════════════ AUTH GATE ═══════════════════════════════════════
+function handleSignInClick() {
+  window.fbSignInWithPopup().catch(err => {
+    console.error(err);
+    if (err.code !== 'auth/popup-closed-by-user') alert('Sign-in failed: ' + err.message);
+  });
+}
+
+function handleSignOutClick() {
+  window.fbSignOut();
+}
+
+// Called every time sign-in state changes (on load, after sign-in, after sign-out).
+function handleAuthStateChanged(user, allowedEmails) {
+  const gate = document.getElementById('auth-gate');
+  const signinBox = document.getElementById('auth-gate-signin');
+  const deniedBox = document.getElementById('auth-gate-denied');
+
+  if (!user) {
+    gate.style.display = 'flex';
+    signinBox.style.display = 'block';
+    deniedBox.style.display = 'none';
+    return;
+  }
+  if (!allowedEmails.includes(user.email)) {
+    gate.style.display = 'flex';
+    signinBox.style.display = 'none';
+    deniedBox.style.display = 'block';
+    document.getElementById('auth-gate-denied-email').textContent = user.email;
+    return;
+  }
+
+  // Signed in AND on the approved list — let them in.
+  gate.style.display = 'none';
+  const emailEl = document.getElementById('settings-account-email');
+  if (emailEl) emailEl.textContent = user.email;
+  if (!window.__appBooted) {
+    window.__appBooted = true;
+    bootApp();
+  }
+}
+window.handleAuthStateChanged = handleAuthStateChanged;
+
+// Everything that used to run immediately on page load now waits until sign-in succeeds.
+function bootApp() {
+  loadSettings();
+  calc();
+  setTopBar('home');
+  psLoadJobs();
+  psRenderAllJobViews();
+}
 </script>
 </body>
 </html>
