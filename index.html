@@ -99,6 +99,7 @@
     font-size: 20px;
     display: flex;
     align-items: center;
+    gap: 6px;
     border-radius: var(--radius-sm);
     transition: background 0.15s;
   }
@@ -793,6 +794,12 @@
   window.fbLoadJccQuickAdd = () => getDoc(jccQuickAddDocRef);
   window.fbSaveJccQuickAdd = (data) => setDoc(jccQuickAddDocRef, data);
 
+  // Helium Cost Calculator — tank economics + per-size/shape helium costs, business-wide
+  // reference data like Formulas, and read by the Job Cost Calculator's item type-ahead.
+  const heliumDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'heliumCalc');
+  window.fbLoadHeliumCalc = () => getDoc(heliumDocRef);
+  window.fbSaveHeliumCalc = (data) => setDoc(heliumDocRef, data);
+
   // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
   // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
   const customRecipesRef = collection(db, 'businesses', BUSINESS_ID, 'customRecipes');
@@ -896,6 +903,11 @@
       <div class="tool-tile" onclick="showView('jobcost')">
         <div class="tool-tile-icon"><i class="fa-solid fa-tags"></i></div>
         <div class="tool-tile-title">Job Cost Calculator</div>
+      </div>
+
+      <div class="tool-tile" onclick="showView('helium')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-wind"></i></div>
+        <div class="tool-tile-title">Helium Cost Calculator</div>
       </div>
 
       <div class="tool-tile" onclick="showView('letters')">
@@ -1253,6 +1265,16 @@
   <div class="view" id="view-jobcost">
     <div id="jcc-root"></div>
   </div><!-- end view-jobcost -->
+
+  <!-- ═══════════════════════════════════════ HELIUM COST CALCULATOR VIEW -->
+  <!-- Tank economics (capacity, tank cost, monthly rental, delivery, hazmat, tax) roll up into
+       a cost-per-cubic-foot rate, which then prices out each latex size and specialty shape by
+       its helium capacity — all sourced from and verified against the Job Cost Sandbox tab's
+       own numbers. Its computed per-balloon costs feed into the Job Cost Calculator's item
+       type-ahead via heAllItems(), alongside raw materials and Quick Add products. -->
+  <div class="view" id="view-helium">
+    <div id="he-root"></div>
+  </div><!-- end view-helium -->
 
   <!-- ═══════════════════════════════════════ SETTINGS VIEW -->
   <div class="view" id="view-settings">
@@ -1639,6 +1661,7 @@ const TOOL_META = {
   'inventory-latex': { title: 'Latex Inventory',        icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: false },
   letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: false },
   jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: false },
+  helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
 };
 
@@ -3991,14 +4014,16 @@ function jccPricePerItem(item) {
   const count = item.count > 0 ? item.count : 1;
   return jccAvgCost(item) / count;
 }
-// Merges the raw-materials catalog with user-saved Quick Add products into one list for the
-// item type-ahead, so typing a saved product's name (e.g. "hifloated balloon") surfaces it
-// right alongside raw materials like "EMT". Quick Add entries already carry their own flat
-// cost — no averaging needed since jccSaveAsQuickAdd captured it as a single number.
+// Merges the raw-materials catalog, user-saved Quick Add products, and the Helium Cost
+// Calculator's per-balloon helium costs into one list for the item type-ahead, so typing a
+// saved product's name (e.g. "hifloated balloon") or a helium size/shape surfaces it right
+// alongside raw materials like "EMT". Quick Add and helium entries already carry their own
+// flat cost — no averaging needed.
 function jccAllCatalogItems() {
   const raw = JCC_CATALOG.map(item => ({ ...item, pricePerItem: jccPricePerItem(item) }));
   const quickAdd = JCC_QUICK_ADD.map(item => ({ ...item, unit: 'product', pricePerItem: item.cost }));
-  return quickAdd.concat(raw);
+  const helium = (typeof heAllItems === 'function') ? heAllItems() : [];
+  return quickAdd.concat(helium, raw);
 }
 
 function jccInit() {
@@ -4127,7 +4152,7 @@ function jccRenderRows() {
         ${jccState.rows.map(row => jccRowHtml(row)).join('')}`
       : `<div style="text-align:center; color:var(--text-secondary); padding:6px 0;">No items yet — add one below.</div>`}
     <div style="display:flex; justify-content:space-between; align-items:center; margin:8px 0 2px; gap:8px;">
-      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="jccAddRow()"><i class="fa-solid fa-plus"></i> Add item</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="jccAddRow()"><i class="fa-solid fa-plus"></i> Add line</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="jccSaveAsQuickAdd()"><i class="fa-solid fa-bookmark"></i> Save as Quick Add</button>
     </div>
     <div class="jcc-summary-row" style="border-top:0.5px solid var(--border); margin-top:6px; padding-top:8px;"><span>Material cost</span><b id="jcc-material-cost">$0.00</b></div>
@@ -4307,9 +4332,10 @@ function jccHideItemSuggestionsSoon(rowId) {
 // labor — labor here is tracked per job, not per sub-item.
 function jccSaveAsQuickAdd() {
   const totalMaterialCost = jccComputeTotals().totalMaterialCost;
-  const name = prompt('Name this product (e.g. "Hifloated 11" Balloon"):');
-  if (!name || !name.trim()) return;
-  JCC_QUICK_ADD.push({ id: 'quickadd_' + (++jccQuickAddSeq), name: name.trim(), cost: Math.round(totalMaterialCost * 100) / 100 });
+  const entered = prompt('Name this product:');
+  if (entered === null) return; // Cancel — abort entirely, unlike an empty OK below.
+  const name = entered.trim() || 'Untitled';
+  JCC_QUICK_ADD.push({ id: 'quickadd_' + (++jccQuickAddSeq), name, cost: Math.round(totalMaterialCost * 100) / 100 });
   jccRenderQuickAdd();
   window.fbSaveJccQuickAdd({ items: JCC_QUICK_ADD }).catch(err => console.error('Quick Add save failed:', err));
 }
@@ -4321,11 +4347,19 @@ function jccRenderQuickAdd() {
     ? `<div style="text-align:center; color:var(--text-secondary); padding:4px 0;">Nothing saved yet — use "Save as Quick Add" above to add your first one.</div>`
     : JCC_QUICK_ADD.map(item => `
         <div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:0.5px solid var(--border);">
-          <div style="flex:1; font-size:13px;">${psEscape(item.name)}</div>
+          <input type="text" style="flex:1; min-width:0; font-size:13px; padding:6px 8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--bg); color:var(--text); font-family:var(--font);" value="${invAttr(item.name)}" onchange="jccUpdateQuickAddName('${item.id}', this.value)">
           <div>$<input type="number" step="0.01" min="0" class="jcc-inline-input" style="width:60px;" value="${item.cost}" onchange="jccUpdateQuickAddCost('${item.id}', this.value)"></div>
           <div class="jcc-col-del" onclick="jccRemoveQuickAdd('${item.id}')"><i class="fa-solid fa-trash"></i></div>
         </div>
       `).join('');
+}
+
+function jccUpdateQuickAddName(itemId, value) {
+  const item = JCC_QUICK_ADD.find(i => i.id === itemId);
+  if (!item) return;
+  item.name = value.trim() || 'Untitled';
+  jccRenderQuickAdd();
+  window.fbSaveJccQuickAdd({ items: JCC_QUICK_ADD }).catch(err => console.error('Quick Add save failed:', err));
 }
 
 function jccUpdateQuickAddCost(itemId, value) {
@@ -4420,6 +4454,186 @@ function jccUnlockAdmin() {
 function jccLockAdmin() {
   invAdminUnlocked = false;
   jccRenderShell();
+}
+
+// ═══════════════════════════════════════ HELIUM COST CALCULATOR VIEW ═══════════════════════════════════════
+//
+// Tank economics (capacity, tank cost, monthly rental, delivery fee, hazmat fee, tax) roll up
+// into a cost-per-cubic-foot rate — verified against the Job Cost Sandbox tab's own numbers:
+// Subtotal = tank + delivery + hazmat (rental is excluded here — it's a recurring monthly
+// cost, not tied to a single tank fill). Tax applies to that subtotal. Total = subtotal + tax
+// + rental. Cost per cu ft = Total ÷ tank capacity. Each latex size / specialty shape then
+// costs its helium capacity (cu ft) × that rate. heAllItems() exposes the computed per-balloon
+// costs to the Job Cost Calculator's item type-ahead (see jccAllCatalogItems below).
+
+const HE_SIZES_DEFAULTS = [
+  { id: 'he-lat-11',      category: 'latex',     name: '11"',                capacity: 0.5 },
+  { id: 'he-lat-18',      category: 'latex',     name: '18"',                capacity: 2 },
+  { id: 'he-lat-24',      category: 'latex',     name: '24"',                capacity: 5 },
+  { id: 'he-lat-36',      category: 'latex',     name: '36"',                capacity: 8 },
+  { id: 'he-spec-std18',  category: 'specialty', name: 'Standard 18"',       capacity: 0.5 },
+  { id: 'he-spec-orbz',   category: 'specialty', name: 'Orbz',               capacity: 1.13 },
+  { id: 'he-spec-jumbo',  category: 'specialty', name: 'Jumbo Shape',        capacity: 2.65 },
+  { id: 'he-spec-letter', category: 'specialty', name: 'Letter/Number',      capacity: 1.5 },
+  { id: 'he-spec-star18', category: 'specialty', name: 'Standard Star 18"',  capacity: 0.6 },
+  { id: 'he-spec-bobo',   category: 'specialty', name: 'Bobo',               capacity: 1.2 },
+];
+
+let HE_SIZES = JSON.parse(JSON.stringify(HE_SIZES_DEFAULTS));
+let heRowSeq = 0;
+let HE_STATE = null;
+
+function heComputeTotals() {
+  const s = HE_STATE;
+  const subtotal = s.tankCost + s.deliveryFee + s.hazmatFee;
+  const tax = subtotal * (s.taxPct / 100);
+  const total = subtotal + tax + s.rentalPerMonth;
+  const costPerCuFt = s.tankCuFt > 0 ? total / s.tankCuFt : 0;
+  return { subtotal, tax, total, costPerCuFt };
+}
+function heSizeCost(item) {
+  return heComputeTotals().costPerCuFt * item.capacity;
+}
+
+// Exposes the computed per-balloon helium costs to the Job Cost Calculator's item type-ahead
+// (see jccAllCatalogItems), prefixed so "Helium — 11"" reads distinctly from the raw "11"
+// standard" latex balloon already in that catalog.
+function heAllItems() {
+  if (!HE_STATE) return [];
+  const costPerCuFt = heComputeTotals().costPerCuFt;
+  return HE_SIZES.map(item => ({
+    id: item.id,
+    name: 'Helium — ' + item.name,
+    unit: 'balloon',
+    pricePerItem: costPerCuFt * item.capacity,
+  }));
+}
+
+function heInit() {
+  HE_STATE = { tankCuFt: 292, tankCost: 359.99, rentalPerMonth: 45.00, deliveryFee: 16.99, hazmatFee: 7.99, taxPct: 7.45 };
+  heRenderShell();
+
+  window.fbLoadHeliumCalc().then(snap => {
+    if (snap.exists()) {
+      const d = snap.data();
+      if (d.tank) Object.assign(HE_STATE, d.tank);
+      if (Array.isArray(d.sizes) && d.sizes.length > 0) HE_SIZES = d.sizes;
+      heRenderShell();
+    }
+  }).catch(err => console.error('Helium calculator load failed:', err));
+}
+
+function heSaveToFirestore() {
+  window.fbSaveHeliumCalc({ tank: HE_STATE, sizes: HE_SIZES }).catch(err => console.error('Helium calculator save failed:', err));
+}
+
+function heTankInputRow(label, field, step, prefix, suffix) {
+  const val = HE_STATE[field];
+  prefix = prefix || ''; suffix = suffix || '';
+  if (invAdminUnlocked) {
+    return `<div class="jcc-summary-row"><span>${label}</span><span>${prefix}<input type="number" step="${step}" min="0" class="jcc-inline-input" style="width:64px;" value="${val}" onchange="heUpdateTankField('${field}', this.value)">${suffix}</span></div>`;
+  }
+  return `<div class="jcc-summary-row"><span>${label}</span><b>${prefix}${val}${suffix}</b></div>`;
+}
+
+function heRenderShell() {
+  const root = document.getElementById('he-root');
+  if (!root) return;
+  const t = heComputeTotals();
+  root.innerHTML = `
+    <div class="section-label" style="margin-top:0">Tank Economics</div>
+    <div class="card">
+      ${heTankInputRow('Tank capacity', 'tankCuFt', 1, '', ' cu ft')}
+      ${heTankInputRow('Tank cost', 'tankCost', 0.01, '$', '')}
+      ${heTankInputRow('Rental (per month)', 'rentalPerMonth', 0.01, '$', '')}
+      ${heTankInputRow('Delivery fee', 'deliveryFee', 0.01, '$', '')}
+      ${heTankInputRow('Hazmat fee', 'hazmatFee', 0.01, '$', '')}
+      ${heTankInputRow('Tax', 'taxPct', 0.01, '', '%')}
+      <div class="jcc-summary-row" style="border-top:0.5px solid var(--border); margin-top:6px; padding-top:8px; color:var(--text-secondary);"><span>Subtotal <span style="font-size:11px;">(tank + delivery + hazmat)</span></span><b>${jccFmtMoney(t.subtotal)}</b></div>
+      <div class="jcc-summary-row" style="color:var(--text-secondary);"><span>Tax</span><b>${jccFmtMoney(t.tax)}</b></div>
+      <div class="jcc-summary-row" style="color:var(--text-secondary);"><span>+ Rental</span><b>${jccFmtMoney(HE_STATE.rentalPerMonth)}</b></div>
+      <div class="jcc-summary-row" style="font-size:14px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total</span><b>${jccFmtMoney(t.total)}</b></div>
+      <div class="jcc-summary-row" style="font-size:15px;"><span>Cost per cu ft</span><b style="color:var(--accent);">${jccFmtMoney(t.costPerCuFt)}</b></div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-top:8px; padding-top:8px; border-top:0.5px solid var(--border);">
+        <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Costs unlocked' : 'Costs locked'}</div>
+        ${invAdminUnlocked
+          ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="heLockAdmin()">Lock</button>`
+          : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="heUnlockAdmin()">Unlock</button>`}
+      </div>
+    </div>
+
+    <div class="section-label">Latex Balloon Sizes</div>
+    <div class="card" style="margin-bottom:0.75rem;">
+      ${heSizeListHtml('latex')}
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="heAddSize('latex')"><i class="fa-solid fa-plus"></i> Add size</button>
+    </div>
+
+    <div class="section-label">Specialty Shapes</div>
+    <div class="card" style="margin-bottom:0.75rem;">
+      ${heSizeListHtml('specialty')}
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="heAddSize('specialty')"><i class="fa-solid fa-plus"></i> Add shape</button>
+    </div>
+  `;
+}
+
+function heSizeListHtml(category) {
+  const items = HE_SIZES.filter(i => i.category === category);
+  if (items.length === 0) return `<div style="text-align:center; color:var(--text-secondary); padding:6px 0;">None yet.</div>`;
+  return items.map(item => heSizeRowHtml(item)).join('');
+}
+
+function heSizeRowHtml(item) {
+  const cost = heSizeCost(item);
+  if (invAdminUnlocked) {
+    return `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:0.5px solid var(--border);">
+      <input type="text" style="flex:1; min-width:0; font-size:13px; padding:6px 8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--bg); color:var(--text); font-family:var(--font);" value="${invAttr(item.name)}" onchange="heUpdateSizeField('${item.id}','name', this.value)">
+      <div style="display:flex; align-items:center; gap:2px; font-size:12px; color:var(--text-secondary); flex-shrink:0;"><input type="number" step="0.01" min="0" class="jcc-inline-input" style="width:48px;" value="${item.capacity}" onchange="heUpdateSizeField('${item.id}','capacity', this.value)"> cu ft</div>
+      <div style="width:56px; text-align:right; font-size:13px; font-weight:600; flex-shrink:0;">${jccFmtMoney(cost)}</div>
+      <div class="jcc-col-del" onclick="heRemoveSize('${item.id}')"><i class="fa-solid fa-trash"></i></div>
+    </div>`;
+  }
+  return `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:0.5px solid var(--border);">
+    <div style="flex:1; font-size:13px;">${psEscape(item.name)}</div>
+    <div style="font-size:12px; color:var(--text-secondary); flex-shrink:0;">${item.capacity} cu ft</div>
+    <div style="width:56px; text-align:right; font-size:13px; font-weight:600; flex-shrink:0;">${jccFmtMoney(cost)}</div>
+  </div>`;
+}
+
+function heUpdateTankField(field, value) {
+  HE_STATE[field] = parseFloat(value) || 0;
+  heRenderShell();
+  heSaveToFirestore();
+}
+function heUpdateSizeField(id, field, value) {
+  const item = HE_SIZES.find(i => i.id === id);
+  if (!item) return;
+  item[field] = field === 'name' ? (value.trim() || 'Untitled') : (parseFloat(value) || 0);
+  heRenderShell();
+  heSaveToFirestore();
+}
+function heAddSize(category) {
+  HE_SIZES.push({ id: 'he-custom-' + (++heRowSeq), category, name: category === 'latex' ? 'New size' : 'New shape', capacity: 1 });
+  heRenderShell();
+  heSaveToFirestore();
+}
+function heRemoveSize(id) {
+  HE_SIZES = HE_SIZES.filter(i => i.id !== id);
+  heRenderShell();
+  heSaveToFirestore();
+}
+function heUnlockAdmin() {
+  const entered = prompt('Enter the admin passcode to edit costs:');
+  if (entered === null) return;
+  if (entered === ADMIN_PASSCODE) {
+    invAdminUnlocked = true;
+    heRenderShell();
+  } else {
+    alert('Incorrect passcode.');
+  }
+}
+function heLockAdmin() {
+  invAdminUnlocked = false;
+  heRenderShell();
 }
 
 // ═══════════════════════════════════════ EVENT SCHEDULE & STAFFING VIEW ═══════════════════════════════════════
@@ -4610,6 +4824,7 @@ function bootApp() {
   try { qcInit(); } catch (e) { console.error('qcInit failed:', e); }
   try { frInit(); } catch (e) { console.error('frInit failed:', e); }
   try { letInit(); } catch (e) { console.error('letInit failed:', e); }
+  try { heInit(); } catch (e) { console.error('heInit failed:', e); }
   try { jccInit(); } catch (e) { console.error('jccInit failed:', e); }
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
