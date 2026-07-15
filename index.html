@@ -708,6 +708,13 @@
   window.fbLoadFormulas = () => getDoc(formulasDocRef);
   window.fbSaveFormulas = (data) => setDoc(formulasDocRef, data);
 
+  // Shared passcode gating the "admin" inventory fields (price/balloons-per-bag/par) that
+  // shouldn't change during routine backstock updates — one shared doc so the whole team
+  // uses the same passcode.
+  const adminLockDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'adminLock');
+  window.fbLoadAdminLock = () => getDoc(adminLockDocRef);
+  window.fbSaveAdminLock = (data) => setDoc(adminLockDocRef, data);
+
   // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
   // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
   const customRecipesRef = collection(db, 'businesses', BUSINESS_ID, 'customRecipes');
@@ -1166,6 +1173,18 @@
     <div class="card">
       <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Signed in as <span id="settings-account-email" style="font-weight:600; color:var(--text);"></span></div>
       <button class="save-btn" onclick="handleSignOutClick()">Sign out</button>
+    </div>
+
+    <!-- INVENTORY ADMIN LOCK -->
+    <div class="section-label">Inventory admin lock</div>
+    <div class="card">
+      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Shared team passcode required to edit price, balloons per bag, and par in Inventory — keeps those "set and forget" numbers from getting bumped by accident during routine backstock updates.</div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Passcode</label>
+        <input type="text" id="set-admin-passcode" placeholder="e.g. 1886">
+      </div>
+      <button class="save-btn" onclick="saveAdminPasscode()">Save passcode</button>
+      <div class="saved-msg" id="admin-passcode-saved-msg"></div>
     </div>
 
     <!-- BASIC SETTINGS -->
@@ -2798,6 +2817,47 @@ let invOrderFormKey = null; // `${itemId}|${size}` of the order form currently o
 let invSearchQuery = '';
 let invGroupBy = 'tier'; // 'tier' (Main/Misc), 'brand', or 'size'
 let invSizeSortSize = '11"'; // which size to rank by when invGroupBy === 'size'
+
+// Gates the "admin" fields (price, balloons per bag, par) that shouldn't change during routine
+// backstock updates — a shared team passcode, not a real security boundary (Firestore rules +
+// sign-in already handle that); this just guards against an accidental edit mid-restock.
+// Unlocked state is per-session only (resets on reload), the passcode itself is shared/synced.
+let ADMIN_PASSCODE = '1886';
+let invAdminUnlocked = false;
+
+function invLoadAdminLock() {
+  const fieldEl = document.getElementById('set-admin-passcode');
+  if (fieldEl) fieldEl.value = ADMIN_PASSCODE;
+  window.fbLoadAdminLock().then(snap => {
+    if (snap.exists() && snap.data().passcode) {
+      ADMIN_PASSCODE = snap.data().passcode;
+      if (fieldEl) fieldEl.value = ADMIN_PASSCODE;
+    }
+  }).catch(err => console.error('Admin lock load failed:', err));
+}
+function saveAdminPasscode() {
+  const val = document.getElementById('set-admin-passcode').value.trim();
+  if (!val) { alert('Enter a passcode first.'); return; }
+  ADMIN_PASSCODE = val;
+  window.fbSaveAdminLock({ passcode: val }).catch(err => console.error('Admin passcode save failed:', err));
+  const msg = document.getElementById('admin-passcode-saved-msg');
+  msg.textContent = 'Saved.';
+  setTimeout(() => { msg.textContent = ''; }, 2000);
+}
+function invUnlockAdmin() {
+  const entered = prompt('Enter the admin passcode to edit price / balloons per bag / par:');
+  if (entered === null) return;
+  if (entered === ADMIN_PASSCODE) {
+    invAdminUnlocked = true;
+    invRenderLatex(); // rebuilds the shell too, so the lock indicator itself updates
+  } else {
+    alert('Incorrect passcode.');
+  }
+}
+function invLockAdmin() {
+  invAdminUnlocked = false;
+  invRenderLatex();
+}
 let invCollapsedGroups = new Set(); // group keys currently collapsed
 
 function invStartListeners() {
@@ -2982,6 +3042,25 @@ function invToggleGroup(key) {
   invRenderColorsList();
 }
 
+// Permanently deletes every color currently shown in this group (respecting the active search
+// filter — "what you see is what gets cleared"). Destructive and irreversible, so it requires
+// typing DELETE rather than a plain OK/Cancel confirm.
+function invClearGroup(key) {
+  const upcomingMap = invComputeUpcoming();
+  const items = invFilteredSortedItems();
+  const groups = invGroupedItems(items, upcomingMap);
+  const group = groups.find(g => g.key === key);
+  if (!group || group.items.length === 0) return;
+
+  const typed = prompt(`This permanently deletes all ${group.items.length} color(s) in "${group.label}". This can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not deleted — you must type DELETE exactly.'); return; }
+
+  group.items.forEach(item => {
+    window.fbDeleteInventoryItem(item.id).catch(err => console.error('Delete failed for', item.color, err));
+  });
+}
+
 function invToggleExpand(itemId) {
   invExpandedItem = (invExpandedItem === itemId) ? null : itemId;
   invOrderFormKey = null;
@@ -3018,6 +3097,13 @@ function invUpdateSizeField(itemId, size, field, value) {
   if (!item) return;
   item.sizes[size][field] = field === 'openStatus' ? value : (parseFloat(value) || 0);
   invSaveItem(item);
+}
+// Size labels contain a literal " (5"/7", 11", etc.) — embedding one raw inside a
+// double-quoted HTML attribute (onchange="...('${size}'...)") breaks out of the attribute
+// and corrupts the handler. This escapes it for safe use inside such attributes specifically
+// (not for visible text, where a literal quote is harmless).
+function invAttr(str) {
+  return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function invOpenOrderForm(itemId, size) {
@@ -3136,6 +3222,12 @@ function invRenderLatex() {
           ${INV_SIZES.map(s => `<option value="${s}" ${s === invSizeSortSize ? 'selected' : ''}>${s}</option>`).join('')}
         </select>
       </div>` : ''}
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-top:0.75rem; padding-top:0.6rem; border-top:0.5px solid var(--border);">
+        <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Admin fields unlocked' : 'Price/balloons-per-bag/par locked'}</div>
+        ${invAdminUnlocked
+          ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="invLockAdmin()">Lock</button>`
+          : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="invUnlockAdmin()">Unlock</button>`}
+      </div>
     </div>`;
   }
   html += `<div id="inv-colors-results"></div>`;
@@ -3176,7 +3268,10 @@ function invRenderColorsList() {
       const collapsed = invCollapsedGroups.has(g.key);
       html += `<div class="inv-group-header" onclick="invToggleGroup('${g.key}')">
         <span>${psEscape(g.label)} (${g.items.length})</span>
-        <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+        <span style="display:flex; align-items:center; gap:10px;">
+          <button class="icon-btn" style="padding:2px 8px; font-size:10px; text-transform:none; letter-spacing:normal; color:var(--text-secondary);" onclick="event.stopPropagation(); invClearGroup('${g.key}')">Clear All</button>
+          <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+        </span>
       </div>`;
       if (!collapsed) {
         html += `<div class="inv-color-list">` + g.items.map(item => invColorCardHtml(item, upcomingMap)).join('') + `</div>`;
@@ -3235,20 +3330,30 @@ function invColorCardHtml(item, upcomingMap) {
 
       html += `<div class="ps-item-block">`;
       html += `<div style="font-size:14px; font-weight:700; margin-bottom:0.5rem; margin-top:0.75rem;">${psEscape(size)}</div>`;
+      // Line 1 — changes constantly during routine use, always editable.
       html += `<div class="row">
-        <div class="settings-field" style="margin-bottom:0"><label>Price per bag</label><input type="number" step="0.01" min="0" value="${sd.price}" onchange="invUpdateSizeField('${item.id}','${size}','price',this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0"><label>Balloons per bag</label><input type="number" min="1" value="${sd.perBag || 100}" onchange="invUpdateSizeField('${item.id}','${size}','perBag',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Open bin</label>
+          <select onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','openStatus',this.value)">
+            ${INV_OPEN_STATUSES.map(s => `<option value="${s}" ${s === sd.openStatus ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','backstock',this.value)"></div>
       </div>`;
-      html += `<div class="row">
-        <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${size}','backstock',this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0"><label>Par (bags)</label><input type="number" min="0" value="${sd.par}" onchange="invUpdateSizeField('${item.id}','${size}','par',this.value)"></div>
-      </div>`;
-      html += `<div class="settings-field">
-        <label>Open bin</label>
-        <select onchange="invUpdateSizeField('${item.id}','${size}','openStatus',this.value)">
-          ${INV_OPEN_STATUSES.map(s => `<option value="${s}" ${s === sd.openStatus ? 'selected' : ''}>${s}</option>`).join('')}
-        </select>
-      </div>`;
+      // Line 2 — "set and forget" numbers, gated behind the admin passcode so a routine
+      // backstock update can't accidentally bump price/count-per-bag/par.
+      if (invAdminUnlocked) {
+        html += `<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:1rem;">
+          <div class="settings-field" style="margin-bottom:0"><label>Price/bag</label><input type="number" step="0.01" min="0" value="${sd.price}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','price',this.value)"></div>
+          <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${sd.perBag || 100}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','perBag',this.value)"></div>
+          <div class="settings-field" style="margin-bottom:0"><label>Par (bags)</label><input type="number" min="0" value="${sd.par}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','par',this.value)"></div>
+        </div>`;
+      } else {
+        html += `<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:1rem; opacity:0.55;">
+          <div><div style="font-size:12px; color:var(--text-secondary);">Price/bag</div><div style="font-size:14px;">$${(sd.price || 0).toFixed(2)}</div></div>
+          <div><div style="font-size:12px; color:var(--text-secondary);">Balloons/bag</div><div style="font-size:14px;">${sd.perBag || 100}</div></div>
+          <div><div style="font-size:12px; color:var(--text-secondary);">Par (bags)</div><div style="font-size:14px;">${sd.par || 0}</div></div>
+        </div>`;
+      }
       html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Upcoming (from open jobs): ${upcoming} balloons${pendingQty ? ` · Pending order: ${pendingQty} bags` : ''}</div>`;
       html += `<div style="margin-bottom:0.5rem;">
         ${need.urgentBags > 0 ? `<div style="font-weight:700; font-size:14px; color:var(--warning-text);">Needed now for jobs: ${need.urgentBags} bag${need.urgentBags === 1 ? '' : 's'}</div>` : ''}
@@ -3256,7 +3361,7 @@ function invColorCardHtml(item, upcomingMap) {
         ${need.totalBags === 0 ? `<div style="font-weight:700; font-size:14px;">Stocked</div>` : ''}
       </div>`;
       html += `<div style="display:flex; justify-content:flex-end;">
-        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenOrderForm('${item.id}','${size}')"><i class="fa-solid fa-cart-plus"></i> Order</button>
+        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenOrderForm('${item.id}','${invAttr(size)}')"><i class="fa-solid fa-cart-plus"></i> Order</button>
       </div>`;
 
       if (invOrderFormKey === formKey) {
@@ -3269,7 +3374,7 @@ function invColorCardHtml(item, upcomingMap) {
           </div>
           <div class="settings-field"><label>Order date</label><input type="text" id="inv-order-date" placeholder="e.g. 3/14"></div>
           <div style="display:flex; gap:8px;">
-            <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="invSubmitOrder('${item.id}','${size}')">Save order</button>
+            <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="invSubmitOrder('${item.id}','${invAttr(size)}')">Save order</button>
             <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invCancelOrderForm()">Cancel</button>
           </div>
         </div>`;
@@ -3470,6 +3575,7 @@ function bootApp() {
   try { qcInit(); } catch (e) { console.error('qcInit failed:', e); }
   try { frInit(); } catch (e) { console.error('frInit failed:', e); }
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
+  try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
 }
 </script>
