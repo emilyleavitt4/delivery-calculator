@@ -2796,7 +2796,8 @@ let INVENTORY_ORDERS = [];
 let invExpandedItem = null;
 let invOrderFormKey = null; // `${itemId}|${size}` of the order form currently open, or null
 let invSearchQuery = '';
-let invGroupBy = 'tier'; // 'tier' (Main/Misc) or 'brand'
+let invGroupBy = 'tier'; // 'tier' (Main/Misc), 'brand', or 'size'
+let invSizeSortSize = '11"'; // which size to rank by when invGroupBy === 'size'
 let invCollapsedGroups = new Set(); // group keys currently collapsed
 
 function invStartListeners() {
@@ -2818,23 +2819,38 @@ function psNewInventoryItemId() { return 'invitem_' + Date.now() + '_' + Math.ra
 function psNewInventoryOrderId() { return 'invorder_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 
 // One-time starter data parsed from the real Master Calculators spreadsheet (Inventory Tab),
-// so the first visit isn't a blank list you have to hand-populate. Re-running the import is
-// safe to skip if you already have colors — invImportSeedData asks first.
+// grouped by brand for the per-brand import buttons (invImportByBrand) below.
 const INV_SEED_DATA = [{"color":"White","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":5},"11\"":{"price":14.39,"openStatus":"Full","backstock":9,"par":6},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":5,"par":8},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":2}}},{"color":"Black","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":4},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":4},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":4,"par":6},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":1}}},{"color":"Imperial Red","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Red","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":5},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":5},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":5},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":2}}},{"color":"Reflex Red","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Pink","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Bubblegum Pink","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":3},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":2,"par":1}}},{"color":"Rose","brand":"Decomex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":10,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":6,"par":2},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":5,"par":0}}},{"color":"Raspberry","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Wildberry","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":3,"par":0}}},{"color":"Reflex Fuchsia","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fuchsia","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":0},"24\"":{"price":20.23,"openStatus":"Full","backstock":3,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Rose","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Rosewood","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Pink","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Rose Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":13.6,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Rose Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Coral","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Aloha","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Melon","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Peach Blush","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Malibu Peach","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Blush","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Cheeky","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Orange","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":3},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Sunset Orange","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Terracotta","brand":"Sempertex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Honey Yellow","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":3},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Gold","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Partial","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Partial","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Mustard","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":3,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Yellow","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":3,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":1}}},{"color":"Pastel Yellow","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Shamrock Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":4},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":4},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":5},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Eucalyptus","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":15,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Key Lime","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":2},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Fiona Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Key Lime","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Chrome Green","brand":"Qualatex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":13.6,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Green","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Evergreen","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Forest Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":3},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":4},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":5},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Forest Green","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pearl Emerald Green","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":1},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fashion Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Empowermint","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Q Robins Egg/Dupe","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":5,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"S Robins Egg","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Tuftex Teal","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":3,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Turquoise","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Caribbean Blue","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Tropical Teal","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pearl Midnight Blue","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Deep Teal","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Sea Glass","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Pearl Light Blue","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":5,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Matte Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fog","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Blue Slate","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fashion Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":2},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":3},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":3,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":2,"par":1}}},{"color":"Reflex Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":13.6,"openStatus":"Full","backstock":5,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Royal Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":4},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":5},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":5},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":1}}},{"color":"Fashion Navy","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":3},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":2,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Metallic Midnight Blue","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":14.39,"openStatus":"Partial","backstock":2,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":4,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Lavender","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Canyon Rose","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Sangria","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Samba","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Orchid","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Lilac","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Blossom","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Lilac","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Spring Lilac","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Violet","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":13.6,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Violet","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Coffee","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Chrome Copper","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Cameo","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"White Sand","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Cream","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Lace","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pearl White","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Reflex Champagne","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":4,"par":1},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":1,"par":3},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":4},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":4},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Silver","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":1,"par":4},"11\"":{"price":13.6,"openStatus":"Full","backstock":5,"par":6},"17\"/18\"":{"price":23.79,"openStatus":"Full","backstock":3,"par":6},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Silver","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Gray","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Gray Smoke","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Stone","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Diamond Clear","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}}];
 
-function invImportSeedData() {
-  if (INVENTORY_ITEMS.length > 0 && !confirm('This adds ' + INV_SEED_DATA.length + ' colors from your spreadsheet. You already have ' + INVENTORY_ITEMS.length + ' color(s) — continue anyway?')) return;
-  INV_SEED_DATA.forEach(seed => {
+// Brands shown as their own import buttons, in this order. Only brands with seed data do
+// anything on click — Kalisan has none yet (you don't currently stock it, and I don't have a
+// verified color list for it), so its button explains that instead of silently doing nothing.
+const INV_SEED_BRANDS = ['Sempertex', 'Tuftex', 'Decomex', 'Kalisan', 'Qualatex'];
+
+function invImportByBrand(brand) {
+  const matches = INV_SEED_DATA.filter(seed => seed.brand === brand);
+  if (matches.length === 0) {
+    alert("I don't have starter colors for " + brand + " yet — either it's not in your spreadsheet, or I haven't looked up its color line. Tell me which colors you carry (or ask me to research " + brand + "'s catalog) and I can add an import for it.");
+    return;
+  }
+  const existing = INVENTORY_ITEMS.filter(i => i.brand === brand).length;
+  if (existing > 0 && !confirm('This adds ' + matches.length + ' ' + brand + ' colors from your spreadsheet. You already have ' + existing + ' ' + brand + ' color(s) — continue anyway?')) return;
+  matches.forEach(seed => {
     // Everything from the spreadsheet import is your established, consistent lineup — Main.
-    const item = { id: psNewInventoryItemId(), color: seed.color, brand: seed.brand, tier: 'main', sizes: JSON.parse(JSON.stringify(seed.sizes)) };
+    const sizes = JSON.parse(JSON.stringify(seed.sizes));
+    INV_SIZES.forEach(s => { if (!sizes[s].perBag) sizes[s].perBag = 100; });
+    const item = { id: psNewInventoryItemId(), color: seed.color, brand: seed.brand, tier: 'main', sizes };
     window.fbSaveInventoryItem(item).catch(err => console.error('Import failed for', seed.color, err));
   });
 }
 
 
+// perBag defaults to 100 (a common count for standard round latex) — it varies by brand and
+// size in reality, so it's editable per size just like price; existing seed data doesn't have
+// a real value from the spreadsheet, so it starts at the same default until corrected.
 function invBlankSizeData() {
   const sizes = {};
-  INV_SIZES.forEach(s => { sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0 }; });
+  INV_SIZES.forEach(s => { sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100 }; });
   return sizes;
 }
 function invFindItem(id) { return INVENTORY_ITEMS.find(i => i.id === id); }
@@ -2887,10 +2903,22 @@ function invPendingOrderedQty(itemId, size) {
     .filter(o => o.itemId === itemId && o.size === size && (o.status === 'ordered' || o.status === 'backordered'))
     .reduce((sum, o) => sum + o.qty, 0);
 }
-// The core "how many do I need to buy" number: par plus what's coming up, minus what's
-// already on the shelf, minus what's already on order (so it's not double-counted).
-function invToOrder(par, upcoming, backstock, pending) {
-  return Math.max(0, (par || 0) + upcoming - (backstock || 0) - pending);
+// Splits "how many bags to order" into two separate numbers instead of one combined total:
+//   urgentBags   — the bare minimum to cover upcoming jobs. If money's tight or a color is
+//                  hard to get, this is the one that actually can't be skipped.
+//   restockBags  — additional bags beyond that to bring you back up to your normal par level.
+//                  Safe to defer if needed.
+// backstock/par/pending are all in BAGS (that's what your spreadsheet tracked); upcoming is in
+// individual BALLOONS (computed from job math) — perBag is what lets the two be compared on
+// the same footing, since bag counts vary by brand and size.
+function invNeedBreakdown(sd, upcoming, pendingBags) {
+  const perBag = sd.perBag || 100;
+  const balloonsAvailable = ((sd.backstock || 0) + pendingBags) * perBag;
+  const urgentBalloons = Math.max(0, upcoming - balloonsAvailable);
+  const urgentBags = Math.ceil(urgentBalloons / perBag);
+  const leftoverBagsAfterJobs = Math.floor(Math.max(0, balloonsAvailable - upcoming) / perBag);
+  const restockBags = Math.max(0, (sd.par || 0) - leftoverBagsAfterJobs);
+  return { urgentBags, restockBags, totalBags: urgentBags + restockBags };
 }
 function invSortedItems() {
   return [...INVENTORY_ITEMS].sort((a, b) => a.color.localeCompare(b.color) || (a.brand || '').localeCompare(b.brand || ''));
@@ -2905,8 +2933,9 @@ function invFilteredSortedItems() {
   return items.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q));
 }
 // Buckets the given items into groups per invGroupBy, preserving a sensible group order
-// (Main before Misc; brands alphabetically with blank brand last).
-function invGroupedItems(items) {
+// (Main before Misc; brands alphabetically with blank brand last; size mode is a single list
+// ranked by order urgency for whichever size is picked, not a Main/Misc/brand bucket).
+function invGroupedItems(items, upcomingMap) {
   if (invGroupBy === 'brand') {
     const byBrand = {};
     items.forEach(i => {
@@ -2919,6 +2948,15 @@ function invGroupedItems(items) {
       return a.localeCompare(b);
     }).map(key => ({ key: 'brand:' + key, label: key, items: byBrand[key] }));
   }
+  if (invGroupBy === 'size') {
+    const size = invSizeSortSize;
+    const ranked = items.map(i => {
+      const upcoming = invUpcomingFor(i.color, size, upcomingMap);
+      const pendingQty = invPendingOrderedQty(i.id, size);
+      return { item: i, totalBags: invNeedBreakdown(i.sizes[size], upcoming, pendingQty).totalBags };
+    }).sort((a, b) => b.totalBags - a.totalBags || a.item.color.localeCompare(b.item.color));
+    return [{ key: 'size:' + size, label: size + ' — most urgent first', items: ranked.map(r => r.item) }];
+  }
   const main = items.filter(i => (i.tier || 'main') === 'main');
   const misc = items.filter(i => (i.tier || 'main') === 'misc');
   return [
@@ -2928,22 +2966,26 @@ function invGroupedItems(items) {
 }
 function invSetSearch(val) {
   invSearchQuery = val;
-  invRenderLatex();
+  invRenderColorsList();
 }
 function invSetGroupBy(mode) {
   invGroupBy = mode;
-  invRenderLatex();
+  invRenderLatex(); // controls (the size picker) differ per mode, so the shell needs rebuilding
+}
+function invSetSizeSort(size) {
+  invSizeSortSize = size;
+  invRenderColorsList();
 }
 function invToggleGroup(key) {
   if (invCollapsedGroups.has(key)) invCollapsedGroups.delete(key);
   else invCollapsedGroups.add(key);
-  invRenderLatex();
+  invRenderColorsList();
 }
 
 function invToggleExpand(itemId) {
   invExpandedItem = (invExpandedItem === itemId) ? null : itemId;
   invOrderFormKey = null;
-  invRenderLatex();
+  invRenderColorsList();
 }
 function invAddColor() {
   const nameEl = document.getElementById('inv-new-color');
@@ -2980,11 +3022,11 @@ function invUpdateSizeField(itemId, size, field, value) {
 
 function invOpenOrderForm(itemId, size) {
   invOrderFormKey = `${itemId}|${size}`;
-  invRenderLatex();
+  invRenderColorsList();
 }
 function invCancelOrderForm() {
   invOrderFormKey = null;
-  invRenderLatex();
+  invRenderColorsList();
 }
 function invSubmitOrder(itemId, size) {
   const qty = parseFloat(document.getElementById('inv-order-qty').value) || 0;
@@ -3032,10 +3074,14 @@ function invCancelOrder(orderId) {
   window.fbSaveInventoryOrder(order).catch(err => console.error(err));
 }
 
+// Renders the whole view: Pending orders, the search/sort controls + a placeholder for the
+// color list (populated separately by invRenderColorsList), and Add a color at the bottom.
+// Only called for structural changes (data arriving, switching Group-by mode, add/delete
+// color) — NOT on every search keystroke, since rebuilding the search input's own DOM node
+// on every character would knock focus out of it after each letter typed.
 function invRenderLatex() {
   const root = document.getElementById('inv-latex-root');
   if (!root) return;
-  const upcomingMap = invComputeUpcoming();
   let html = '';
 
   // Pending orders — the "what's in flight" list, so nothing gets lost between pressing
@@ -3067,12 +3113,32 @@ function invRenderLatex() {
     });
   }
 
+  html += `<div class="section-label">Colors</div>`;
   if (INVENTORY_ITEMS.length === 0) {
     html += `<div class="card" style="text-align:center;">
-      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Starting from scratch? Import your existing colors from the Master Calculators spreadsheet instead of typing them in one by one.</div>
-      <button class="save-btn" onclick="invImportSeedData()"><i class="fa-solid fa-file-import"></i> Import starter inventory (${INV_SEED_DATA.length} colors)</button>
+      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Starting from scratch? Import by brand instead of typing colors in one by one.</div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        ${INV_SEED_BRANDS.map(b => `<button class="save-btn" style="width:auto;" onclick="invImportByBrand('${b}')"><i class="fa-solid fa-file-import"></i> Import ${b}</button>`).join('')}
+      </div>
+    </div>`;
+  } else {
+    html += `<div class="card">
+      <div class="settings-field" style="margin-bottom:0.6rem;">
+        <input type="text" id="inv-search" placeholder="Search colors or brands..." value="${psEscape(invSearchQuery)}" oninput="invSetSearch(this.value)">
+      </div>
+      <div class="trip-toggle" style="margin:0;">
+        <button class="trip-btn ${invGroupBy === 'tier' ? 'active' : ''}" onclick="invSetGroupBy('tier')">Sort by Color</button>
+        <button class="trip-btn ${invGroupBy === 'brand' ? 'active' : ''}" onclick="invSetGroupBy('brand')">Sort by Brand</button>
+        <button class="trip-btn ${invGroupBy === 'size' ? 'active' : ''}" onclick="invSetGroupBy('size')">Sort by Size</button>
+      </div>
+      ${invGroupBy === 'size' ? `<div class="settings-field" style="margin:0.6rem 0 0;">
+        <select onchange="invSetSizeSort(this.value)">
+          ${INV_SIZES.map(s => `<option value="${s}" ${s === invSizeSortSize ? 'selected' : ''}>${s}</option>`).join('')}
+        </select>
+      </div>` : ''}
     </div>`;
   }
+  html += `<div id="inv-colors-results"></div>`;
 
   html += `<div class="section-label">Add a color</div>
   <div class="card">
@@ -3083,46 +3149,48 @@ function invRenderLatex() {
     <button class="save-btn" onclick="invAddColor()">Add color</button>
   </div>`;
 
-  html += `<div class="section-label">Colors</div>`;
+  root.innerHTML = html;
+  invRenderColorsList();
+}
+
+// Populates just the color list (search results, grouped/sorted, collapsible) — called on
+// every search keystroke and sort/group/collapse change, without touching the shell around it
+// (the search input keeps focus since its own DOM node is never rebuilt).
+function invRenderColorsList() {
+  const container = document.getElementById('inv-colors-results');
+  if (!container) return;
   if (INVENTORY_ITEMS.length === 0) {
-    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — add one above.</div>`;
-  } else {
-    html += `<div class="card">
-      <div class="settings-field" style="margin-bottom:0.6rem;">
-        <input type="text" id="inv-search" placeholder="Search colors or brands..." value="${psEscape(invSearchQuery)}" oninput="invSetSearch(this.value)">
-      </div>
-      <div class="trip-toggle" style="margin:0;">
-        <button class="trip-btn ${invGroupBy === 'tier' ? 'active' : ''}" onclick="invSetGroupBy('tier')">Group: Main / Misc</button>
-        <button class="trip-btn ${invGroupBy === 'brand' ? 'active' : ''}" onclick="invSetGroupBy('brand')">Group: Brand</button>
-      </div>
-    </div>`;
-
-    const items = invFilteredSortedItems();
-    if (items.length === 0) {
-      html += `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No colors match "${psEscape(invSearchQuery)}".</div>`;
-    } else {
-      const groups = invGroupedItems(items);
-      groups.forEach(g => {
-        if (g.items.length === 0) return; // hide empty groups (e.g. no Misc colors, or a search with no brand matches)
-        const collapsed = invCollapsedGroups.has(g.key);
-        html += `<div class="inv-group-header" onclick="invToggleGroup('${g.key}')">
-          <span>${psEscape(g.label)} (${g.items.length})</span>
-          <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
-        </div>`;
-        if (!collapsed) {
-          html += `<div class="inv-color-list">` + g.items.map(item => invColorCardHtml(item, upcomingMap)).join('') + `</div>`;
-        }
-      });
-    }
-
-    let totalValue = 0;
-    INVENTORY_ITEMS.forEach(item => {
-      INV_SIZES.forEach(size => { totalValue += (item.sizes[size].backstock || 0) * (item.sizes[size].price || 0); });
-    });
-    html += `<div class="ps-pack-note">Estimated backstock value: $${totalValue.toFixed(2)}</div>`;
+    container.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — import by brand or add one below.</div>`;
+    return;
   }
 
-  root.innerHTML = html;
+  const upcomingMap = invComputeUpcoming();
+  const items = invFilteredSortedItems();
+  let html = '';
+  if (items.length === 0) {
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No colors match "${psEscape(invSearchQuery)}".</div>`;
+  } else {
+    const groups = invGroupedItems(items, upcomingMap);
+    groups.forEach(g => {
+      if (g.items.length === 0) return; // hide empty groups (e.g. no Misc colors, or a search with no brand matches)
+      const collapsed = invCollapsedGroups.has(g.key);
+      html += `<div class="inv-group-header" onclick="invToggleGroup('${g.key}')">
+        <span>${psEscape(g.label)} (${g.items.length})</span>
+        <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+      </div>`;
+      if (!collapsed) {
+        html += `<div class="inv-color-list">` + g.items.map(item => invColorCardHtml(item, upcomingMap)).join('') + `</div>`;
+      }
+    });
+  }
+
+  let totalValue = 0;
+  INVENTORY_ITEMS.forEach(item => {
+    INV_SIZES.forEach(size => { totalValue += (item.sizes[size].backstock || 0) * (item.sizes[size].price || 0); });
+  });
+  html += `<div class="ps-pack-note">Estimated backstock value: $${totalValue.toFixed(2)}</div>`;
+
+  container.innerHTML = html;
 }
 
 // Renders one color's card — collapsed header (name, brand, "N to order" badge) and, when
@@ -3130,12 +3198,14 @@ function invRenderLatex() {
 function invColorCardHtml(item, upcomingMap) {
   const expanded = invExpandedItem === item.id;
   const tier = item.tier || 'main';
-  let itemToOrderTotal = 0;
+  let itemTotalBags = 0, itemUrgentBags = 0;
   INV_SIZES.forEach(size => {
     const sd = item.sizes[size];
     const upcoming = invUpcomingFor(item.color, size, upcomingMap);
     const pendingQty = invPendingOrderedQty(item.id, size);
-    itemToOrderTotal += invToOrder(sd.par, upcoming, sd.backstock, pendingQty);
+    const need = invNeedBreakdown(sd, upcoming, pendingQty);
+    itemTotalBags += need.totalBags;
+    itemUrgentBags += need.urgentBags;
   });
 
   let html = `<div class="inv-color-row">`;
@@ -3144,7 +3214,8 @@ function invColorCardHtml(item, upcomingMap) {
       <div class="inv-color-row-name">${psEscape(item.color)}</div>
       <div class="inv-color-row-brand">${psEscape(item.brand || 'No brand')}</div>
     </div>
-    ${itemToOrderTotal > 0 ? `<span class="ps-status-btn ps-status-waiting">${itemToOrderTotal} to order</span>` : ''}
+    ${itemUrgentBags > 0 ? `<span class="ps-status-btn ps-status-waiting">${itemUrgentBags} urgent</span>` : ''}
+    ${itemTotalBags > itemUrgentBags ? `<span class="ps-status-btn ps-status-not_started">${itemTotalBags} total</span>` : ''}
     <button class="icon-btn" style="padding:4px;" onclick="event.stopPropagation(); invDeleteColor('${item.id}')" aria-label="Delete color"><i class="fa-solid fa-trash"></i></button>
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
   </div>`;
@@ -3159,33 +3230,41 @@ function invColorCardHtml(item, upcomingMap) {
       const sd = item.sizes[size];
       const upcoming = invUpcomingFor(item.color, size, upcomingMap);
       const pendingQty = invPendingOrderedQty(item.id, size);
-      const toOrder = invToOrder(sd.par, upcoming, sd.backstock, pendingQty);
+      const need = invNeedBreakdown(sd, upcoming, pendingQty);
       const formKey = `${item.id}|${size}`;
 
       html += `<div class="ps-item-block">`;
       html += `<div style="font-size:14px; font-weight:700; margin-bottom:0.5rem; margin-top:0.75rem;">${psEscape(size)}</div>`;
       html += `<div class="row">
         <div class="settings-field" style="margin-bottom:0"><label>Price per bag</label><input type="number" step="0.01" min="0" value="${sd.price}" onchange="invUpdateSizeField('${item.id}','${size}','price',this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0"><label>Open bin</label>
-          <select onchange="invUpdateSizeField('${item.id}','${size}','openStatus',this.value)">
-            ${INV_OPEN_STATUSES.map(s => `<option value="${s}" ${s === sd.openStatus ? 'selected' : ''}>${s}</option>`).join('')}
-          </select>
-        </div>
+        <div class="settings-field" style="margin-bottom:0"><label>Balloons per bag</label><input type="number" min="1" value="${sd.perBag || 100}" onchange="invUpdateSizeField('${item.id}','${size}','perBag',this.value)"></div>
       </div>`;
       html += `<div class="row">
-        <div class="settings-field" style="margin-bottom:0"><label>Backstock</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${size}','backstock',this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0"><label>Par</label><input type="number" min="0" value="${sd.par}" onchange="invUpdateSizeField('${item.id}','${size}','par',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${size}','backstock',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Par (bags)</label><input type="number" min="0" value="${sd.par}" onchange="invUpdateSizeField('${item.id}','${size}','par',this.value)"></div>
       </div>`;
-      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Upcoming (from open jobs): ${upcoming}${pendingQty ? ` · Pending order: ${pendingQty}` : ''}</div>`;
-      html += `<div style="display:flex; align-items:center; justify-content:space-between;">
-        <div style="font-weight:700; font-size:14px;">${toOrder > 0 ? `Order ${toOrder}` : 'Stocked'}</div>
+      html += `<div class="settings-field">
+        <label>Open bin</label>
+        <select onchange="invUpdateSizeField('${item.id}','${size}','openStatus',this.value)">
+          ${INV_OPEN_STATUSES.map(s => `<option value="${s}" ${s === sd.openStatus ? 'selected' : ''}>${s}</option>`).join('')}
+        </select>
+      </div>`;
+      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Upcoming (from open jobs): ${upcoming} balloons${pendingQty ? ` · Pending order: ${pendingQty} bags` : ''}</div>`;
+      html += `<div style="margin-bottom:0.5rem;">
+        ${need.urgentBags > 0 ? `<div style="font-weight:700; font-size:14px; color:var(--warning-text);">Needed now for jobs: ${need.urgentBags} bag${need.urgentBags === 1 ? '' : 's'}</div>` : ''}
+        ${need.restockBags > 0 ? `<div style="font-size:13px; color:var(--text-secondary);">Plus ${need.restockBags} bag${need.restockBags === 1 ? '' : 's'} to restock to your normal par</div>` : ''}
+        ${need.totalBags === 0 ? `<div style="font-weight:700; font-size:14px;">Stocked</div>` : ''}
+      </div>`;
+      html += `<div style="display:flex; justify-content:flex-end;">
         <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenOrderForm('${item.id}','${size}')"><i class="fa-solid fa-cart-plus"></i> Order</button>
       </div>`;
 
       if (invOrderFormKey === formKey) {
+        const defaultQty = need.urgentBags > 0 ? need.urgentBags : (need.totalBags > 0 ? need.totalBags : 1);
         html += `<div style="margin-top:0.75rem;">
+          ${need.restockBags > 0 ? `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Defaulted to the ${need.urgentBags > 0 ? 'urgent' : 'total'} amount (${defaultQty}) — bump it up to ${need.totalBags} to also cover your normal restock, if budget/availability allows.</div>` : ''}
           <div class="row">
-            <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" id="inv-order-qty" min="1" value="${toOrder > 0 ? toOrder : 1}"></div>
+            <div class="settings-field" style="margin-bottom:0"><label>Quantity (bags)</label><input type="number" id="inv-order-qty" min="1" value="${defaultQty}"></div>
             <div class="settings-field" style="margin-bottom:0"><label>Ordered from</label><input type="text" id="inv-order-vendor" placeholder="e.g. Loftus"></div>
           </div>
           <div class="settings-field"><label>Order date</label><input type="text" id="inv-order-date" placeholder="e.g. 3/14"></div>
