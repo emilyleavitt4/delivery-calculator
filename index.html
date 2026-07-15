@@ -1992,10 +1992,11 @@ function psLineRecipe(line) {
 // item" form (key = `${jobId}|new`) and editing an already-added item's colors (key =
 // `${jobId}|${idx}`) — so a job's colors can actually be trusted to match Inventory for the
 // Upcoming calculation, whether they were typed fresh or are being fixed up after an invoice
-// import. psColorDraftStore holds the in-progress rows per key; psEditingColorsKey tracks
-// which existing item (if any) currently has its edit picker open.
+// import. psColorDraftStore holds the in-progress color rows per key; psEditingItemKey tracks
+// which existing item (if any) currently has its full edit form open (qty/colors/design/
+// location/topper — see psStartEditItem below).
 let psColorDraftStore = {};
-let psEditingColorsKey = null;
+let psEditingItemKey = null;
 
 function psColorDraftKey(jobId, idx) { return jobId + '|' + (idx === undefined ? 'new' : idx); }
 function psGetColorDraft(key, fallback) {
@@ -2051,29 +2052,48 @@ function psColorPickerHtml(key, draft) {
   return draft.map((v, idx) => psColorRowHtml(key, idx, v, draft.length > 1)).join('') +
     `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="psAddColorDraftRow('${key}')"><i class="fa-solid fa-plus"></i> Add color</button>`;
 }
-function psStartEditColors(jobId, idx) {
+// Full item editing (quantity, colors, design, location, topper note) — not the recipe/size
+// itself, since re-picking that has real edge cases (customLinear footage, a Quantity
+// Calculator customRecipe with no catalog entry to re-select). If the item type itself is
+// wrong, delete and re-add; everything else about an already-added item can be fixed here.
+function psStartEditItem(jobId, idx) {
   const job = psFindJob(jobId);
   if (!job) return;
   const key = psColorDraftKey(jobId, idx);
   psColorDraftStore[key] = [...job.productionItems[idx].colors];
-  psEditingColorsKey = key;
+  psEditingItemKey = key;
   psRenderProductionJobs();
 }
-function psCancelEditColors() {
-  if (psEditingColorsKey) delete psColorDraftStore[psEditingColorsKey];
-  psEditingColorsKey = null;
+function psCancelEditItem() {
+  if (psEditingItemKey) delete psColorDraftStore[psEditingItemKey];
+  psEditingItemKey = null;
   psRenderProductionJobs();
 }
-function psSaveEditColors(jobId, idx) {
+function psSaveEditItem(jobId, idx) {
   const job = psFindJob(jobId);
   if (!job) return;
+  const line = job.productionItems[idx];
+  const r = psLineRecipe(line);
   const key = psColorDraftKey(jobId, idx);
+  const sanitizedKey = key.replace(/\|/g, '-');
+
   const colors = (psColorDraftStore[key] || []).map(c => c.trim()).filter(Boolean);
   if (colors.length === 0) { alert('Enter at least one color.'); return; }
-  job.productionItems[idx].colors = colors;
-  delete job.productionItems[idx].colorDist; // percentages would no longer line up with the edited color list
+  const qty = parseFloat(document.getElementById('pi-edit-qty-' + sanitizedKey).value) || 1;
+  const design = document.getElementById('pi-edit-design-' + sanitizedKey).value.trim();
+  const location = document.getElementById('pi-edit-location-' + sanitizedKey).value.trim();
+  const topperEl = document.getElementById('pi-edit-topper-' + sanitizedKey);
+  const topperNote = topperEl ? topperEl.value.trim() : (line.topperNote || '');
+
+  line.qty = qty;
+  line.colors = colors;
+  line.design = design;
+  line.location = location;
+  line.topperNote = topperNote;
+  delete line.colorDist; // percentages would no longer line up with the edited color list
+
   delete psColorDraftStore[key];
-  psEditingColorsKey = null;
+  psEditingItemKey = null;
   psSaveJob(job);
 }
 
@@ -2120,34 +2140,47 @@ function psProductionBodyHtml(job) {
     job.productionItems.forEach((line, idx) => {
       const r = psLineRecipe(line);
       if (!r) return;
+      const editKey = psColorDraftKey(job.id, idx);
+      const sanitizedEditKey = editKey.replace(/\|/g, '-');
+      const editing = psEditingItemKey === editKey;
+
       html += `<div class="ps-item-block">`;
       html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
         <div style="font-size:14px; font-weight:700;">${psEscape(r.display)}</div>
-        <button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>
+        <div style="display:flex; gap:2px;">
+          ${!editing ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx})">Edit</button>` : ''}
+          <button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>
+        </div>
       </div>`;
-      html += `<div class="ps-build-fields">`;
-      html += `<b>Size:</b> ${psEscape(r.label)}<br><b>Qty:</b> ${line.qty}<br><b>Style:</b> ${psEscape(r.style || r.category)}<br>`;
-      if (psTopperFt(r)) html += `<b>Topper:</b> ~${psTopperFt(r)} ft included${line.topperNote ? ' (' + psEscape(line.topperNote) + ')' : ''}<br>`;
-      if (line.design) html += `<b>Design:</b> ${psEscape(line.design)}<br>`;
-      if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
-      html += `</div>`;
 
-      const editKey = psColorDraftKey(job.id, idx);
-      if (psEditingColorsKey === editKey) {
-        html += `<div class="settings-field no-print" style="margin-top:0.5rem;">
-          <label>Colors</label>
-          ${psColorPickerHtml(editKey, psGetColorDraft(editKey, line.colors))}
-          <div style="display:flex; gap:8px; margin-top:0.4rem;">
-            <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="psSaveEditColors('${job.id}', ${idx})">Save colors</button>
-            <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="psCancelEditColors()">Cancel</button>
+      if (editing) {
+        html += `<div class="no-print">
+          <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;"><b>Size:</b> ${psEscape(r.label)} <span style="font-style:italic;">(delete and re-add to change size)</span></div>
+          <div class="settings-field"><label>Quantity</label><input type="number" id="pi-edit-qty-${sanitizedEditKey}" value="${line.qty}" min="1" inputmode="numeric"></div>
+          <div class="settings-field">
+            <label>Colors</label>
+            ${psColorPickerHtml(editKey, psGetColorDraft(editKey, line.colors))}
+          </div>
+          <div class="row">
+            <div class="settings-field" style="margin-bottom:0"><label>Design (optional)</label><input type="text" id="pi-edit-design-${sanitizedEditKey}" value="${psEscape(line.design || '')}"></div>
+            <div class="settings-field" style="margin-bottom:0"><label>Location (optional)</label><input type="text" id="pi-edit-location-${sanitizedEditKey}" value="${psEscape(line.location || '')}"></div>
+          </div>
+          ${psTopperFt(r) ? `<div class="settings-field"><label>Topper balloons (optional note)</label><input type="text" id="pi-edit-topper-${sanitizedEditKey}" value="${psEscape(line.topperNote || '')}"></div>` : ''}
+          <div style="display:flex; gap:8px; margin-bottom:0.75rem;">
+            <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="psSaveEditItem('${job.id}', ${idx})">Save changes</button>
+            <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="psCancelEditItem()">Cancel</button>
           </div>
         </div>`;
       } else {
-        html += `<div class="no-print" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem;">
-          <div style="font-size:13px; color:var(--text-secondary);"><b style="color:var(--text);">Colors:</b> ${psEscape(line.colors.join(' / '))}</div>
-          <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditColors('${job.id}', ${idx})">Edit</button>
-        </div>`;
+        html += `<div class="ps-build-fields">`;
+        html += `<b>Size:</b> ${psEscape(r.label)}<br><b>Qty:</b> ${line.qty}<br><b>Style:</b> ${psEscape(r.style || r.category)}<br>`;
+        if (psTopperFt(r)) html += `<b>Topper:</b> ~${psTopperFt(r)} ft included${line.topperNote ? ' (' + psEscape(line.topperNote) + ')' : ''}<br>`;
+        if (line.design) html += `<b>Design:</b> ${psEscape(line.design)}<br>`;
+        if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
+        html += `<b>Colors:</b> ${psEscape(line.colors.join(' / '))}<br>`;
+        html += `</div>`;
       }
+
       html += `<div class="settings-field no-print" style="margin-top:0.5rem;">
         <label>Build notes</label>
         <textarea rows="2" placeholder="Add construction notes..." onchange="psUpdateItemNotes('${job.id}', ${idx}, this.value)">${line.notes ? psEscape(line.notes) : ''}</textarea>
