@@ -704,6 +704,21 @@
   }
   .jcc-inline-input:focus { outline: none; border-color: var(--accent); }
 
+  /* Sets "employee cost average" apart from the per-job minute fields above it in Labor —
+     same card, but a distinct tinted box since this one's a rarely-changed business setting,
+     not something to fill in for every job. */
+  .jcc-employee-cost-block { margin: 8px 0 10px; padding: 6px 10px; background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--radius-sm); }
+
+  /* An editable number that reads as plain text at rest — no box, no background — and only
+     shows it's editable once you're actually in it (a subtle underline on focus). Used for
+     the retail multipliers, where a bordered input field next to "(×...)" looked cluttered. */
+  .jcc-plain-input {
+    width: 36px; border: none; border-bottom: 1px solid transparent; background: transparent;
+    padding: 0; margin: 0; font-size: 11px; color: var(--text-secondary); font-family: var(--font);
+    text-align: left; -webkit-appearance: none;
+  }
+  .jcc-plain-input:focus { outline: none; border-bottom-color: var(--accent); }
+
   @media print {
     .topbar, .no-print, #ps-production-empty, #ps-staffing-empty { display: none !important; }
   }
@@ -770,6 +785,13 @@
   const jccCatalogDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'jccCatalog');
   window.fbLoadJccCatalog = () => getDoc(jccCatalogDocRef);
   window.fbSaveJccCatalog = (data) => setDoc(jccCatalogDocRef, data);
+
+  // Quick Add Reference — assembled products (e.g. "one hifloated balloon") the user builds
+  // once in the Material Cost Calculator and saves, so pricing a batch of them later is one
+  // line item instead of re-listing every raw material each time.
+  const jccQuickAddDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'jccQuickAdd');
+  window.fbLoadJccQuickAdd = () => getDoc(jccQuickAddDocRef);
+  window.fbSaveJccQuickAdd = (data) => setDoc(jccQuickAddDocRef, data);
 
   // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
   // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
@@ -3935,6 +3957,8 @@ let JCC_CATALOG = JSON.parse(JSON.stringify(JCC_CATALOG_DEFAULTS));
 let jccCollapsedCategories = new Set(JCC_CATEGORIES.map(c => c.key)); // start collapsed — 55 items is a lot to greet someone with
 let jccState = null;
 let jccRowSeq = 0;
+let JCC_QUICK_ADD = []; // user-saved assembled products: { id, name, cost }
+let jccQuickAddSeq = 0;
 
 // A small (i) next to a field label that toggles a short explanation on tap — for anything
 // that needs a sentence of context but would clutter the screen if always shown (e.g.
@@ -3965,8 +3989,14 @@ function jccPricePerItem(item) {
   const count = item.count > 0 ? item.count : 1;
   return jccAvgCost(item) / count;
 }
+// Merges the raw-materials catalog with user-saved Quick Add products into one list for the
+// item type-ahead, so typing a saved product's name (e.g. "hifloated balloon") surfaces it
+// right alongside raw materials like "EMT". Quick Add entries already carry their own flat
+// cost — no averaging needed since jccSaveAsQuickAdd captured it as a single number.
 function jccAllCatalogItems() {
-  return JCC_CATALOG.map(item => ({ ...item, pricePerItem: jccPricePerItem(item) }));
+  const raw = JCC_CATALOG.map(item => ({ ...item, pricePerItem: jccPricePerItem(item) }));
+  const quickAdd = JCC_QUICK_ADD.map(item => ({ ...item, unit: 'product', pricePerItem: item.cost }));
+  return quickAdd.concat(raw);
 }
 
 function jccInit() {
@@ -3975,6 +4005,10 @@ function jccInit() {
     orderPrepMin: 0, buildMin: 0, loadUnloadMin: 0, setupMin: 0, otherMin: 0, employeeWage: 35,
     profitMarginPct: 45, coreMultiplier: 1.1, complexMultiplier: 1.2, premiumMultiplier: 1.33
   };
+  // Start with a couple of blank rows ready to fill in, instead of an empty list — most jobs
+  // need at least this many custom items anyway.
+  jccState.rows.push({ id: 'jccrow_' + (++jccRowSeq), name: '', catalogId: null, qty: 1, unitCost: 0 });
+  jccState.rows.push({ id: 'jccrow_' + (++jccRowSeq), name: '', catalogId: null, qty: 1, unitCost: 0 });
   jccRenderShell();
 
   window.fbLoadJccCatalog().then(snap => {
@@ -3986,6 +4020,13 @@ function jccInit() {
       jccRenderCatalog();
     }
   }).catch(err => console.error('Job cost catalog load failed:', err));
+
+  window.fbLoadJccQuickAdd().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().items)) {
+      JCC_QUICK_ADD = snap.data().items;
+      jccRenderQuickAdd();
+    }
+  }).catch(err => console.error('Quick Add load failed:', err));
 }
 
 function jccRenderShell() {
@@ -3995,25 +4036,22 @@ function jccRenderShell() {
   root.innerHTML = `
     <div class="section-label" style="margin-top:0">Material Cost Calculator</div>
     <div id="jcc-rows"></div>
-    <button class="icon-btn" style="width:auto; padding:8px 16px; font-size:13px; margin-bottom:0.75rem;" onclick="jccAddRow()"><i class="fa-solid fa-plus"></i> Add item</button>
 
     <div class="section-label">Labor Cost Calculator</div>
     <div class="card">
-      <div class="row">
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Order prep (min)</label><input type="number" min="0" value="${s.orderPrepMin}" oninput="jccUpdateLaborField('orderPrepMin', this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Build time (min)</label><input type="number" min="0" value="${s.buildMin}" oninput="jccUpdateLaborField('buildMin', this.value)"></div>
-      </div>
-      <div class="row">
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Load / unload (min)</label><input type="number" min="0" value="${s.loadUnloadMin}" oninput="jccUpdateLaborField('loadUnloadMin', this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Setup time (min)</label><input type="number" min="0" value="${s.setupMin}" oninput="jccUpdateLaborField('setupMin', this.value)"></div>
-      </div>
-      <div class="row">
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Other (min)</label><input type="number" min="0" value="${s.otherMin}" oninput="jccUpdateLaborField('otherMin', this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0.6rem; position:relative;">
-          <label>Employee cost ($/hr) ${jccInfoIconHtml('employee-cost', 'What they cost you per hour, not their paycheck rate — include payroll tax, workers comp, etc.')}</label>
-          <input type="number" step="0.01" min="0" value="${s.employeeWage}" oninput="jccUpdateLaborField('employeeWage', this.value)">
+      <div class="jcc-summary-row"><span>Order prep time</span><span><input type="number" min="0" class="jcc-inline-input" style="width:56px;" placeholder="0" value="${s.orderPrepMin || ''}" oninput="jccUpdateLaborField('orderPrepMin', this.value)"> min</span></div>
+      <div class="jcc-summary-row"><span>Build time</span><span><input type="number" min="0" class="jcc-inline-input" style="width:56px;" placeholder="0" value="${s.buildMin || ''}" oninput="jccUpdateLaborField('buildMin', this.value)"> min</span></div>
+      <div class="jcc-summary-row"><span>Load / unload time</span><span><input type="number" min="0" class="jcc-inline-input" style="width:56px;" placeholder="0" value="${s.loadUnloadMin || ''}" oninput="jccUpdateLaborField('loadUnloadMin', this.value)"> min</span></div>
+      <div class="jcc-summary-row"><span>Setup time</span><span><input type="number" min="0" class="jcc-inline-input" style="width:56px;" placeholder="0" value="${s.setupMin || ''}" oninput="jccUpdateLaborField('setupMin', this.value)"> min</span></div>
+      <div class="jcc-summary-row"><span>Other</span><span><input type="number" min="0" class="jcc-inline-input" style="width:56px;" placeholder="0" value="${s.otherMin || ''}" oninput="jccUpdateLaborField('otherMin', this.value)"> min</span></div>
+
+      <div class="jcc-employee-cost-block">
+        <div class="jcc-summary-row" style="padding:0;">
+          <span style="position:relative;">Employee cost average ($/hr) ${jccInfoIconHtml('employee-cost', 'What they cost you per hour, not their paycheck rate — include payroll tax, workers comp, etc.')}</span>
+          <input type="number" step="0.01" min="0" class="jcc-inline-input" value="${s.employeeWage}" oninput="jccUpdateLaborField('employeeWage', this.value)">
         </div>
       </div>
+
       <div class="jcc-summary-row"><span>Total labor time</span><b id="jcc-labor-time">0 min</b></div>
       <div class="jcc-summary-row" style="font-size:15px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total labor cost</span><b id="jcc-labor-cost" style="color:var(--accent);">$0.00</b></div>
     </div>
@@ -4026,20 +4064,26 @@ function jccRenderShell() {
         <b id="jcc-min-sale">$0.00</b>
       </div>
       <div class="jcc-summary-row" style="font-size:14px; border-top:0.5px solid var(--border); padding-top:8px;">
-        <span>Retail — Core <span style="font-size:11px; color:var(--text-secondary);">(×<input type="number" step="0.01" min="1" class="jcc-inline-input" style="width:52px;" value="${s.coreMultiplier}" onchange="jccUpdateMultiplier('coreMultiplier', this.value)">)</span></span>
+        <span>Retail — Core <span style="font-size:11px; color:var(--text-secondary);">×<input type="text" inputmode="decimal" class="jcc-plain-input" value="${s.coreMultiplier}" onchange="jccUpdateMultiplier('coreMultiplier', this.value)"></span></span>
         <b id="jcc-retail-core" style="color:var(--accent);">$0.00</b>
       </div>
       <div class="jcc-summary-row" style="font-size:14px;">
-        <span>Retail — Complex <span style="font-size:11px; color:var(--text-secondary);">(×<input type="number" step="0.01" min="1" class="jcc-inline-input" style="width:52px;" value="${s.complexMultiplier}" onchange="jccUpdateMultiplier('complexMultiplier', this.value)">)</span></span>
+        <span>Retail — Complex <span style="font-size:11px; color:var(--text-secondary);">×<input type="text" inputmode="decimal" class="jcc-plain-input" value="${s.complexMultiplier}" onchange="jccUpdateMultiplier('complexMultiplier', this.value)"></span></span>
         <b id="jcc-retail-complex" style="color:var(--accent);">$0.00</b>
       </div>
       <div class="jcc-summary-row" style="font-size:14px;">
-        <span>Retail — Premium <span style="font-size:11px; color:var(--text-secondary);">(×<input type="number" step="0.01" min="1" class="jcc-inline-input" style="width:52px;" value="${s.premiumMultiplier}" onchange="jccUpdateMultiplier('premiumMultiplier', this.value)">)</span></span>
+        <span>Retail — Premium <span style="font-size:11px; color:var(--text-secondary);">×<input type="text" inputmode="decimal" class="jcc-plain-input" value="${s.premiumMultiplier}" onchange="jccUpdateMultiplier('premiumMultiplier', this.value)"></span></span>
         <b id="jcc-retail-premium" style="color:var(--accent);">$0.00</b>
       </div>
     </div>
 
-    <div class="section-label">Reference catalog <span style="text-transform:none; font-weight:400;">(editable costs)</span></div>
+    <div class="section-label">Quick Add Reference <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— Standard Assembled Products</span></div>
+    <div class="card" style="margin-bottom:0.75rem;">
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Products you've built and saved from the calculator above — pick one by name instead of re-listing its raw materials every time.</div>
+      <div id="jcc-quickadd"></div>
+    </div>
+
+    <div class="section-label">Material Cost Reference <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— Raw Costs</span></div>
     <div class="card" style="margin-bottom:0.75rem;">
       <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Two vendor prices per item, averaged — picking an item above auto-fills its cost from here.</div>
       <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -4053,6 +4097,7 @@ function jccRenderShell() {
   `;
   jccRenderRows();
   jccRenderCatalog();
+  jccRenderQuickAdd();
 }
 
 // ─── Custom items (materials) ───────────────────────────────────────────────
@@ -4071,6 +4116,10 @@ function jccRenderRows() {
         </div>
         ${jccState.rows.map(row => jccRowHtml(row)).join('')}`
       : `<div style="text-align:center; color:var(--text-secondary); padding:6px 0;">No items yet — add one below.</div>`}
+    <div style="display:flex; justify-content:space-between; align-items:center; margin:8px 0 2px; gap:8px;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="jccAddRow()"><i class="fa-solid fa-plus"></i> Add item</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="jccSaveAsQuickAdd()"><i class="fa-solid fa-bookmark"></i> Save as Quick Add</button>
+    </div>
     <div class="jcc-summary-row" style="border-top:0.5px solid var(--border); margin-top:6px; padding-top:8px;"><span>Material cost</span><b id="jcc-material-cost">$0.00</b></div>
     <div class="jcc-summary-row" style="color:var(--text-secondary);"><span>Consumables / waste <input type="number" step="0.1" min="0" class="jcc-inline-input" value="${jccState.consumablesPct}" onchange="jccUpdateConsumablesPct(this.value)">%</span><b id="jcc-consumables-amt">$0.00</b></div>
     <div class="jcc-summary-row" style="font-size:14px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total material cost</span><b id="jcc-total-material-cost" style="color:var(--accent);">$0.00</b></div>
@@ -4141,20 +4190,19 @@ function jccUpdateMultiplier(field, value) {
   jccRecalcTotals();
 }
 
-// Updates only the computed totals (never rebuilds the row inputs), so typing a qty, unit
-// cost, or labor field doesn't blow away focus mid-keystroke — same split-render trick used
-// elsewhere in this app (Inventory's results list, the Letter Styling Calculator).
+// Pure calculation, no DOM — shared by jccRecalcTotals (which paints these onto the page) and
+// jccSaveAsQuickAdd (which needs totalMaterialCost without caring about the page at all).
 //
 // Minimum Sale Price = Direct Cost ÷ profit margin (the margin is editable per job, not fixed).
 // Retail Core/Complex/Premium = Minimum Sale Price × their own editable multiplier (defaults
 // 1.1 / 1.2 / 1.33, confirmed against the real spreadsheet's formulas).
-function jccRecalcTotals() {
+function jccComputeTotals() {
   let materialCost = 0;
+  const rowTotals = {};
   jccState.rows.forEach(row => {
     const total = row.qty * row.unitCost;
     materialCost += total;
-    const el = document.getElementById('jcc-row-total-' + row.id);
-    if (el) el.textContent = jccFmtMoney(total);
+    rowTotals[row.id] = total;
   });
   const consumables = materialCost * (jccState.consumablesPct / 100);
   const totalMaterialCost = materialCost + consumables;
@@ -4167,21 +4215,35 @@ function jccRecalcTotals() {
   // e.g. a 45% margin means cost is 55% of price, matching the spreadsheet's own ÷0.55.
   const costRatio = 1 - (jccState.profitMarginPct / 100);
   const minSale = costRatio > 0 ? directCost / costRatio : 0;
-  const retailCore = minSale * jccState.coreMultiplier;
-  const retailComplex = minSale * jccState.complexMultiplier;
-  const retailPremium = minSale * jccState.premiumMultiplier;
 
+  return {
+    rowTotals, materialCost, consumables, totalMaterialCost, laborMinutes, laborCost, directCost, minSale,
+    retailCore: minSale * jccState.coreMultiplier,
+    retailComplex: minSale * jccState.complexMultiplier,
+    retailPremium: minSale * jccState.premiumMultiplier,
+  };
+}
+
+// Updates only the computed totals (never rebuilds the row inputs), so typing a qty, unit
+// cost, or labor field doesn't blow away focus mid-keystroke — same split-render trick used
+// elsewhere in this app (Inventory's results list, the Letter Styling Calculator).
+function jccRecalcTotals() {
+  const t = jccComputeTotals();
+  jccState.rows.forEach(row => {
+    const el = document.getElementById('jcc-row-total-' + row.id);
+    if (el) el.textContent = jccFmtMoney(t.rowTotals[row.id]);
+  });
   const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
-  set('jcc-material-cost', jccFmtMoney(materialCost));
-  set('jcc-consumables-amt', jccFmtMoney(consumables));
-  set('jcc-total-material-cost', jccFmtMoney(totalMaterialCost));
-  set('jcc-labor-time', laborMinutes + ' min');
-  set('jcc-labor-cost', jccFmtMoney(laborCost));
-  set('jcc-direct-cost', jccFmtMoney(directCost));
-  set('jcc-min-sale', jccFmtMoney(minSale));
-  set('jcc-retail-core', jccFmtMoney(retailCore));
-  set('jcc-retail-complex', jccFmtMoney(retailComplex));
-  set('jcc-retail-premium', jccFmtMoney(retailPremium));
+  set('jcc-material-cost', jccFmtMoney(t.materialCost));
+  set('jcc-consumables-amt', jccFmtMoney(t.consumables));
+  set('jcc-total-material-cost', jccFmtMoney(t.totalMaterialCost));
+  set('jcc-labor-time', t.laborMinutes + ' min');
+  set('jcc-labor-cost', jccFmtMoney(t.laborCost));
+  set('jcc-direct-cost', jccFmtMoney(t.directCost));
+  set('jcc-min-sale', jccFmtMoney(t.minSale));
+  set('jcc-retail-core', jccFmtMoney(t.retailCore));
+  set('jcc-retail-complex', jccFmtMoney(t.retailComplex));
+  set('jcc-retail-premium', jccFmtMoney(t.retailPremium));
 }
 
 // Type-ahead: matches the catalog by substring on name, same interaction pattern as
@@ -4203,11 +4265,11 @@ function jccShowItemSuggestions(rowId) {
 }
 function jccPickItemSuggestion(rowId, itemId) {
   const row = jccState.rows.find(r => r.id === rowId);
-  const item = JCC_CATALOG.find(i => i.id === itemId);
+  const item = jccAllCatalogItems().find(i => i.id === itemId);
   if (!row || !item) return;
   row.name = item.name;
   row.catalogId = item.id;
-  row.unitCost = Math.round(jccPricePerItem(item) * 100) / 100;
+  row.unitCost = Math.round(item.pricePerItem * 100) / 100;
 
   const nameInput = document.getElementById(jccNameInputId(rowId));
   if (nameInput) nameInput.value = row.name;
@@ -4224,6 +4286,49 @@ function jccHideItemSuggestionsSoon(rowId) {
     const container = document.getElementById(jccNameInputId(rowId) + '-suggest');
     if (container) container.style.display = 'none';
   }, 150);
+}
+
+// ─── Quick Add Reference (user-saved assembled products) ────────────────────
+
+// Captures the calculator's current Total Material Cost as a reusable named product — e.g.
+// build out "1 hifloated 11in balloon" as custom items once, save it, then just add "Hifloated
+// 11in Balloon" as a single line item (qty × saved cost) when pricing a bouquet later, instead
+// of re-listing helium/balloon/hifloat every time. Deliberately saves materials only, not
+// labor — labor here is tracked per job, not per sub-item.
+function jccSaveAsQuickAdd() {
+  const totalMaterialCost = jccComputeTotals().totalMaterialCost;
+  const name = prompt('Name this product (e.g. "Hifloated 11" Balloon"):');
+  if (!name || !name.trim()) return;
+  JCC_QUICK_ADD.push({ id: 'quickadd_' + (++jccQuickAddSeq), name: name.trim(), cost: Math.round(totalMaterialCost * 100) / 100 });
+  jccRenderQuickAdd();
+  window.fbSaveJccQuickAdd({ items: JCC_QUICK_ADD }).catch(err => console.error('Quick Add save failed:', err));
+}
+
+function jccRenderQuickAdd() {
+  const container = document.getElementById('jcc-quickadd');
+  if (!container) return;
+  container.innerHTML = JCC_QUICK_ADD.length === 0
+    ? `<div style="text-align:center; color:var(--text-secondary); padding:4px 0;">Nothing saved yet — use "Save as Quick Add" above to add your first one.</div>`
+    : JCC_QUICK_ADD.map(item => `
+        <div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:0.5px solid var(--border);">
+          <div style="flex:1; font-size:13px;">${psEscape(item.name)}</div>
+          <div>$<input type="number" step="0.01" min="0" class="jcc-inline-input" style="width:60px;" value="${item.cost}" onchange="jccUpdateQuickAddCost('${item.id}', this.value)"></div>
+          <div class="jcc-col-del" onclick="jccRemoveQuickAdd('${item.id}')"><i class="fa-solid fa-trash"></i></div>
+        </div>
+      `).join('');
+}
+
+function jccUpdateQuickAddCost(itemId, value) {
+  const item = JCC_QUICK_ADD.find(i => i.id === itemId);
+  if (!item) return;
+  item.cost = parseFloat(value) || 0;
+  window.fbSaveJccQuickAdd({ items: JCC_QUICK_ADD }).catch(err => console.error('Quick Add save failed:', err));
+}
+
+function jccRemoveQuickAdd(itemId) {
+  JCC_QUICK_ADD = JCC_QUICK_ADD.filter(i => i.id !== itemId);
+  jccRenderQuickAdd();
+  window.fbSaveJccQuickAdd({ items: JCC_QUICK_ADD }).catch(err => console.error('Quick Add save failed:', err));
 }
 
 // ─── Reference catalog ───────────────────────────────────────────────────────
