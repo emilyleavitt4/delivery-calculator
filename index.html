@@ -3044,8 +3044,15 @@ function invToggleGroup(key) {
 
 // Permanently deletes every color currently shown in this group (respecting the active search
 // filter — "what you see is what gets cleared"). Destructive and irreversible, so it requires
-// typing DELETE rather than a plain OK/Cancel confirm.
+// BOTH the admin passcode (same one that gates price/par edits — skipped if already unlocked
+// this session) AND typing DELETE, rather than a plain OK/Cancel confirm.
 function invClearGroup(key) {
+  if (!invAdminUnlocked) {
+    const entered = prompt('Enter the admin passcode to delete a whole group:');
+    if (entered === null) return;
+    if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode — nothing deleted.'); return; }
+  }
+
   const upcomingMap = invComputeUpcoming();
   const items = invFilteredSortedItems();
   const groups = invGroupedItems(items, upcomingMap);
