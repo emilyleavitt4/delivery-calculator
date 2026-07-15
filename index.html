@@ -655,6 +655,18 @@
   .inv-color-row-brand { font-size: 11px; color: var(--text-secondary); }
   .inv-color-row-chevron { color: var(--text-tertiary); font-size: 12px; }
 
+  /* Type-ahead suggestions for matching a typed color name to an actual Inventory color */
+  .inv-color-suggest {
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    margin-top: 2px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  }
+  .inv-color-suggest-item { padding: 8px 10px; font-size: 13px; cursor: pointer; }
+  .inv-color-suggest-item:hover, .inv-color-suggest-item:active { background: var(--accent-light); }
+
   @media print {
     .topbar, .no-print, #ps-production-empty, #ps-staffing-empty { display: none !important; }
   }
@@ -1974,6 +1986,97 @@ function psLineRecipe(line) {
   return line.customRecipe || RECIPES.find(x => x.id === line.recipeId);
 }
 
+// ─── COLOR PICKER (Production) ───
+//
+// A multi-row "type and see matching Inventory colors" picker, shared between the "Add an
+// item" form (key = `${jobId}|new`) and editing an already-added item's colors (key =
+// `${jobId}|${idx}`) — so a job's colors can actually be trusted to match Inventory for the
+// Upcoming calculation, whether they were typed fresh or are being fixed up after an invoice
+// import. psColorDraftStore holds the in-progress rows per key; psEditingColorsKey tracks
+// which existing item (if any) currently has its edit picker open.
+let psColorDraftStore = {};
+let psEditingColorsKey = null;
+
+function psColorDraftKey(jobId, idx) { return jobId + '|' + (idx === undefined ? 'new' : idx); }
+function psGetColorDraft(key, fallback) {
+  if (!psColorDraftStore[key]) psColorDraftStore[key] = (fallback && fallback.length) ? [...fallback] : [''];
+  return psColorDraftStore[key];
+}
+// Adding/removing a color row triggers a full psRenderProductionJobs(), which would otherwise
+// reset the rest of the still-open "Add an item" form (item/qty/design/location) back to
+// blank — this snapshots those sibling fields first and restores them after, for the 'new'
+// item context only (editing an existing item's colors has no sibling fields to preserve).
+function psWithFormPreserved(key, renderFn) {
+  const jobId = key.split('|')[0];
+  const isNew = key.endsWith('|new');
+  const fieldIds = isNew ? ['pi-item-', 'pi-qty-', 'pi-design-', 'pi-location-', 'pi-linear-', 'pi-topper-'] : [];
+  const saved = {};
+  fieldIds.forEach(prefix => {
+    const el = document.getElementById(prefix + jobId);
+    if (el) saved[prefix] = el.value;
+  });
+  renderFn();
+  fieldIds.forEach(prefix => {
+    const el = document.getElementById(prefix + jobId);
+    if (el && saved[prefix] !== undefined) el.value = saved[prefix];
+  });
+  if (isNew && saved['pi-item-'] !== undefined) psItemFieldsChanged(jobId);
+}
+function psAddColorDraftRow(key) {
+  psGetColorDraft(key).push('');
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
+function psRemoveColorDraftRow(key, idx) {
+  const draft = psGetColorDraft(key);
+  draft.splice(idx, 1);
+  if (draft.length === 0) draft.push('');
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
+function psUpdateColorDraftRow(key, idx, value) {
+  psGetColorDraft(key)[idx] = value; // no re-render — keeps focus/suggestions working while typing
+}
+function psColorRowHtml(key, idx, value, canRemove) {
+  const inputId = 'pi-color-' + key.replace(/[|]/g, '-') + '-' + idx;
+  return `<div style="position:relative; margin-bottom:6px;">
+    <div style="display:flex; gap:6px;">
+      <input type="text" id="${inputId}" value="${psEscape(value)}" placeholder="Start typing a color..." style="flex:1;"
+        oninput="psUpdateColorDraftRow('${key}', ${idx}, this.value); invShowColorSuggestions('${inputId}')"
+        onblur="invHideColorSuggestionsSoon('${inputId}')">
+      <button class="icon-btn" style="padding:4px;" onclick="psRemoveColorDraftRow('${key}', ${idx})" ${canRemove ? '' : 'disabled'} aria-label="Remove color"><i class="fa-solid fa-trash"></i></button>
+    </div>
+    <div id="${inputId}-suggest" class="inv-color-suggest" style="display:none;"></div>
+  </div>`;
+}
+function psColorPickerHtml(key, draft) {
+  return draft.map((v, idx) => psColorRowHtml(key, idx, v, draft.length > 1)).join('') +
+    `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="psAddColorDraftRow('${key}')"><i class="fa-solid fa-plus"></i> Add color</button>`;
+}
+function psStartEditColors(jobId, idx) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const key = psColorDraftKey(jobId, idx);
+  psColorDraftStore[key] = [...job.productionItems[idx].colors];
+  psEditingColorsKey = key;
+  psRenderProductionJobs();
+}
+function psCancelEditColors() {
+  if (psEditingColorsKey) delete psColorDraftStore[psEditingColorsKey];
+  psEditingColorsKey = null;
+  psRenderProductionJobs();
+}
+function psSaveEditColors(jobId, idx) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const key = psColorDraftKey(jobId, idx);
+  const colors = (psColorDraftStore[key] || []).map(c => c.trim()).filter(Boolean);
+  if (colors.length === 0) { alert('Enter at least one color.'); return; }
+  job.productionItems[idx].colors = colors;
+  delete job.productionItems[idx].colorDist; // percentages would no longer line up with the edited color list
+  delete psColorDraftStore[key];
+  psEditingColorsKey = null;
+  psSaveJob(job);
+}
+
 function psProductionBodyHtml(job) {
   let html = '';
 
@@ -2028,6 +2131,23 @@ function psProductionBodyHtml(job) {
       if (line.design) html += `<b>Design:</b> ${psEscape(line.design)}<br>`;
       if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
       html += `</div>`;
+
+      const editKey = psColorDraftKey(job.id, idx);
+      if (psEditingColorsKey === editKey) {
+        html += `<div class="settings-field no-print" style="margin-top:0.5rem;">
+          <label>Colors</label>
+          ${psColorPickerHtml(editKey, psGetColorDraft(editKey, line.colors))}
+          <div style="display:flex; gap:8px; margin-top:0.4rem;">
+            <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="psSaveEditColors('${job.id}', ${idx})">Save colors</button>
+            <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="psCancelEditColors()">Cancel</button>
+          </div>
+        </div>`;
+      } else {
+        html += `<div class="no-print" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem;">
+          <div style="font-size:13px; color:var(--text-secondary);"><b style="color:var(--text);">Colors:</b> ${psEscape(line.colors.join(' / '))}</div>
+          <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditColors('${job.id}', ${idx})">Edit</button>
+        </div>`;
+      }
       html += `<div class="settings-field no-print" style="margin-top:0.5rem;">
         <label>Build notes</label>
         <textarea rows="2" placeholder="Add construction notes..." onchange="psUpdateItemNotes('${job.id}', ${idx}, this.value)">${line.notes ? psEscape(line.notes) : ''}</textarea>
@@ -2046,9 +2166,10 @@ function psProductionBodyHtml(job) {
     <label>Actual footage</label>
     <input type="number" id="pi-linear-${job.id}" inputmode="decimal" placeholder="e.g. 30">
   </div>`;
-  html += `<div class="row">
-    <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" id="pi-qty-${job.id}" value="1" min="1" inputmode="numeric"></div>
-    <div class="settings-field" style="margin-bottom:0"><label>Colors</label><input type="text" id="pi-colors-${job.id}" placeholder="White, Pink, Fuchsia"></div>
+  html += `<div class="settings-field"><label>Quantity</label><input type="number" id="pi-qty-${job.id}" value="1" min="1" inputmode="numeric"></div>`;
+  html += `<div class="settings-field">
+    <label>Colors</label>
+    ${psColorPickerHtml(psColorDraftKey(job.id), psGetColorDraft(psColorDraftKey(job.id)))}
   </div>`;
   html += `<div class="row">
     <div class="settings-field" style="margin-bottom:0"><label>Design (optional)</label><input type="text" id="pi-design-${job.id}" placeholder="e.g. Small Color Block"></div>
@@ -2085,8 +2206,9 @@ function psAddItemToJob(jobId) {
   if (!job) return;
   const recipe = RECIPES.find(r => r.id === document.getElementById('pi-item-' + jobId).value);
   const qty = parseFloat(document.getElementById('pi-qty-' + jobId).value) || 1;
-  const colorsRaw = document.getElementById('pi-colors-' + jobId).value.trim();
-  const colors = colorsRaw ? colorsRaw.split(',').map(c => c.trim()).filter(Boolean) : ['Unspecified'];
+  const draftKey = psColorDraftKey(jobId);
+  const colorsTyped = (psColorDraftStore[draftKey] || []).map(c => c.trim()).filter(Boolean);
+  const colors = colorsTyped.length ? colorsTyped : ['Unspecified'];
   const design = document.getElementById('pi-design-' + jobId).value.trim();
   const location = document.getElementById('pi-location-' + jobId).value.trim();
   const topperNote = recipe.category === 'Column' ? document.getElementById('pi-topper-' + jobId).value.trim() : '';
@@ -2098,6 +2220,7 @@ function psAddItemToJob(jobId) {
   }
 
   job.productionItems.push({ recipeId: recipe.id, qty, colors, customLinear, design, location, topperNote, notes: '' });
+  delete psColorDraftStore[draftKey]; // reset the color picker to a single blank row for next time
   psSaveJob(job);
 }
 
@@ -2410,7 +2533,10 @@ function qcRender() {
       <div class="row" style="grid-template-columns: 1fr 36px; margin-bottom:0.4rem;">
         <div class="settings-field" style="margin-bottom:0">
           ${idx === 0 ? '<label>Color</label>' : ''}
-          <input type="text" value="${psEscape(c.name)}" oninput="qcColorNameInput(${idx}, this.value)">
+          <input type="text" id="qc-color-name-${idx}" value="${psEscape(c.name)}" placeholder="Start typing a color..."
+            oninput="qcColorNameInput(${idx}, this.value); invShowColorSuggestions('qc-color-name-${idx}')"
+            onblur="invHideColorSuggestionsSoon('qc-color-name-${idx}')">
+          <div id="qc-color-name-${idx}-suggest" class="inv-color-suggest" style="display:none;"></div>
         </div>
         <button class="icon-btn" style="align-self:${idx === 0 ? 'flex-end' : 'center'};" onclick="qcRemoveColorRow(${idx})" aria-label="Remove color" ${qcState.colors.length <= 1 ? 'disabled' : ''}><i class="fa-solid fa-trash"></i></button>
       </div>
@@ -2993,6 +3119,49 @@ function invNeedBreakdown(sd, upcoming, pendingBags) {
 }
 function invSortedItems() {
   return [...INVENTORY_ITEMS].sort((a, b) => a.color.localeCompare(b.color) || (a.brand || '').localeCompare(b.brand || ''));
+}
+// Every distinct color name currently in Inventory (deduped across brands, since Jobs don't
+// track brand) — the source list for the "start typing, see matches" color suggestions used
+// on Production's color entry and the Quantity Calculator's color rows, so a job's color text
+// can actually be trusted to match up with Inventory for the Upcoming calculation.
+function invAllColorNames() {
+  const seen = new Set();
+  INVENTORY_ITEMS.forEach(i => seen.add(i.color));
+  return [...seen].sort((a, b) => a.localeCompare(b));
+}
+// Shows up to 6 Inventory colors matching the current value of #<inputId>, in a sibling
+// #<inputId>-suggest div. Reused anywhere a color name is typed (Production's color rows,
+// Quantity Calculator's color rows) — each field just needs a matching "-suggest" div next
+// to it and this wired to its oninput alongside whatever else that field already does.
+function invShowColorSuggestions(inputId) {
+  const input = document.getElementById(inputId);
+  const container = document.getElementById(inputId + '-suggest');
+  if (!input || !container) return;
+  const q = input.value.trim().toLowerCase();
+  if (!q) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  const matches = invAllColorNames().filter(c => c.toLowerCase().includes(q)).slice(0, 6);
+  if (matches.length === 0) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  container.innerHTML = matches.map(m =>
+    `<div class="inv-color-suggest-item" onmousedown="event.preventDefault(); invPickColorSuggestion('${inputId}', '${m.replace(/'/g, "\\'")}')">${psEscape(m)}</div>`
+  ).join('');
+  container.style.display = 'block';
+}
+// onmousedown (not onclick) + preventDefault so the suggestion click registers before the
+// input's own blur hides the list.
+function invPickColorSuggestion(inputId, color) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  input.value = color;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  const container = document.getElementById(inputId + '-suggest');
+  if (container) { container.style.display = 'none'; container.innerHTML = ''; }
+  input.focus();
+}
+function invHideColorSuggestionsSoon(inputId) {
+  setTimeout(() => {
+    const container = document.getElementById(inputId + '-suggest');
+    if (container) container.style.display = 'none';
+  }, 150);
 }
 // Search matches color OR brand (case-insensitive substring); items are always alphabetical
 // by color name within whatever group they land in — grouping (Main/Misc vs. brand) is a
