@@ -2860,9 +2860,14 @@ function invLockAdmin() {
 }
 let invCollapsedGroups = new Set(); // group keys currently collapsed
 let invPendingCollapsed = false;
+let invImportCollapsed = false;
 
 function invTogglePendingCollapsed() {
   invPendingCollapsed = !invPendingCollapsed;
+  invRenderLatex();
+}
+function invToggleImportCollapsed() {
+  invImportCollapsed = !invImportCollapsed;
   invRenderLatex();
 }
 
@@ -3225,14 +3230,23 @@ function invRenderLatex() {
     }
   }
 
-  html += `<div class="section-label">Colors</div>`;
-  if (INVENTORY_ITEMS.length === 0) {
-    html += `<div class="card" style="text-align:center;">
-      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Starting from scratch? Import by brand instead of typing colors in one by one.</div>
+  // Import by brand — its own always-present collapsible section (not just for an empty
+  // inventory), so you can pull in another brand's colors anytime, not only on first setup.
+  html += `<div class="inv-group-header" onclick="invToggleImportCollapsed()">
+    <span>Import by brand</span>
+    <i class="fa-solid fa-chevron-${invImportCollapsed ? 'down' : 'up'}"></i>
+  </div>`;
+  if (!invImportCollapsed) {
+    html += `<div class="card">
       <div style="display:flex; flex-direction:column; gap:6px;">
         ${INV_SEED_BRANDS.map(b => `<button class="save-btn" style="width:auto;" onclick="invImportByBrand('${b}')"><i class="fa-solid fa-file-import"></i> Import ${b}</button>`).join('')}
       </div>
     </div>`;
+  }
+
+  html += `<div class="section-label">Colors</div>`;
+  if (INVENTORY_ITEMS.length === 0) {
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — import a brand above or add one below.</div>`;
   } else {
     html += `<div class="card">
       <div class="settings-field" style="margin-bottom:0.6rem;">
