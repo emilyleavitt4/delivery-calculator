@@ -727,6 +727,13 @@
   window.fbLoadAdminLock = () => getDoc(adminLockDocRef);
   window.fbSaveAdminLock = (data) => setDoc(adminLockDocRef, data);
 
+  // Job Cost Calculator's reference catalog (per-item cost at two vendors, averaged) —
+  // one shared doc like Formulas, since these are business-wide reference prices, not
+  // per-job data.
+  const jccCatalogDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'jccCatalog');
+  window.fbLoadJccCatalog = () => getDoc(jccCatalogDocRef);
+  window.fbSaveJccCatalog = (data) => setDoc(jccCatalogDocRef, data);
+
   // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
   // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
   const customRecipesRef = collection(db, 'businesses', BUSINESS_ID, 'customRecipes');
@@ -827,12 +834,12 @@
         <div class="tool-tile-title">Quantity Calculator</div>
       </div>
 
-      <div class="tool-tile soon">
+      <div class="tool-tile" onclick="showView('jobcost')">
         <div class="tool-tile-icon"><i class="fa-solid fa-tags"></i></div>
         <div class="tool-tile-title">Job Cost Calculator</div>
       </div>
 
-      <div class="tool-tile soon">
+      <div class="tool-tile" onclick="showView('letters')">
         <div class="tool-tile-icon"><i class="fa-solid fa-font"></i></div>
         <div class="tool-tile-title">Letter Styling Calculator</div>
       </div>
@@ -1169,6 +1176,24 @@
   <div class="view" id="view-inventory-latex">
     <div id="inv-latex-root"></div>
   </div><!-- end view-inventory-latex -->
+
+  <!-- ═══════════════════════════════════════ LETTER STYLING CALCULATOR VIEW -->
+  <!-- Built entirely in JS from letState — sizing/pricing formulas reverse-engineered from
+       the real Master Calculators spreadsheet (Letter Styling Calculator tab), verified
+       against its example numbers and the actual cell formulas for the trickier Double
+       Stacked case. -->
+  <div class="view" id="view-letters">
+    <div id="let-root"></div>
+  </div><!-- end view-letters -->
+
+  <!-- ═══════════════════════════════════════ JOB COST CALCULATOR VIEW -->
+  <!-- Custom-items cost estimator + an editable reference catalog (regular items priced at
+       two vendors each, averaged) sourced from the Job Cost Sandbox tab. Labor and the
+       final markup/retail-price tiers from that sheet aren't built here yet — their
+       formulas weren't specified, so this covers materials costing only for now. -->
+  <div class="view" id="view-jobcost">
+    <div id="jcc-root"></div>
+  </div><!-- end view-jobcost -->
 
   <!-- ═══════════════════════════════════════ SETTINGS VIEW -->
   <div class="view" id="view-settings">
@@ -1553,6 +1578,8 @@ const TOOL_META = {
   formulas:   { title: 'Formulas & Recipes',            icon: 'fa-solid fa-flask',               showBack: true,  showGear: false },
   inventory:  { title: 'Inventory',                     icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: false },
   'inventory-latex': { title: 'Latex Inventory',        icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: false },
+  letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: false },
+  jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
 };
 
@@ -3629,6 +3656,519 @@ function invColorCardHtml(item, upcomingMap) {
   return html;
 }
 
+// ═══════════════════════════════════════ LETTER STYLING CALCULATOR VIEW ═══════════════════════════════════════
+//
+// Formulas reverse-engineered from the real Master Calculators spreadsheet, verified against
+// its worked example (H=3, W=2, single count=3, double bottom=9/top=10) and, for Double
+// Stacked specifically, against the actual cell formulas (since the numbers alone were
+// under-determined). One real quirk baked in on purpose, not a bug: Double Stacked's Up & Over
+// framing uses the BOTTOM digit count, not top, despite sitting next to the "top digits"
+// label in the original sheet — confirmed directly against the source formula.
+//
+// Every style's raw foil count (framing / 3) is used for PRICE as-is (fractional), but rounded
+// up for the "how many to buy" count — matching the sheet's own $23.33-style additional-foil
+// pricing. Book End is the one exception throughout: its foil count is fixed (4 single / 8
+// double) per the sheet's explicit note, not the framing/3 rule, and it doesn't depend on
+// letter count at all — it's sized from height alone (end-cap accents scale with letter
+// height, not word length).
+
+let letState = null;
+
+function letInit() {
+  letState = {
+    height: 3, width: 2, pricePerFt: 29, pricePerFoil: 5,
+    singleCount: 3, singleSpaces: 0,
+    doubleBottom: 9, doubleTop: 10, doubleSpaces: 0
+  };
+  letRenderShell();
+}
+
+// Shared per-style math: given the style's own framing/filler/raw-foil-count, works out
+// total feet and all three price figures the same way for every style.
+function letResult(framing, filler, foilsRaw, s) {
+  const totalFeet = framing + filler;
+  const minSale = totalFeet * s.pricePerFt;
+  const foilPrice = foilsRaw * s.pricePerFoil;
+  return { framing, filler, totalFeet, foilsRaw, foilsToBuy: Math.ceil(foilsRaw), minSale, foilPrice, withFoil: minSale + foilPrice };
+}
+
+function letComputeSingle(s) {
+  const { height: H, width: W, singleCount: N, singleSpaces: SP } = s;
+  const ffFraming = 2 * H + N * W + 2 + SP * 6;
+  const fcFraming = 2 * H + N * W + 2 + SP * 2;
+  const uoFraming = H + N * W + 1 + SP * 2;
+  const beEachSide = H + 1;
+  return {
+    fullFill: letResult(ffFraming, N * 1.5, ffFraming / 3, s),
+    fullCoverage: letResult(fcFraming, 0, fcFraming / 3, s),
+    upOver: letResult(uoFraming, 0, uoFraming / 3, s),
+    bookEnd: Object.assign(letResult(2 * beEachSide, 0, 4, s), { eachSide: beEachSide })
+  };
+}
+function letComputeDouble(s) {
+  const { height: H, width: W, doubleBottom: Nb, doubleTop: Nt, doubleSpaces: SP } = s;
+  const ffFraming = W * Nb + 4 * H + 2 + SP * 6;
+  const fcFraming = W * Nb + 4 * H + 2 + SP * 2;
+  const uoFraming = W * Nb + 2 * H + 1 + SP * 2; // uses Nb (bottom), not Nt — see note above
+  const beEachSide = 2 * H + 1;
+  return {
+    fullFill: letResult(ffFraming, (Nb + Nt) * 1.5, ffFraming / 3, s),
+    fullCoverage: letResult(fcFraming, 0, fcFraming / 3, s),
+    upOver: letResult(uoFraming, 0, uoFraming / 3, s),
+    bookEnd: Object.assign(letResult(2 * beEachSide, 0, 8, s), { eachSide: beEachSide })
+  };
+}
+
+function letFmtMoney(n) { return '$' + n.toFixed(2); }
+function letFmtFeet(n) { return (Math.round(n * 100) / 100).toString(); }
+
+function letStyleCardHtml(title, r, noteHtml) {
+  let html = `<div class="card">
+    <div class="card-title" style="text-transform:none; letter-spacing:normal;">${psEscape(title)}</div>`;
+  if (typeof r.eachSide === 'number') {
+    html += `<div style="font-size:13px; margin-bottom:2px;">Each side: <b>${letFmtFeet(r.eachSide)} ft</b></div>
+      <div style="font-size:13px; margin-bottom:2px;">Total: <b>${letFmtFeet(r.totalFeet)} ft</b></div>`;
+  } else {
+    html += `<div style="font-size:13px; margin-bottom:2px;">Framing: <b>${letFmtFeet(r.framing)} ft</b></div>`;
+    if (r.filler > 0) html += `<div style="font-size:13px; margin-bottom:2px;">Filler: <b>${letFmtFeet(r.filler)} ft</b></div>`;
+    html += `<div style="font-size:13px; margin-bottom:2px;">Total feet: <b>${letFmtFeet(r.totalFeet)} ft</b></div>`;
+  }
+  html += `<div style="font-size:13px; margin-bottom:8px;">Foils needed: <b>${r.foilsToBuy}</b></div>`;
+  html += `<div style="font-size:12px; color:var(--text-secondary); border-top:0.5px solid var(--border); padding-top:6px;">
+    <div>Min sale price (no foil): <b style="color:var(--text);">${letFmtMoney(r.minSale)}</b></div>
+    <div>Additional foil price: <b style="color:var(--text);">${letFmtMoney(r.foilPrice)}</b></div>
+    <div>Sale price with foil: <b style="color:var(--accent);">${letFmtMoney(r.withFoil)}</b></div>
+  </div>`;
+  if (noteHtml) html += `<div style="font-size:11px; color:var(--text-tertiary); margin-top:6px; font-style:italic;">${noteHtml}</div>`;
+  html += `</div>`;
+  return html;
+}
+
+function letSetField(field, value) {
+  letState[field] = parseFloat(value) || 0;
+  letRenderResults();
+}
+
+function letRenderShell() {
+  const root = document.getElementById('let-root');
+  if (!root) return;
+  const s = letState;
+  root.innerHTML = `
+    <div class="section-label" style="margin-top:0">Sizing &amp; pricing inputs</div>
+    <div class="card">
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Individual letter height (ft)</label><input type="number" step="0.1" min="0" value="${s.height}" oninput="letSetField('height', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Average letter width (ft)</label><input type="number" step="0.1" min="0" value="${s.width}" oninput="letSetField('width', this.value)"></div>
+      </div>
+      <div class="hint" style="margin:-0.5rem 0 0.75rem;">Letters and numbers are often different heights (e.g. 3 ft letters vs. 4 ft numbers) — just type in whatever applies to this job.</div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Price charged per foot ($)</label><input type="number" step="0.01" min="0" value="${s.pricePerFt}" oninput="letSetField('pricePerFt', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Price charged per foil ($)</label><input type="number" step="0.01" min="0" value="${s.pricePerFoil}" oninput="letSetField('pricePerFoil', this.value)"></div>
+      </div>
+    </div>
+
+    <div class="section-label">Single line</div>
+    <div class="card">
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>How many letters/numbers?</label><input type="number" min="0" value="${s.singleCount}" oninput="letSetField('singleCount', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Spaces in phrase</label><input type="number" min="0" value="${s.singleSpaces}" oninput="letSetField('singleSpaces', this.value)"></div>
+      </div>
+    </div>
+    <div id="let-single-results"></div>
+
+    <div class="section-label">Double stacked <span style="text-transform:none; font-weight:400;">(2 layers)</span></div>
+    <div class="card">
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>How many bottom digits?</label><input type="number" min="0" value="${s.doubleBottom}" oninput="letSetField('doubleBottom', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>How many top digits?</label><input type="number" min="0" value="${s.doubleTop}" oninput="letSetField('doubleTop', this.value)"></div>
+      </div>
+      <div class="settings-field"><label>Spaces in phrase</label><input type="number" min="0" value="${s.doubleSpaces}" oninput="letSetField('doubleSpaces', this.value)"></div>
+      <div class="hint">Bottom digits drive Full Fill, Full Coverage, and Up &amp; Over sizing. Top digits only add to Full Fill's filler amount — that's how the source spreadsheet actually computes it, not a simplification.</div>
+    </div>
+    <div id="let-double-results"></div>
+  `;
+  letRenderResults();
+}
+
+function letRenderResults() {
+  const s = letState;
+  const single = letComputeSingle(s);
+  const singleRoot = document.getElementById('let-single-results');
+  if (singleRoot) {
+    singleRoot.innerHTML =
+      letStyleCardHtml('Full Fill', single.fullFill, 'Covers 3 sides of each letter plus gap fillers. Add 6 ft of garland per space manually.') +
+      letStyleCardHtml('Full Coverage (no fill)', single.fullCoverage, 'Covers 3 sides of each letter, no fillers. Add 2 ft per space manually.') +
+      letStyleCardHtml('"Up & Over" (one side)', single.upOver, 'Up one side and across the top. Add 2 ft per space manually.') +
+      letStyleCardHtml('Book End (flanking each end)', single.bookEnd, 'Sized from height only — doesn\'t depend on letter count.');
+  }
+
+  const dbl = letComputeDouble(s);
+  const doubleRoot = document.getElementById('let-double-results');
+  if (doubleRoot) {
+    doubleRoot.innerHTML =
+      letStyleCardHtml('Full Fill', dbl.fullFill, 'Covers 3 sides plus gap fillers for both rows. Add 6 ft of garland per space manually.') +
+      letStyleCardHtml('Full Coverage (no fill)', dbl.fullCoverage, 'Covers 3 sides, no fillers. Add 2 ft per space manually.') +
+      letStyleCardHtml('"Up & Over" (one side)', dbl.upOver, 'Up one side and across the top. Add 2 ft per space manually.') +
+      letStyleCardHtml('Book End (flanking each end)', dbl.bookEnd, 'Sized from height only — doesn\'t depend on digit count.');
+  }
+}
+
+// ═══════════════════════════════════════ JOB COST CALCULATOR VIEW ═══════════════════════════════════════
+//
+// Two halves, stacked for mobile: a running list of custom material line items (with a
+// type-ahead that pulls cost straight from the reference catalog so you don't have to look
+// it up), and the catalog itself below — regularly-bought items priced at two vendors each,
+// averaged, editable behind the same admin lock as Inventory. Sourced from the Job Cost
+// Sandbox tab; Labor and the final markup/retail-price tiers from that sheet aren't built
+// here — their formulas weren't given, so this covers materials costing only for now.
+
+const JCC_CATEGORIES = [
+  { key: 'latex',     label: 'Latex Balloons', locA: 'LOFTUS',      locB: 'LA Balloons' },
+  { key: 'foil',      label: 'Foil Balloons',  locA: 'LOFTUS',      locB: 'Other' },
+  { key: 'supplies',  label: 'Supplies',       locA: 'Amazon',      locB: 'Other' },
+  { key: 'hardware',  label: 'Hardware',       locA: 'Home Depot',  locB: 'Lowes' },
+];
+
+const JCC_CATALOG_DEFAULTS = [
+  // Latex Balloons
+  { id: 'lat1',  category: 'latex', name: '5" standard',        costA: 5.25,  costB: 6.06,  count: 100, unit: 'balloon' },
+  { id: 'lat2',  category: 'latex', name: '5" reflex',          costA: 10.85, costB: 11.74, count: 100, unit: 'balloon' },
+  { id: 'lat3',  category: 'latex', name: '11" standard',       costA: 12.68, costB: 14.39, count: 100, unit: 'balloon' },
+  { id: 'lat4',  category: 'latex', name: '11" reflex',         costA: 12.73, costB: 13.60, count: 50,  unit: 'balloon' },
+  { id: 'lat5',  category: 'latex', name: '11" print',          costA: 15.55, costB: 19.70, count: 50,  unit: 'balloon' },
+  { id: 'lat6',  category: 'latex', name: '18" standard',       costA: 8.44,  costB: 10.14, count: 25,  unit: 'balloon' },
+  { id: 'lat7',  category: 'latex', name: '18" reflex',         costA: 22.48, costB: 23.79, count: 15,  unit: 'balloon' },
+  { id: 'lat8',  category: 'latex', name: '24" standard',       costA: 16.11, costB: 20.23, count: 10,  unit: 'balloon' },
+  { id: 'lat9',  category: 'latex', name: '24" reflex',         costA: 32.62, costB: 36.49, count: 10,  unit: 'balloon' },
+  { id: 'lat10', category: 'latex', name: '36" standard',       costA: 5.31,  costB: 5.96,  count: 2,   unit: 'balloon' },
+  { id: 'lat11', category: 'latex', name: '6" link standard',   costA: 3.95,  costB: 4.61,  count: 50,  unit: 'balloon' },
+  { id: 'lat12', category: 'latex', name: '12" link standard',  costA: 10.31, costB: 11.62, count: 50,  unit: 'balloon' },
+  { id: 'lat13', category: 'latex', name: '160 standard',       costA: 6.33,  costB: 6.74,  count: 100, unit: 'balloon' },
+  { id: 'lat14', category: 'latex', name: '260 standard',       costA: 4.10,  costB: 3.85,  count: 50,  unit: 'balloon' },
+  { id: 'lat15', category: 'latex', name: '260 reflex',         costA: 6.70,  costB: 7.07,  count: 50,  unit: 'balloon' },
+  { id: 'lat16', category: 'latex', name: '360 standard',       costA: 6.76,  costB: null,  count: 50,  unit: 'balloon' },
+
+  // Foil Balloons
+  { id: 'foil1', category: 'foil', name: 'Starburst Mini',        costA: null, costB: 3.50, count: 1, unit: 'balloon' },
+  { id: 'foil2', category: 'foil', name: 'Starburst Small',       costA: 2.36, costB: 4.50, count: 1, unit: 'balloon' },
+  { id: 'foil3', category: 'foil', name: 'Starburst Large',       costA: 3.12, costB: 4.99, count: 1, unit: 'balloon' },
+  { id: 'foil4', category: 'foil', name: 'Standard Foil 18"',     costA: 1.00, costB: 1.50, count: 1, unit: 'balloon' },
+  { id: 'foil5', category: 'foil', name: 'Jumbo Foil 30"',        costA: 3.25, costB: 5.00, count: 1, unit: 'balloon' },
+  { id: 'foil6', category: 'foil', name: 'Letter/Number Small',   costA: 1.23, costB: null, count: 1, unit: 'balloon' },
+  { id: 'foil7', category: 'foil', name: 'Letter/Number Large',   costA: 3.62, costB: null, count: 1, unit: 'balloon' },
+
+  // Supplies
+  { id: 'sup1',  category: 'supplies', name: '3m Hooks (Inside/Outside)', costA: 24.62, costB: null,  count: 40,   unit: 'hook' },
+  { id: 'sup2',  category: 'supplies', name: 'Duct Tape (6 pk)',          costA: 40.00, costB: 47.90, count: 72,   unit: 'yard' },
+  { id: 'sup3',  category: 'supplies', name: 'Clik Clik (5 lb)',          costA: 56.99, costB: 51.00, count: 20,   unit: 'magnet' },
+  { id: 'sup4',  category: 'supplies', name: 'Spring Clamp (Hyper Tough)',costA: null,  costB: 1.24,  count: 1,    unit: 'clamp' },
+  { id: 'sup5',  category: 'supplies', name: 'Curling Ribbon (500 yd)',   costA: 7.00,  costB: 2.04,  count: 500,  unit: 'balloon (2 yd)' },
+  { id: 'sup6',  category: 'supplies', name: 'Poly Ribbon (1.5")',        costA: 9.99,  costB: null,  count: 25,   unit: 'yard' },
+  { id: 'sup7',  category: 'supplies', name: 'Balloon Weight (4 oz foil)',costA: 17.99, costB: 9.00,  count: 12,   unit: 'weight' },
+  { id: 'sup8',  category: 'supplies', name: 'Rubber bands (Size 33)',    costA: 5.18,  costB: 12.78, count: 600,  unit: 'rubberband' },
+  { id: 'sup9',  category: 'supplies', name: 'uGlu (strips)',             costA: null,  costB: 54.56, count: 250,  unit: 'strip' },
+  { id: 'sup10', category: 'supplies', name: 'Monofilament (250 yd)',     costA: null,  costB: 2.42,  count: 250,  unit: 'yard' },
+  { id: 'sup11', category: 'supplies', name: 'Tomato Twine (6300 ft)',    costA: 12.95, costB: 32.00, count: 6300, unit: 'feet' },
+  { id: 'sup12', category: 'supplies', name: 'HiFloat (96 oz)',           costA: 44.49, costB: 41.07, count: 600,  unit: '11" balloon' },
+  { id: 'sup13', category: 'supplies', name: 'Aerosol Hi Shine (12 oz)',  costA: 21.55, costB: 13.97, count: 12,   unit: 'ounces' },
+  { id: 'sup14', category: 'supplies', name: 'Vinyl (20 ft)',             costA: 13.99, costB: 25.00, count: 20,   unit: 'feet' },
+  { id: 'sup15', category: 'supplies', name: 'Transport Bags (100 ct)',   costA: null,  costB: 64.99, count: 100,  unit: 'bag' },
+
+  // Hardware
+  { id: 'hw1',  category: 'hardware', name: '1/2" EMT (10 ft)',              costA: 5.98,  costB: 5.98,   count: 1,   unit: 'EMT' },
+  { id: 'hw2',  category: 'hardware', name: '3/4" EMT (10 ft)',              costA: 9.98,  costB: 10.58,  count: 1,   unit: 'EMT' },
+  { id: 'hw3',  category: 'hardware', name: '1/2" PVC (10 ft)',              costA: 2.62,  costB: 3.71,   count: 1,   unit: 'PVC' },
+  { id: 'hw4',  category: 'hardware', name: '3/4" PVC (10 ft)',              costA: 8.98,  costB: 7.98,   count: 1,   unit: 'PVC' },
+  { id: 'hw5',  category: 'hardware', name: '1" PVC (10 ft)',                costA: 11.86, costB: null,   count: 1,   unit: 'PVC' },
+  { id: 'hw6',  category: 'hardware', name: '16" Paver (16x16)',             costA: 4.17,  costB: null,   count: 1,   unit: 'paver' },
+  { id: 'hw7',  category: 'hardware', name: 'Self Tap Screws (240)',         costA: 10.87, costB: null,   count: 240, unit: 'screw' },
+  { id: 'hw8',  category: 'hardware', name: 'Paver Covering (100 ft x 4 ft)',costA: 33.97, costB: null,   count: 200, unit: 'paver covering' },
+  { id: 'hw9',  category: 'hardware', name: 'Lamp Stand (5 ft)',             costA: null,  costB: 13.63,  count: 1,   unit: 'stand' },
+  { id: 'hw10', category: 'hardware', name: 'Aeropole Replace (Standard Kit)',costA: null, costB: 825.91, count: 1,   unit: 'kit' },
+  { id: 'hw11', category: 'hardware', name: 'Brick (individual)',           costA: 1.14,  costB: null,   count: 1,   unit: 'brick' },
+  { id: 'hw12', category: 'hardware', name: 'Sand Bag (50 lb)',             costA: 7.92,  costB: 7.88,   count: 50,  unit: 'pound' },
+  { id: 'hw13', category: 'hardware', name: 'Yard Stake (3ft - 4 pk)',      costA: 7.98,  costB: null,   count: 4,   unit: 'small stake' },
+  { id: 'hw14', category: 'hardware', name: 'Yard Stake (6 ft - 1 piece)',  costA: 5.98,  costB: null,   count: 1,   unit: 'big stake' },
+  { id: 'hw15', category: 'hardware', name: 'Lomey Pole (31 in - 12 pk)',   costA: 54.83, costB: null,   count: 12,  unit: 'pole' },
+  { id: 'hw16', category: 'hardware', name: 'Tile (Case of 48)',            costA: 14.50, costB: null,   count: 48,  unit: 'tile' },
+  { id: 'hw17', category: 'hardware', name: 'Mounting Tape (60 yds)',       costA: 5.98,  costB: null,   count: 60,  unit: 'yard' },
+];
+
+let JCC_CATALOG = JSON.parse(JSON.stringify(JCC_CATALOG_DEFAULTS));
+let jccCollapsedCategories = new Set(JCC_CATEGORIES.map(c => c.key)); // start collapsed — 55 items is a lot to greet someone with
+let jccState = null;
+let jccRowSeq = 0;
+
+function jccFmtMoney(n) {
+  n = n || 0;
+  const decimals = (n > 0 && n < 0.01) ? 4 : 2;
+  return '$' + n.toFixed(decimals);
+}
+function jccAvgCost(item) {
+  const vals = [item.costA, item.costB].filter(v => typeof v === 'number' && !isNaN(v));
+  if (vals.length === 0) return 0;
+  return vals.reduce((a, b) => a + b, 0) / vals.length;
+}
+function jccPricePerItem(item) {
+  const count = item.count > 0 ? item.count : 1;
+  return jccAvgCost(item) / count;
+}
+function jccAllCatalogItems() {
+  return JCC_CATALOG.map(item => ({ ...item, pricePerItem: jccPricePerItem(item) }));
+}
+
+function jccInit() {
+  jccState = { rows: [], consumablesPct: 5 };
+  jccRenderShell();
+
+  window.fbLoadJccCatalog().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().items)) {
+      snap.data().items.forEach(saved => {
+        const item = JCC_CATALOG.find(i => i.id === saved.id);
+        if (item) { item.costA = saved.costA; item.costB = saved.costB; }
+      });
+      jccRenderCatalog();
+    }
+  }).catch(err => console.error('Job cost catalog load failed:', err));
+}
+
+function jccRenderShell() {
+  const root = document.getElementById('jcc-root');
+  if (!root) return;
+  const s = jccState;
+  root.innerHTML = `
+    <div class="section-label" style="margin-top:0">Custom items</div>
+    <div id="jcc-rows"></div>
+    <button class="icon-btn" style="width:auto; padding:8px 16px; font-size:13px; margin-bottom:0.75rem;" onclick="jccAddRow()"><i class="fa-solid fa-plus"></i> Add item</button>
+
+    <div class="card">
+      <div class="settings-field">
+        <label>Consumables / waste (%)</label>
+        <input type="number" step="0.1" min="0" value="${s.consumablesPct}" onchange="jccUpdateConsumablesPct(this.value)">
+      </div>
+      <div style="font-size:13px; display:flex; justify-content:space-between; margin-bottom:4px;"><span>Material cost</span><b id="jcc-material-cost">$0.00</b></div>
+      <div style="font-size:13px; display:flex; justify-content:space-between; margin-bottom:8px; color:var(--text-secondary);"><span>Consumables / waste</span><b id="jcc-consumables-amt">$0.00</b></div>
+      <div style="font-size:15px; display:flex; justify-content:space-between; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total material cost</span><b id="jcc-total-material-cost" style="color:var(--accent);">$0.00</b></div>
+    </div>
+
+    <div class="section-label">Reference catalog <span style="text-transform:none; font-weight:400;">(editable costs)</span></div>
+    <div class="card" style="margin-bottom:0.75rem;">
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Two vendor prices per item, averaged — picking an item above auto-fills its cost from here.</div>
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Catalog costs unlocked' : 'Catalog costs locked'}</div>
+        ${invAdminUnlocked
+          ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="jccLockAdmin()">Lock</button>`
+          : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="jccUnlockAdmin()">Unlock</button>`}
+      </div>
+    </div>
+    <div id="jcc-catalog"></div>
+  `;
+  jccRenderRows();
+  jccRenderCatalog();
+}
+
+// ─── Custom items (materials) ───────────────────────────────────────────────
+
+function jccRenderRows() {
+  const container = document.getElementById('jcc-rows');
+  if (!container) return;
+  container.innerHTML = jccState.rows.length === 0
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary); margin-bottom:0.75rem;">No items yet — add one below.</div>`
+    : jccState.rows.map(row => jccRowHtml(row)).join('');
+  jccRecalcTotals();
+}
+
+function jccNameInputId(rowId) { return 'jcc-row-name-' + rowId; }
+
+function jccRowHtml(row) {
+  const inputId = jccNameInputId(row.id);
+  return `<div class="card" style="margin-bottom:0.5rem;">
+    <div class="settings-field" style="margin-bottom:0.6rem;">
+      <label>Item</label>
+      <input type="text" id="${inputId}" value="${invAttr(row.name)}" placeholder="Start typing e.g. EMT..." autocomplete="off"
+        oninput="jccUpdateRowName('${row.id}', this.value)"
+        onfocus="jccShowItemSuggestions('${row.id}')"
+        onblur="jccHideItemSuggestionsSoon('${row.id}')">
+      <div id="${inputId}-suggest" class="inv-color-suggest" style="display:none;"></div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Qty</label><input type="number" step="0.01" min="0" value="${row.qty}" oninput="jccUpdateRowQty('${row.id}', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Unit cost ($)</label><input type="number" step="0.01" min="0" id="jcc-row-unitcost-${row.id}" value="${row.unitCost}" oninput="jccUpdateRowUnitCost('${row.id}', this.value)"></div>
+    </div>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">
+      <div style="font-size:13px;">Total: <b id="jcc-row-total-${row.id}">$0.00</b></div>
+      <button class="icon-btn" style="width:auto; padding:5px 12px; font-size:12px;" onclick="jccRemoveRow('${row.id}')"><i class="fa-solid fa-trash"></i></button>
+    </div>
+  </div>`;
+}
+
+function jccAddRow() {
+  jccState.rows.push({ id: 'jccrow_' + (++jccRowSeq), name: '', catalogId: null, qty: 1, unitCost: 0 });
+  jccRenderRows();
+}
+function jccRemoveRow(rowId) {
+  jccState.rows = jccState.rows.filter(r => r.id !== rowId);
+  jccRenderRows();
+}
+function jccUpdateRowName(rowId, value) {
+  const row = jccState.rows.find(r => r.id === rowId);
+  if (!row) return;
+  row.name = value;
+  row.catalogId = null; // typing manually breaks the catalog link; whatever unit cost is there stays put
+  jccShowItemSuggestions(rowId);
+}
+function jccUpdateRowQty(rowId, value) {
+  const row = jccState.rows.find(r => r.id === rowId);
+  if (!row) return;
+  row.qty = parseFloat(value) || 0;
+  jccRecalcTotals();
+}
+function jccUpdateRowUnitCost(rowId, value) {
+  const row = jccState.rows.find(r => r.id === rowId);
+  if (!row) return;
+  row.unitCost = parseFloat(value) || 0;
+  jccRecalcTotals();
+}
+function jccUpdateConsumablesPct(value) {
+  jccState.consumablesPct = parseFloat(value) || 0;
+  jccRecalcTotals();
+}
+
+// Updates only the computed totals (never rebuilds the row inputs), so typing a qty or unit
+// cost doesn't blow away focus mid-keystroke — same split-render trick used elsewhere in this
+// app (Inventory's results list, the Letter Styling Calculator).
+function jccRecalcTotals() {
+  let materialCost = 0;
+  jccState.rows.forEach(row => {
+    const total = row.qty * row.unitCost;
+    materialCost += total;
+    const el = document.getElementById('jcc-row-total-' + row.id);
+    if (el) el.textContent = jccFmtMoney(total);
+  });
+  const consumables = materialCost * (jccState.consumablesPct / 100);
+  const mcEl = document.getElementById('jcc-material-cost');
+  const caEl = document.getElementById('jcc-consumables-amt');
+  const tmEl = document.getElementById('jcc-total-material-cost');
+  if (mcEl) mcEl.textContent = jccFmtMoney(materialCost);
+  if (caEl) caEl.textContent = jccFmtMoney(consumables);
+  if (tmEl) tmEl.textContent = jccFmtMoney(materialCost + consumables);
+}
+
+// Type-ahead: matches the catalog by substring on name, same interaction pattern as
+// invShowColorSuggestions (onmousedown + preventDefault so the click registers before blur
+// hides the list), scoped to a materials row instead of a color field.
+function jccShowItemSuggestions(rowId) {
+  const inputId = jccNameInputId(rowId);
+  const input = document.getElementById(inputId);
+  const container = document.getElementById(inputId + '-suggest');
+  if (!input || !container) return;
+  const q = input.value.trim().toLowerCase();
+  if (!q) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  const matches = jccAllCatalogItems().filter(i => i.name.toLowerCase().includes(q)).slice(0, 8);
+  if (matches.length === 0) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  container.innerHTML = matches.map(m =>
+    `<div class="inv-color-suggest-item" onmousedown="event.preventDefault(); jccPickItemSuggestion('${rowId}', '${m.id}')">${psEscape(m.name)} <span style="color:var(--text-tertiary); font-size:11px;">— ${jccFmtMoney(m.pricePerItem)}/${psEscape(m.unit)}</span></div>`
+  ).join('');
+  container.style.display = 'block';
+}
+function jccPickItemSuggestion(rowId, itemId) {
+  const row = jccState.rows.find(r => r.id === rowId);
+  const item = JCC_CATALOG.find(i => i.id === itemId);
+  if (!row || !item) return;
+  row.name = item.name;
+  row.catalogId = item.id;
+  row.unitCost = Math.round(jccPricePerItem(item) * 100) / 100;
+
+  const nameInput = document.getElementById(jccNameInputId(rowId));
+  if (nameInput) nameInput.value = row.name;
+  const unitCostInput = document.getElementById('jcc-row-unitcost-' + rowId);
+  if (unitCostInput) unitCostInput.value = row.unitCost;
+
+  const container = document.getElementById(jccNameInputId(rowId) + '-suggest');
+  if (container) { container.style.display = 'none'; container.innerHTML = ''; }
+
+  jccRecalcTotals();
+}
+function jccHideItemSuggestionsSoon(rowId) {
+  setTimeout(() => {
+    const container = document.getElementById(jccNameInputId(rowId) + '-suggest');
+    if (container) container.style.display = 'none';
+  }, 150);
+}
+
+// ─── Reference catalog ───────────────────────────────────────────────────────
+
+function jccRenderCatalog() {
+  const container = document.getElementById('jcc-catalog');
+  if (!container) return;
+  container.innerHTML = JCC_CATEGORIES.map(cat => jccCategoryHtml(cat)).join('');
+}
+
+function jccCategoryHtml(cat) {
+  const items = JCC_CATALOG.filter(i => i.category === cat.key);
+  const collapsed = jccCollapsedCategories.has(cat.key);
+  let html = `<div class="card" style="margin-bottom:0.5rem;">
+    <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" onclick="jccToggleCategory('${cat.key}')">
+      <div class="card-title" style="margin-bottom:0; text-transform:none; letter-spacing:normal;">${psEscape(cat.label)} <span style="font-weight:400; color:var(--text-secondary);">(${items.length})</span></div>
+      <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:12px;"></i>
+    </div>`;
+  if (!collapsed) {
+    items.forEach(item => { html += jccCatalogItemHtml(item, cat); });
+  }
+  html += `</div>`;
+  return html;
+}
+
+function jccCatalogItemHtml(item, cat) {
+  const avg = jccAvgCost(item);
+  const perItem = jccPricePerItem(item);
+  let html = `<div style="padding:10px 0; border-top:0.5px solid var(--border);">
+    <div style="font-size:13px; font-weight:500; margin-bottom:6px;">${psEscape(item.name)}</div>`;
+  if (invAdminUnlocked) {
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>${psEscape(cat.locA)}</label><input type="number" step="0.01" min="0" value="${item.costA != null ? item.costA : ''}" onchange="jccUpdateCatalogField('${item.id}','costA', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>${psEscape(cat.locB)}</label><input type="number" step="0.01" min="0" value="${item.costB != null ? item.costB : ''}" onchange="jccUpdateCatalogField('${item.id}','costB', this.value)"></div>
+    </div>`;
+  } else {
+    html += `<div style="font-size:12px; color:var(--text-secondary); display:flex; gap:14px;">
+      <span>${psEscape(cat.locA)}: ${item.costA != null ? jccFmtMoney(item.costA) : '—'}</span>
+      <span>${psEscape(cat.locB)}: ${item.costB != null ? jccFmtMoney(item.costB) : '—'}</span>
+    </div>`;
+  }
+  html += `<div style="font-size:12px; color:var(--text-secondary); margin-top:6px;">Avg ${jccFmtMoney(avg)} / ${item.count} ${psEscape(item.unit)} — <b style="color:var(--text);">${jccFmtMoney(perItem)}</b> per ${psEscape(item.unit)}</div>`;
+  html += `</div>`;
+  return html;
+}
+
+function jccToggleCategory(key) {
+  if (jccCollapsedCategories.has(key)) jccCollapsedCategories.delete(key); else jccCollapsedCategories.add(key);
+  jccRenderCatalog();
+}
+
+function jccUpdateCatalogField(itemId, field, value) {
+  const item = JCC_CATALOG.find(i => i.id === itemId);
+  if (!item) return;
+  const v = String(value).trim();
+  item[field] = v === '' ? null : (parseFloat(v) || 0);
+  jccRenderCatalog();
+  window.fbSaveJccCatalog({ items: JCC_CATALOG }).catch(err => console.error('Job cost catalog save failed:', err));
+}
+
+function jccUnlockAdmin() {
+  const entered = prompt('Enter the admin passcode to edit catalog costs:');
+  if (entered === null) return;
+  if (entered === ADMIN_PASSCODE) {
+    invAdminUnlocked = true;
+    jccRenderShell();
+  } else {
+    alert('Incorrect passcode.');
+  }
+}
+function jccLockAdmin() {
+  invAdminUnlocked = false;
+  jccRenderShell();
+}
+
 // ═══════════════════════════════════════ EVENT SCHEDULE & STAFFING VIEW ═══════════════════════════════════════
 function psRenderStaffingJobs() {
   const container = document.getElementById('ps-staffing-job-list');
@@ -3816,6 +4356,8 @@ function bootApp() {
   try { calc(); } catch (e) { console.error('calc failed:', e); }
   try { qcInit(); } catch (e) { console.error('qcInit failed:', e); }
   try { frInit(); } catch (e) { console.error('frInit failed:', e); }
+  try { letInit(); } catch (e) { console.error('letInit failed:', e); }
+  try { jccInit(); } catch (e) { console.error('jccInit failed:', e); }
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
