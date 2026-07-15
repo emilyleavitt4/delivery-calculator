@@ -3955,6 +3955,8 @@ const JCC_CATALOG_DEFAULTS = [
 
 let JCC_CATALOG = JSON.parse(JSON.stringify(JCC_CATALOG_DEFAULTS));
 let jccCollapsedCategories = new Set(JCC_CATEGORIES.map(c => c.key)); // start collapsed — 55 items is a lot to greet someone with
+let jccQuickAddSectionCollapsed = true;
+let jccCatalogSectionCollapsed = true;
 let jccState = null;
 let jccRowSeq = 0;
 let JCC_QUICK_ADD = []; // user-saved assembled products: { id, name, cost }
@@ -4077,13 +4079,21 @@ function jccRenderShell() {
       </div>
     </div>
 
-    <div class="section-label">Quick Add Reference <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— Standard Assembled Products</span></div>
+    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="jccToggleQuickAddSection()">
+      <span>Quick Add Reference <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— Standard Assembled Products</span></span>
+      <i class="fa-solid fa-chevron-${jccQuickAddSectionCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
+    </div>
+    ${jccQuickAddSectionCollapsed ? '' : `
     <div class="card" style="margin-bottom:0.75rem;">
       <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Products you've built and saved from the calculator above — pick one by name instead of re-listing its raw materials every time.</div>
       <div id="jcc-quickadd"></div>
-    </div>
+    </div>`}
 
-    <div class="section-label">Material Cost Reference <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— Raw Costs</span></div>
+    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="jccToggleCatalogSection()">
+      <span>Material Cost Reference <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— Raw Costs</span></span>
+      <i class="fa-solid fa-chevron-${jccCatalogSectionCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
+    </div>
+    ${jccCatalogSectionCollapsed ? '' : `
     <div class="card" style="margin-bottom:0.75rem;">
       <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Two vendor prices per item, averaged — picking an item above auto-fills its cost from here.</div>
       <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -4093,7 +4103,7 @@ function jccRenderShell() {
           : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="jccUnlockAdmin()">Unlock</button>`}
       </div>
     </div>
-    <div id="jcc-catalog"></div>
+    <div id="jcc-catalog"></div>`}
   `;
   jccRenderRows();
   jccRenderCatalog();
@@ -4378,6 +4388,14 @@ function jccCatalogItemHtml(item, cat) {
 function jccToggleCategory(key) {
   if (jccCollapsedCategories.has(key)) jccCollapsedCategories.delete(key); else jccCollapsedCategories.add(key);
   jccRenderCatalog();
+}
+function jccToggleQuickAddSection() {
+  jccQuickAddSectionCollapsed = !jccQuickAddSectionCollapsed;
+  jccRenderShell();
+}
+function jccToggleCatalogSection() {
+  jccCatalogSectionCollapsed = !jccCatalogSectionCollapsed;
+  jccRenderShell();
 }
 
 function jccUpdateCatalogField(itemId, field, value) {
