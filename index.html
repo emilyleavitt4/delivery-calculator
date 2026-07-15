@@ -637,6 +637,24 @@
   .ps-staffstatus-open { background: var(--warning-bg); color: var(--warning-text); }
   .ps-staffstatus-scheduled { background: var(--accent); color: #fff; }
 
+  /* INVENTORY COLOR LIST — a dense list for potentially 100+ rows, unlike the few-and-larger
+     Production job cards, so each row is a thin divider rather than its own margined card. */
+  .inv-group-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.5rem 0.1rem; cursor: pointer; user-select: none;
+    font-size: 11px; font-weight: 600; color: var(--text-tertiary);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .inv-group-header i { font-size: 11px; }
+  .inv-color-list { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 0.75rem; }
+  .inv-color-row { border-bottom: 0.5px solid var(--border); }
+  .inv-color-row:last-child { border-bottom: none; }
+  .inv-color-row-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.75rem; cursor: pointer; }
+  .inv-color-row-text { flex: 1; min-width: 0; }
+  .inv-color-row-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .inv-color-row-brand { font-size: 11px; color: var(--text-secondary); }
+  .inv-color-row-chevron { color: var(--text-tertiary); font-size: 12px; }
+
   @media print {
     .topbar, .no-print, #ps-production-empty, #ps-staffing-empty { display: none !important; }
   }
@@ -644,7 +662,7 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
-  import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+  import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyAaOVXNBCXXfO_HpuhTOeFi5dDHZ4hCBro",
@@ -682,6 +700,33 @@
   window.fbOnSnapshotJobs = (onNext, onError) => onSnapshot(jobsRef, onNext, onError);
   window.fbSaveJob = (job) => setDoc(doc(jobsRef, job.id), job);
   window.fbDeleteJob = (jobId) => deleteDoc(doc(jobsRef, jobId));
+
+  // Balloon-math rates are business-specific (everyone builds to their own ratios), so they're
+  // stored per business instead of hardcoded — one shared doc, editable from the Formulas &
+  // Recipes screen.
+  const formulasDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'formulas');
+  window.fbLoadFormulas = () => getDoc(formulasDocRef);
+  window.fbSaveFormulas = (data) => setDoc(formulasDocRef, data);
+
+  // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
+  // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
+  const customRecipesRef = collection(db, 'businesses', BUSINESS_ID, 'customRecipes');
+  window.fbOnSnapshotCustomRecipes = (onNext, onError) => onSnapshot(customRecipesRef, onNext, onError);
+  window.fbSaveCustomRecipe = (r) => setDoc(doc(customRecipesRef, r.id), r);
+  window.fbDeleteCustomRecipe = (id) => deleteDoc(doc(customRecipesRef, id));
+
+  // Inventory — latex colors (each its own doc, one per color+brand combo) and orders
+  // (separate docs so a pending order can be tracked/status-changed independently of the
+  // color's own backstock/par numbers). Both shared live across the team like Jobs.
+  const inventoryItemsRef = collection(db, 'businesses', BUSINESS_ID, 'inventoryItems');
+  window.fbOnSnapshotInventoryItems = (onNext, onError) => onSnapshot(inventoryItemsRef, onNext, onError);
+  window.fbSaveInventoryItem = (item) => setDoc(doc(inventoryItemsRef, item.id), item);
+  window.fbDeleteInventoryItem = (id) => deleteDoc(doc(inventoryItemsRef, id));
+
+  const inventoryOrdersRef = collection(db, 'businesses', BUSINESS_ID, 'inventoryOrders');
+  window.fbOnSnapshotInventoryOrders = (onNext, onError) => onSnapshot(inventoryOrdersRef, onNext, onError);
+  window.fbSaveInventoryOrder = (order) => setDoc(doc(inventoryOrdersRef, order.id), order);
+  window.fbDeleteInventoryOrder = (id) => deleteDoc(doc(inventoryOrdersRef, id));
 
   const ALLOWED_EMAILS = [
     'emily@utahballooncreations.com',
@@ -758,7 +803,7 @@
         <div class="tool-tile-title">Event Schedule &amp; Staffing</div>
       </div>
 
-      <div class="tool-tile soon">
+      <div class="tool-tile" onclick="showView('quantity')">
         <div class="tool-tile-icon"><i class="fa-solid fa-ruler"></i></div>
         <div class="tool-tile-title">Quantity Calculator</div>
       </div>
@@ -773,12 +818,12 @@
         <div class="tool-tile-title">Letter Styling Calculator</div>
       </div>
 
-      <div class="tool-tile soon">
+      <div class="tool-tile" onclick="showView('formulas')">
         <div class="tool-tile-icon"><i class="fa-solid fa-flask"></i></div>
         <div class="tool-tile-title">Formulas &amp; Recipes</div>
       </div>
 
-      <div class="tool-tile soon">
+      <div class="tool-tile" onclick="showView('inventory')">
         <div class="tool-tile-icon"><i class="fa-solid fa-boxes-stacked"></i></div>
         <div class="tool-tile-title">Inventory</div>
       </div>
@@ -1064,6 +1109,47 @@
       No jobs yet. Import an invoice or start one above.
     </div>
   </div><!-- end view-staffing -->
+
+  <!-- ═══════════════════════════════════════ QUANTITY CALCULATOR VIEW -->
+  <!-- Guided flow (decor type → style → size → quantity → color distribution), built
+       entirely in JS from RECIPES + qcState since the steps/options are data-driven. -->
+  <div class="view" id="view-quantity">
+    <div id="qc-root"></div>
+  </div><!-- end view-quantity -->
+
+  <!-- ═══════════════════════════════════════ FORMULAS & RECIPES VIEW -->
+  <!-- Two independent sections: editable balloon-math rates (FORMULAS, shared with everything
+       that computes a balloon count) and a free-form custom-recipe notebook (CUSTOM_RECIPES,
+       purely for reference — never feeds into the math). Both built in JS. -->
+  <div class="view" id="view-formulas">
+    <div id="fr-root"></div>
+  </div><!-- end view-formulas -->
+
+  <!-- ═══════════════════════════════════════ INVENTORY HOME (category picker) -->
+  <div class="view" id="view-inventory">
+    <div class="section-label" style="margin-top:0">Choose a category</div>
+    <div class="tool-grid">
+      <div class="tool-tile" onclick="showView('inventory-latex')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-circle"></i></div>
+        <div class="tool-tile-title">Latex</div>
+      </div>
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-ghost"></i></div>
+        <div class="tool-tile-title">Foil</div>
+      </div>
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-toolbox"></i></div>
+        <div class="tool-tile-title">Equipment</div>
+      </div>
+    </div>
+  </div><!-- end view-inventory -->
+
+  <!-- ═══════════════════════════════════════ LATEX INVENTORY VIEW -->
+  <!-- Built entirely in JS from INVENTORY_ITEMS + INVENTORY_ORDERS (both live-synced like
+       Jobs) since the per-color, per-size grid and the pending-orders list are data-driven. -->
+  <div class="view" id="view-inventory-latex">
+    <div id="inv-latex-root"></div>
+  </div><!-- end view-inventory-latex -->
 
   <!-- ═══════════════════════════════════════ SETTINGS VIEW -->
   <div class="view" id="view-settings">
@@ -1432,12 +1518,45 @@ const TOOL_META = {
   import:     { title: 'Import Job',                   icon: 'fa-solid fa-file-arrow-up',      showBack: true,  showGear: false },
   production: { title: 'Production Sheets',            icon: 'fa-solid fa-clipboard-list',     showBack: true,  showGear: false },
   staffing:   { title: 'Event Schedule & Staffing',    icon: 'fa-solid fa-calendar-days',      showBack: true,  showGear: false },
+  quantity:   { title: 'Quantity Calculator',           icon: 'fa-solid fa-ruler',               showBack: true,  showGear: false },
+  formulas:   { title: 'Formulas & Recipes',            icon: 'fa-solid fa-flask',               showBack: true,  showGear: false },
+  inventory:  { title: 'Inventory',                     icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: false },
+  'inventory-latex': { title: 'Latex Inventory',        icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
 };
 
 // Remembers the last tool screen (not settings) so Settings' back button
 // returns to whichever tool opened it, instead of always going to Delivery Calculator.
 let lastToolView = 'calc';
+
+// ═══════════════════════════════════════ EDITABLE FORMULAS ═══════════════════════════════════════
+//
+// The balloons-per-foot math is business-specific — Emily's ratios won't match how everyone
+// else builds — so it lives here as one mutable object instead of being hardcoded per RECIPES
+// entry. RECIPES entries below reference these SAME nested objects (not copies), so editing
+// FORMULAS — from the Formulas & Recipes screen, or loading a saved override from Firestore —
+// takes effect everywhere immediately, with no need to touch RECIPES itself.
+const FORMULAS_DEFAULTS = {
+  classicPerFt: 8,       // "classic" formula: balloons (11") per linear ft, both Column and Arch
+  columnTopperFt: 2.5,   // ft subtracted from a column's height before the rate is applied
+  freeformRates: {
+    Column:  { '5"': 6.0, '11"': 4.3, '18"': 2.0 },
+    Garland: { '5"': 6.0, '11"': 4.5, '18"': 1.25, '24"': 0.33 },
+    Arch:    { '5"': 4.0, '11"': 4.5, '18"': 1.5 }
+  }
+};
+// Deep-cloned so FORMULAS can be freely mutated (by a Firestore override or the editor UI)
+// without touching FORMULAS_DEFAULTS, which stays around as the "Reset to defaults" fallback.
+const FORMULAS = JSON.parse(JSON.stringify(FORMULAS_DEFAULTS));
+
+// Only Column items get a topper deducted — Garlands and Arches don't. Catalog RECIPES
+// entries always use the CURRENT formula (live) — but a saved custom recipe embedded in a
+// job (customRecipe) carries its own frozen topperFt number captured at the moment it was
+// added, so editing formulas later doesn't retroactively change a job someone already built.
+function psTopperFt(recipe) {
+  if (typeof recipe.topperFt === 'number') return recipe.topperFt;
+  return recipe.category === 'Column' ? FORMULAS.columnTopperFt : 0;
+}
 
 // ═══════════════════════════════════════ PRODUCTION SHEET GENERATOR ═══════════════════════════════════════
 //
@@ -1446,8 +1565,9 @@ let lastToolView = 'calc';
 // the 17hats items/services import file (so they match invoice line items exactly).
 //
 // Two formula types:
-//   'classic'  — a single blended ratio of 8 (11") balloons per linear foot. Only 11" balloons.
-//   'freeform' — each balloon size has its own balloons-per-linear-foot rate (the "rates" object).
+//   'classic'  — a single blended ratio (FORMULAS.classicPerFt) of 11" balloons per linear foot.
+//   'freeform' — each balloon size has its own balloons-per-linear-foot rate (the "rates" object,
+//                shared from FORMULAS.freeformRates so edits apply to every preset in that group).
 //
 // "linearFt" is the actual construction footage used in the math — for columns this is the
 // column's height; for garlands it's the garland's own length; for arches it's the arch's real
@@ -1455,23 +1575,23 @@ let lastToolView = 'calc';
 // built using 25 linear feet — that's taken straight from your items sheet's description text).
 const RECIPES = [
   // ---- COLUMNS ----
-  // All columns get a ~2.5 ft topper automatically (per Emily's rule). Starburst and Number
+  // All columns get a topper automatically (FORMULAS.columnTopperFt). Starburst and Number
   // Stack are exceptions (no topper / 34" topper) but aren't built yet — no formula exists
   // for them, so they're not in this list.
-  { id:'col-classic-std',  display:'Classic Column - Standard',  category:'Column', style:'Classic',  label:'Classic — Standard (7.5 ft)', formula:'classic',  linearFt:7.5, topperFt:2.5 },
-  { id:'col-classic-xl',   display:'Classic Column - XL',        category:'Column', style:'Classic',  label:'Classic — XL (9.5 ft)',       formula:'classic',  linearFt:9.5, topperFt:2.5 },
-  { id:'col-freeform-std', display:'Freeform Column - Standard', category:'Column', style:'Freeform', label:'Freeform — Standard (7.5 ft)',formula:'freeform', linearFt:7.5, topperFt:2.5, rates:{'5"':6.0,'11"':4.3,'18"':2.0} },
-  { id:'col-freeform-xl',  display:'Freeform Column - XL',       category:'Column', style:'Freeform', label:'Freeform — XL (9.5 ft)',      formula:'freeform', linearFt:9.5, topperFt:2.5, rates:{'5"':6.0,'11"':4.3,'18"':2.0} },
+  { id:'col-classic-std',  display:'Classic Column - Standard',  category:'Column', style:'Classic',  label:'Classic — Standard (7.5 ft)', formula:'classic',  linearFt:7.5 },
+  { id:'col-classic-xl',   display:'Classic Column - XL',        category:'Column', style:'Classic',  label:'Classic — XL (9.5 ft)',       formula:'classic',  linearFt:9.5 },
+  { id:'col-freeform-std', display:'Freeform Column - Standard', category:'Column', style:'Freeform', label:'Freeform — Standard (7.5 ft)',formula:'freeform', linearFt:7.5, rates:FORMULAS.freeformRates.Column },
+  { id:'col-freeform-xl',  display:'Freeform Column - XL',       category:'Column', style:'Freeform', label:'Freeform — XL (9.5 ft)',      formula:'freeform', linearFt:9.5, rates:FORMULAS.freeformRates.Column },
 
   // ---- GARLANDS (all Freeform) ----
-  { id:'gar-6',      display:'Freeform Garland – 6 ft',     category:'Garland', style:'Freeform', label:'6 ft',  formula:'freeform', linearFt:6,  rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
-  { id:'gar-9',      display:'Freeform Garland – 9 ft',     category:'Garland', style:'Freeform', label:'9 ft',  formula:'freeform', linearFt:9,  rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
-  { id:'gar-12',     display:'Freeform Garland – 12 ft',    category:'Garland', style:'Freeform', label:'12 ft', formula:'freeform', linearFt:12, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
-  { id:'gar-15',     display:'Freeform Garland – 15 ft',    category:'Garland', style:'Freeform', label:'15 ft', formula:'freeform', linearFt:15, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
-  { id:'gar-18',     display:'Freeform Garland – 18 ft',    category:'Garland', style:'Freeform', label:'18 ft', formula:'freeform', linearFt:18, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
-  { id:'gar-21',     display:'Freeform Garland – 21 ft',    category:'Garland', style:'Freeform', label:'21 ft', formula:'freeform', linearFt:21, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
-  { id:'gar-24',     display:'Freeform Garland – 24 ft',    category:'Garland', style:'Freeform', label:'24 ft', formula:'freeform', linearFt:24, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
-  { id:'gar-25plus', display:'Freeform Garland – 25+ ft',   category:'Garland', style:'Freeform', label:'25+ ft (enter footage)', formula:'freeform', customLinear:true, rates:{'5"':6.0,'11"':4.5,'18"':1.25,'24"':0.33} },
+  { id:'gar-6',      display:'Freeform Garland – 6 ft',     category:'Garland', style:'Freeform', label:'6 ft',  formula:'freeform', linearFt:6,  rates:FORMULAS.freeformRates.Garland },
+  { id:'gar-9',      display:'Freeform Garland – 9 ft',     category:'Garland', style:'Freeform', label:'9 ft',  formula:'freeform', linearFt:9,  rates:FORMULAS.freeformRates.Garland },
+  { id:'gar-12',     display:'Freeform Garland – 12 ft',    category:'Garland', style:'Freeform', label:'12 ft', formula:'freeform', linearFt:12, rates:FORMULAS.freeformRates.Garland },
+  { id:'gar-15',     display:'Freeform Garland – 15 ft',    category:'Garland', style:'Freeform', label:'15 ft', formula:'freeform', linearFt:15, rates:FORMULAS.freeformRates.Garland },
+  { id:'gar-18',     display:'Freeform Garland – 18 ft',    category:'Garland', style:'Freeform', label:'18 ft', formula:'freeform', linearFt:18, rates:FORMULAS.freeformRates.Garland },
+  { id:'gar-21',     display:'Freeform Garland – 21 ft',    category:'Garland', style:'Freeform', label:'21 ft', formula:'freeform', linearFt:21, rates:FORMULAS.freeformRates.Garland },
+  { id:'gar-24',     display:'Freeform Garland – 24 ft',    category:'Garland', style:'Freeform', label:'24 ft', formula:'freeform', linearFt:24, rates:FORMULAS.freeformRates.Garland },
+  { id:'gar-25plus', display:'Freeform Garland – 25+ ft',   category:'Garland', style:'Freeform', label:'25+ ft (enter footage)', formula:'freeform', customLinear:true, rates:FORMULAS.freeformRates.Garland },
 
   // ---- ARCHES ----
   { id:'arch-classic-8',   display:'Classic Arch – 8 x 8 ft',   category:'Arch', style:'Classic',  label:'Classic — 8 ft (20 linear)',  formula:'classic', linearFt:20 },
@@ -1479,11 +1599,11 @@ const RECIPES = [
   { id:'arch-classic-15',  display:'Classic Arch – 15 ft',      category:'Arch', style:'Classic',  label:'Classic — 15 ft (30 linear)', formula:'classic', linearFt:30 },
   { id:'arch-classic-20',  display:'Classic Arch – 20 ft',      category:'Arch', style:'Classic',  label:'Classic — 20 ft (35 linear)', formula:'classic', linearFt:35 },
   { id:'arch-classic-28',  display:'Classic Arch – 28 ft',      category:'Arch', style:'Classic',  label:'Classic — 28 ft (42 linear)', formula:'classic', linearFt:42 },
-  { id:'arch-freeform-8',  display:'Freeform Arch – 8 ft',      category:'Arch', style:'Freeform', label:'Freeform — 8 ft (20 linear)',  formula:'freeform', linearFt:20, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
-  { id:'arch-freeform-12', display:'Freeform Arch – 12 ft',     category:'Arch', style:'Freeform', label:'Freeform — 12 ft (25 linear)', formula:'freeform', linearFt:25, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
-  { id:'arch-freeform-15', display:'Freeform Arch – 15 ft',     category:'Arch', style:'Freeform', label:'Freeform — 15 ft (30 linear)', formula:'freeform', linearFt:30, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
-  { id:'arch-freeform-22', display:'Freeform Arch – 22 ft',     category:'Arch', style:'Freeform', label:'Freeform — 22 ft (35 linear)', formula:'freeform', linearFt:35, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
-  { id:'arch-freeform-28', display:'Freeform Arch – 28 ft',     category:'Arch', style:'Freeform', label:'Freeform — 28 ft (42 linear)', formula:'freeform', linearFt:42, rates:{'5"':4.0,'11"':4.5,'18"':1.5} },
+  { id:'arch-freeform-8',  display:'Freeform Arch – 8 ft',      category:'Arch', style:'Freeform', label:'Freeform — 8 ft (20 linear)',  formula:'freeform', linearFt:20, rates:FORMULAS.freeformRates.Arch },
+  { id:'arch-freeform-12', display:'Freeform Arch – 12 ft',     category:'Arch', style:'Freeform', label:'Freeform — 12 ft (25 linear)', formula:'freeform', linearFt:25, rates:FORMULAS.freeformRates.Arch },
+  { id:'arch-freeform-15', display:'Freeform Arch – 15 ft',     category:'Arch', style:'Freeform', label:'Freeform — 15 ft (30 linear)', formula:'freeform', linearFt:30, rates:FORMULAS.freeformRates.Arch },
+  { id:'arch-freeform-22', display:'Freeform Arch – 22 ft',     category:'Arch', style:'Freeform', label:'Freeform — 22 ft (35 linear)', formula:'freeform', linearFt:35, rates:FORMULAS.freeformRates.Arch },
+  { id:'arch-freeform-28', display:'Freeform Arch – 28 ft',     category:'Arch', style:'Freeform', label:'Freeform — 28 ft (42 linear)', formula:'freeform', linearFt:42, rates:FORMULAS.freeformRates.Arch },
 ];
 
 if (window.pdfjsLib) {
@@ -1616,15 +1736,16 @@ function psColorCount(total, numColors) {
   return Math.ceil(total / numColors);
 }
 
-// How much height a topper takes off the balloon-spiral body — read directly from each
-// recipe's own topperFt (2.5 ft for standard columns, 0 for anything without a topper).
+// How much height a topper takes off the balloon-spiral body — via psTopperFt (0 for
+// anything without a topper, i.e. everything except columns).
 function psComputeTotals(recipe, qty, customLinear) {
   let linear = recipe.customLinear ? customLinear : recipe.linearFt;
-  if (recipe.topperFt) linear = Math.max(0, linear - recipe.topperFt);
+  const topperFt = psTopperFt(recipe);
+  if (topperFt) linear = Math.max(0, linear - topperFt);
   const totalLinear = linear * qty;
   const totals = {};
   if (recipe.formula === 'classic') {
-    totals['11"'] = Math.ceil(totalLinear * 8);
+    totals['11"'] = Math.ceil(totalLinear * FORMULAS.classicPerFt);
   } else {
     Object.keys(recipe.rates).forEach(size => {
       const v = recipe.rates[size] * totalLinear;
@@ -1827,6 +1948,13 @@ function psRenderProductionJobs() {
   if (psExpandedProduction) psItemFieldsChanged(psExpandedProduction);
 }
 
+// Most line items reference a catalog RECIPES entry by id, but items added from the
+// Quantity Calculator's "Custom length" mode carry their own self-contained recipe (there's
+// no catalog entry for an arbitrary typed footage) — line.customRecipe, when present, wins.
+function psLineRecipe(line) {
+  return line.customRecipe || RECIPES.find(x => x.id === line.recipeId);
+}
+
 function psProductionBodyHtml(job) {
   let html = '';
 
@@ -1835,7 +1963,7 @@ function psProductionBodyHtml(job) {
     html += `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.5rem;">No items yet — add one below.</div>`;
   } else {
     job.productionItems.forEach(line => {
-      const r = RECIPES.find(x => x.id === line.recipeId);
+      const r = psLineRecipe(line);
       if (!r) return;
       const totals = psComputeTotals(r, line.qty, line.customLinear);
       const nColors = line.colors.length;
@@ -1843,9 +1971,20 @@ function psProductionBodyHtml(job) {
       html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.3rem;">Colors: ${psEscape(line.colors.join(' / '))}</div>`;
       SIZE_ORDER.forEach(size => {
         if (!totals[size]) return;
-        const perColor = psColorCount(totals[size], nColors);
-        const text = nColors > 1 ? `${perColor} – ${size} of each color` : `${perColor} – ${size}`;
-        html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>${text}</label></div>`;
+        if (line.colorDist && line.colorDist.length) {
+          // Carries the exact percentage split dialed in on the Quantity Calculator,
+          // rather than Production's usual equal-per-color rule.
+          line.colorDist.forEach(cd => {
+            const n = Math.round(totals[size] * (cd.pct / 100));
+            if (n <= 0) return;
+            const text = nColors > 1 ? `${n} – ${size} (${psEscape(cd.name)})` : `${n} – ${size}`;
+            html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>${text}</label></div>`;
+          });
+        } else {
+          const perColor = psColorCount(totals[size], nColors);
+          const text = nColors > 1 ? `${perColor} – ${size} of each color` : `${perColor} – ${size}`;
+          html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>${text}</label></div>`;
+        }
       });
       if (line.topperNote) {
         html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>Topper: ${psEscape(line.topperNote)}</label></div>`;
@@ -1857,7 +1996,7 @@ function psProductionBodyHtml(job) {
   if (job.productionItems.length > 0) {
     html += `<div class="section-label">Inflate &amp; build</div>`;
     job.productionItems.forEach((line, idx) => {
-      const r = RECIPES.find(x => x.id === line.recipeId);
+      const r = psLineRecipe(line);
       if (!r) return;
       html += `<div class="ps-item-block">`;
       html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
@@ -1866,7 +2005,7 @@ function psProductionBodyHtml(job) {
       </div>`;
       html += `<div class="ps-build-fields">`;
       html += `<b>Size:</b> ${psEscape(r.label)}<br><b>Qty:</b> ${line.qty}<br><b>Style:</b> ${psEscape(r.style || r.category)}<br>`;
-      if (r.topperFt) html += `<b>Topper:</b> ~${r.topperFt} ft included${line.topperNote ? ' (' + psEscape(line.topperNote) + ')' : ''}<br>`;
+      if (psTopperFt(r)) html += `<b>Topper:</b> ~${psTopperFt(r)} ft included${line.topperNote ? ' (' + psEscape(line.topperNote) + ')' : ''}<br>`;
       if (line.design) html += `<b>Design:</b> ${psEscape(line.design)}<br>`;
       if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
       html += `</div>`;
@@ -1956,6 +2095,1112 @@ function psUpdateItemNotes(jobId, idx, value) {
   if (!job) return;
   job.productionItems[idx].notes = value;
   psSaveJob(job);
+}
+
+// ═══════════════════════════════════════ QUANTITY CALCULATOR VIEW ═══════════════════════════════════════
+//
+// A guided, standalone version of the RECIPES math — decor type, then style, then size,
+// then quantity, then color distribution — no job required. Color distribution here is
+// each color's own percentage of the total (matching how the real Master Calculators
+// spreadsheet splits colors), which is intentionally different from Production's "same
+// count per color, rounded up" rule (psColorCount) — the two tools serve different moments
+// (rough estimating vs. an actual pull list), so Production is untouched.
+
+const QC_CATEGORY_ICONS = { Column: 'fa-solid fa-ruler-vertical', Garland: 'fa-solid fa-link', Arch: 'fa-solid fa-bridge' };
+
+let qcState = null;
+
+function qcInit() {
+  qcState = { category: null, style: null, sizeMode: null, recipeId: null, customFootage: null, qty: 1, colors: [{ name: 'Color 1', pct: 50 }, { name: 'Color 2', pct: 50 }] };
+  qcRender();
+}
+
+function qcCategories() {
+  const seen = [];
+  RECIPES.forEach(r => { if (!seen.includes(r.category)) seen.push(r.category); });
+  return seen;
+}
+function qcStylesFor(category) {
+  const seen = [];
+  RECIPES.filter(r => r.category === category).forEach(r => { if (!seen.includes(r.style)) seen.push(r.style); });
+  return seen;
+}
+// Preset catalog sizes only — items that require typing a footage (like the garland's
+// "25+ ft") are superseded here by the general "Custom length" mode below, which covers
+// any category/style, not just garland.
+function qcRecipesFor(category, style) {
+  return RECIPES.filter(r => r.category === category && r.style === style && !r.customLinear);
+}
+// The rate table (formula/rates/topperFt) is identical across every preset within a given
+// category+style — only linearFt/label differ between them — so a custom length just
+// borrows that shared template and applies it to whatever footage was typed in.
+function qcSizeTemplate(category, style) {
+  return RECIPES.find(r => r.category === category && r.style === style);
+}
+function qcEffectiveRecipe() {
+  if (qcState.sizeMode === 'custom') {
+    const template = qcSizeTemplate(qcState.category, qcState.style);
+    if (!template) return null;
+    return {
+      display: `Custom ${qcState.style} ${qcState.category} – ${qcState.customFootage || 0} ft`,
+      label: qcState.customFootage ? qcState.customFootage + ' ft (custom)' : 'Custom length',
+      category: qcState.category, style: qcState.style,
+      formula: template.formula, rates: template.rates,
+      linearFt: qcState.customFootage || 0
+    };
+  }
+  return RECIPES.find(r => r.id === qcState.recipeId) || null;
+}
+
+function qcSetCategory(cat) {
+  qcState.category = cat;
+  qcState.style = null;
+  qcState.sizeMode = null; qcState.recipeId = null; qcState.customFootage = null;
+  const styles = qcStylesFor(cat);
+  if (styles.length === 1) qcState.style = styles[0];
+  qcRender();
+}
+function qcChangeCategory() {
+  qcState.category = null; qcState.style = null;
+  qcState.sizeMode = null; qcState.recipeId = null; qcState.customFootage = null;
+  qcRender();
+}
+function qcSetStyle(style) {
+  qcState.style = style;
+  qcState.sizeMode = null; qcState.recipeId = null; qcState.customFootage = null;
+  qcRender();
+}
+function qcChangeStyle() {
+  qcState.style = null;
+  qcState.sizeMode = null; qcState.recipeId = null; qcState.customFootage = null;
+  qcRender();
+}
+function qcSetSizeMode(mode) {
+  qcState.sizeMode = mode;
+  qcState.recipeId = null;
+  qcState.customFootage = null;
+  qcRender();
+}
+function qcSetCustomFootage(val) {
+  qcState.customFootage = parseFloat(val) || 0;
+  qcRenderResults();
+}
+function qcChangeSize() {
+  qcState.sizeMode = null; qcState.recipeId = null; qcState.customFootage = null;
+  qcRender();
+}
+function qcSetRecipe(id) {
+  qcState.recipeId = id;
+  qcRender();
+}
+function qcSetQty(val) {
+  qcState.qty = parseFloat(val) || 0;
+  qcRenderResults();
+}
+// Scales `items` (color objects, mutated in place) so their .pct values sum to exactly
+// `target`, preserving their existing relative proportions. Falls back to an even split if
+// they're all currently at 0 (nothing to preserve a ratio from). Rounds to whole percents and
+// nudges the single largest share to absorb any rounding drift, so the sum lands on `target`
+// exactly rather than drifting by a point or two.
+function qcScaleToSum(items, target) {
+  if (items.length === 0) return;
+  target = Math.max(0, target);
+  if (target === 0) { items.forEach(c => { c.pct = 0; }); return; }
+  const sumOld = items.reduce((s, c) => s + c.pct, 0);
+  let raw;
+  if (sumOld <= 0) {
+    raw = items.map(() => target / items.length);
+  } else {
+    raw = items.map(c => c.pct / sumOld * target);
+  }
+  const rounded = raw.map(v => Math.round(v));
+  const drift = target - rounded.reduce((a, b) => a + b, 0);
+  if (drift !== 0) {
+    let idxMax = 0;
+    for (let k = 1; k < raw.length; k++) if (raw[k] > raw[idxMax]) idxMax = k;
+    rounded[idxMax] += drift;
+  }
+  items.forEach((c, k) => { c.pct = Math.max(0, rounded[k]); });
+}
+
+// Splits 100% evenly across every current color — the "reset to even" behavior, used both
+// as the default for a freshly-added color and as its own button.
+function qcDistributeEvenly() {
+  const n = qcState.colors.length;
+  if (n === 0) return;
+  const base = Math.floor(100 / n);
+  let leftover = 100 - base * n;
+  qcState.colors.forEach(c => { c.pct = base + (leftover > 0 ? 1 : 0); if (leftover > 0) leftover--; });
+  qcRender();
+}
+
+function qcAddColorRow() {
+  qcState.colors.push({ name: 'Color ' + (qcState.colors.length + 1), pct: 0 });
+  qcDistributeEvenly();
+}
+function qcRemoveColorRow(idx) {
+  qcState.colors.splice(idx, 1);
+  if (qcState.colors.length > 0) qcScaleToSum(qcState.colors, 100);
+  qcRender();
+}
+function qcColorNameInput(idx, val) {
+  qcState.colors[idx].name = val;
+  qcRenderResults();
+}
+// A drag (or a run of keystrokes typing a number) fires many oninput events for what the
+// user experiences as ONE edit. qcApplyPct re-derives the others' ratio every time it's
+// called — if that source were the live, already-rounded state from the previous event,
+// rounding error would compound step after step and could pile up onto whichever color
+// happens to round up each time, making it look like that one color "jumps" independently
+// instead of everything moving together. qcDragBaseline snapshots the ratio ONCE at the
+// start of the edit so every intermediate step (and the final one) scales from the same
+// fixed starting point.
+let qcDragBaseline = null;
+function qcBeginColorEdit(idx) {
+  qcDragBaseline = { idx, colors: qcState.colors.map(c => ({ name: c.name, pct: c.pct })) };
+}
+function qcEndColorEdit() {
+  qcDragBaseline = null;
+}
+
+// Locks the total at 100%: whatever this color is set to, every OTHER color scales down
+// (or up) to fill the rest, keeping their relative shares to EACH OTHER — so increasing one
+// gradually and proportionally reduces all the others together, rather than dumping the
+// whole change onto just one.
+function qcApplyPct(idx, rawVal) {
+  const colors = qcState.colors;
+  const newVal = Math.max(0, Math.min(100, Math.round(parseFloat(rawVal) || 0)));
+
+  if (!qcDragBaseline || qcDragBaseline.idx !== idx) qcBeginColorEdit(idx);
+  const baseline = qcDragBaseline.colors;
+
+  colors[idx].pct = newVal;
+  if (colors.length > 1) {
+    const others = colors.filter((_, i) => i !== idx);
+    const otherBaseline = baseline.filter((_, i) => i !== idx);
+    others.forEach((c, k) => { c.pct = otherBaseline[k].pct; }); // reset to the fixed starting ratio before rescaling
+    qcScaleToSum(others, 100 - newVal);
+  }
+  qcSyncColorInputs();
+  qcUpdatePctTotal();
+  qcRenderResults();
+}
+function qcColorPctInput(idx, val) { qcApplyPct(idx, val); }
+function qcColorPctSlide(idx, val) { qcApplyPct(idx, val); }
+
+// Writes every color's current pct into its slider + number field directly (no full
+// re-render), so the other rows visibly shift in real time while one is being dragged
+// without interrupting that drag.
+function qcSyncColorInputs() {
+  qcState.colors.forEach((c, idx) => {
+    const slider = document.getElementById('qc-color-slider-' + idx);
+    const num = document.getElementById('qc-color-num-' + idx);
+    if (slider) slider.value = c.pct;
+    if (num) num.value = c.pct;
+  });
+}
+function qcUpdatePctTotal() {
+  const el = document.getElementById('qc-pct-total');
+  if (!el) return;
+  const sum = qcState.colors.reduce((s, c) => s + (c.pct || 0), 0);
+  el.textContent = sum + '%';
+  el.style.color = sum === 100 ? 'var(--text-secondary)' : 'var(--warning-text)';
+}
+
+// One line per completed step, showing the pick with a "Change" link back to it —
+// so the flow reads top-to-bottom without losing earlier choices.
+function qcStepSummary(label, value, changeFn) {
+  return `<div style="display:flex; align-items:center; justify-content:space-between; padding:0.4rem 0; font-size:13px;">
+    <div><span style="color:var(--text-secondary);">${psEscape(label)}:</span> <b>${psEscape(value)}</b></div>
+    <button class="icon-btn" style="width:auto; padding:2px 10px; font-size:12px;" onclick="${changeFn}">Change</button>
+  </div>`;
+}
+
+function qcRender() {
+  const root = document.getElementById('qc-root');
+  let html = '';
+  qcDragBaseline = null; // a full rebuild replaces the DOM anyway, so any in-progress edit is over
+
+  // Step 1 — decor type
+  if (!qcState.category) {
+    html += `<div class="section-label" style="margin-top:0">Choose decor type</div>`;
+    html += `<div class="tool-grid">` + qcCategories().map(cat => `
+      <div class="tool-tile" onclick="qcSetCategory('${cat}')">
+        <div class="tool-tile-icon"><i class="${QC_CATEGORY_ICONS[cat] || 'fa-solid fa-shapes'}"></i></div>
+        <div class="tool-tile-title">${psEscape(cat)}</div>
+      </div>`).join('') + `</div>`;
+    root.innerHTML = html;
+    return;
+  }
+  html += qcStepSummary('Decor type', qcState.category, 'qcChangeCategory()');
+
+  // Step 2 — style
+  const styles = qcStylesFor(qcState.category);
+  if (!qcState.style) {
+    html += `<div class="section-label">Choose style</div>`;
+    html += `<div class="trip-toggle">` + styles.map(s => `<button class="trip-btn" onclick="qcSetStyle('${s}')">${psEscape(s)}</button>`).join('') + `</div>`;
+    root.innerHTML = html;
+    return;
+  }
+  if (styles.length > 1) html += qcStepSummary('Style', qcState.style, 'qcChangeStyle()');
+
+  // Step 3 — size: a preset from the catalog, or a typed custom length (same per-foot
+  // rules either way — a custom length just applies that category+style's rate to
+  // whatever footage was typed in, same as psComputeTotals already does for presets).
+  const recipes = qcRecipesFor(qcState.category, qcState.style);
+  if (!qcState.sizeMode) qcState.sizeMode = recipes.length ? 'preset' : 'custom';
+  if (qcState.sizeMode === 'preset' && recipes.length === 1 && !qcState.recipeId) qcState.recipeId = recipes[0].id;
+
+  html += `<div class="section-label">Size</div>`;
+  html += `<div class="card">`;
+  if (recipes.length > 0) {
+    html += `<div class="trip-toggle" style="margin:0 0 0.75rem;">
+      <button class="trip-btn ${qcState.sizeMode === 'preset' ? 'active' : ''}" onclick="qcSetSizeMode('preset')">Preset size</button>
+      <button class="trip-btn ${qcState.sizeMode === 'custom' ? 'active' : ''}" onclick="qcSetSizeMode('custom')">Custom length</button>
+    </div>`;
+  }
+  if (qcState.sizeMode === 'preset') {
+    html += `<div class="settings-field" style="margin-bottom:0">
+      <select onchange="qcSetRecipe(this.value)">
+        <option value="" ${qcState.recipeId ? '' : 'selected'} disabled>Select...</option>
+        ${recipes.map(r => `<option value="${r.id}" ${r.id === qcState.recipeId ? 'selected' : ''}>${psEscape(r.label)}</option>`).join('')}
+      </select>
+    </div>`;
+  } else {
+    html += `<div class="settings-field" style="margin-bottom:0">
+      <label>Length (feet)</label>
+      <input type="number" inputmode="decimal" placeholder="e.g. 11" value="${qcState.customFootage || ''}" oninput="qcSetCustomFootage(this.value)">
+    </div>`;
+  }
+  html += `</div>`;
+
+  // Step 4 — quantity
+  html += `<div class="section-label">Quantity</div>`;
+  html += `<div class="card">`;
+  html += `<div class="settings-field" style="margin-bottom:0">
+    <label>Quantity</label>
+    <input type="number" min="1" inputmode="numeric" value="${qcState.qty}" oninput="qcSetQty(this.value)">
+  </div>`;
+  html += `</div>`;
+
+  // Step 5 — colors & distribution
+  html += `<div class="section-label">Colors &amp; distribution</div>`;
+  html += `<div class="card">`;
+  qcState.colors.forEach((c, idx) => {
+    html += `<div style="margin-bottom:1rem; padding-bottom:1rem; border-bottom:0.5px solid var(--border);">
+      <div class="row" style="grid-template-columns: 1fr 36px; margin-bottom:0.4rem;">
+        <div class="settings-field" style="margin-bottom:0">
+          ${idx === 0 ? '<label>Color</label>' : ''}
+          <input type="text" value="${psEscape(c.name)}" oninput="qcColorNameInput(${idx}, this.value)">
+        </div>
+        <button class="icon-btn" style="align-self:${idx === 0 ? 'flex-end' : 'center'};" onclick="qcRemoveColorRow(${idx})" aria-label="Remove color" ${qcState.colors.length <= 1 ? 'disabled' : ''}><i class="fa-solid fa-trash"></i></button>
+      </div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <input type="range" min="0" max="100" step="1" value="${c.pct}" id="qc-color-slider-${idx}" style="flex:1; accent-color: var(--accent);" onpointerdown="qcBeginColorEdit(${idx})" oninput="qcColorPctSlide(${idx}, this.value)" onchange="qcEndColorEdit()">
+        <div style="display:flex; align-items:center; gap:2px; flex-shrink:0;">
+          <input type="number" min="0" max="100" value="${c.pct}" id="qc-color-num-${idx}" style="width:56px; text-align:right;" onfocus="qcBeginColorEdit(${idx})" oninput="qcColorPctInput(${idx}, this.value)" onblur="qcEndColorEdit()">
+          <span style="font-size:13px; color:var(--text-secondary);">%</span>
+        </div>
+      </div>
+    </div>`;
+  });
+  html += `<div style="display:flex; gap:8px;">
+    <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="qcAddColorRow()"><i class="fa-solid fa-plus"></i> Add color</button>
+    <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="qcDistributeEvenly()"><i class="fa-solid fa-scale-balanced"></i> Distribute evenly</button>
+  </div>`;
+  html += `<div style="font-size:12px; margin-top:0.6rem; color:var(--text-secondary);">Total: <span id="qc-pct-total">${qcState.colors.reduce((s, c) => s + (c.pct || 0), 0)}%</span></div>`;
+  html += `</div>`;
+
+  // Results
+  html += `<div class="section-label">Balloon count</div>`;
+  html += `<div class="card" id="qc-results"></div>`;
+
+  // Add to job — only appears once there's a valid calculation to send over
+  html += `<div id="qc-add-to-job"></div>`;
+
+  root.innerHTML = html;
+  qcRenderResults();
+}
+
+// Returns a user-facing message if the current inputs can't be calculated yet, or null if
+// they're valid — shared by the results panel (to show the message) and the "Add to job"
+// section (to decide whether it should appear at all).
+function qcValidationError() {
+  if (qcState.sizeMode === 'preset' && !qcState.recipeId) return 'Choose a size to calculate.';
+  if (qcState.sizeMode === 'custom' && (!qcState.customFootage || qcState.customFootage <= 0)) return 'Enter a length in feet to calculate.';
+  if (!qcState.qty || qcState.qty <= 0) return 'Enter a quantity to calculate.';
+  return null;
+}
+
+function qcRenderResults() {
+  const resultsEl = document.getElementById('qc-results');
+  if (!resultsEl || !qcState) return;
+  const recipe = qcEffectiveRecipe();
+  if (!recipe) return;
+
+  qcUpdatePctTotal();
+
+  const err = qcValidationError();
+  if (err) {
+    resultsEl.innerHTML = `<div style="font-size:13px; color:var(--text-secondary);">${err}</div>`;
+    qcRenderAddToJob();
+    return;
+  }
+
+  const totals = psComputeTotals(recipe, qcState.qty, null);
+  const sizes = SIZE_ORDER.filter(s => totals[s]);
+  const colors = qcState.colors.filter(c => c.name.trim());
+
+  let html = `<div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">${psEscape(recipe.display)} <span style="font-weight:400; color:var(--text-secondary);">× ${qcState.qty}</span></div>`;
+
+  if (sizes.length === 0) {
+    html += `<div style="font-size:13px; color:var(--text-secondary);">No balloons needed for this combination.</div>`;
+  } else if (colors.length <= 1) {
+    sizes.forEach(size => { html += `<div style="font-size:14px; padding:4px 0;">${totals[size]} – ${size}</div>`; });
+  } else {
+    html += `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;">`;
+    html += `<tr><th style="text-align:left; padding:4px 8px 4px 0; color:var(--text-secondary); font-weight:600;">Color</th>` +
+      sizes.map(s => `<th style="text-align:right; padding:4px 8px; color:var(--text-secondary); font-weight:600;">${s}</th>`).join('') + `</tr>`;
+    colors.forEach(c => {
+      html += `<tr><td style="padding:4px 8px 4px 0; font-weight:600;">${psEscape(c.name)} <span style="font-weight:400; color:var(--text-secondary);">(${c.pct}%)</span></td>` +
+        sizes.map(s => `<td style="text-align:right; padding:4px 8px;">${Math.round(totals[s] * (c.pct / 100))}</td>`).join('') + `</tr>`;
+    });
+    html += `<tr style="border-top:0.5px solid var(--border);"><td style="padding:6px 8px 4px 0; font-weight:700;">Total</td>` +
+      sizes.map(s => `<td style="text-align:right; padding:6px 8px 4px;">${totals[s]}</td>`).join('') + `</tr>`;
+    html += `</table></div>`;
+  }
+
+  if (psTopperFt(recipe)) html += `<div style="font-size:12px; color:var(--text-secondary); margin-top:0.5rem;">Includes ~${psTopperFt(recipe)} ft topper per unit (already factored into the count above).</div>`;
+  resultsEl.innerHTML = html;
+  qcRenderAddToJob();
+}
+
+// Renders once when the calculation becomes valid, then leaves the form alone on
+// subsequent calls (so typing a new-job name while also nudging quantity/colors doesn't
+// get wiped out by a re-render) — only rebuilding again after it's gone invalid and back.
+function qcRenderAddToJob() {
+  const container = document.getElementById('qc-add-to-job');
+  if (!container) return;
+  if (qcValidationError()) {
+    container.innerHTML = '';
+    container.dataset.built = '';
+    return;
+  }
+  if (container.dataset.built === '1') return;
+  container.dataset.built = '1';
+  container.innerHTML = `
+    <div class="section-label">Add to job</div>
+    <div class="card">
+      <div class="settings-field">
+        <label>Job</label>
+        <select id="qc-job-select" onchange="qcJobSelectChanged()">
+          <option value="__new__">+ New job</option>
+          ${psSortedJobs().map(j => `<option value="${psEscape(j.id)}">${psEscape(j.jobName || 'Untitled job')}</option>`).join('')}
+        </select>
+      </div>
+      <div class="row" id="qc-newjob-fields">
+        <div class="settings-field" style="margin-bottom:0"><label>Client / Event name</label><input type="text" id="qc-newjob-name" placeholder="e.g. Smith Baby Shower"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Event date</label><input type="text" id="qc-newjob-date" placeholder="e.g. July 20, 2026"></div>
+      </div>
+      <button class="save-btn" onclick="qcAddToJob()">Add to Production</button>
+      <div id="qc-add-to-job-status" style="font-size:12px; margin-top:0.5rem;"></div>
+    </div>`;
+}
+function qcJobSelectChanged() {
+  const isNew = document.getElementById('qc-job-select').value === '__new__';
+  document.getElementById('qc-newjob-fields').style.display = isNew ? '' : 'none';
+}
+
+// Builds a Production line item from the current calculator state and appends it to the
+// chosen job (or a freshly-created one) — reusing psBlankJob/psSaveJob so this behaves
+// exactly like adding an item from Production itself. Preset sizes reference the catalog
+// recipe by id like any normal Production item; a custom length carries its own
+// self-contained recipe (customRecipe) since there's no catalog entry for a typed footage.
+// colorDist preserves the exact percentage split from the calculator, rather than falling
+// back to Production's equal-per-color default.
+function qcAddToJob() {
+  const statusEl = document.getElementById('qc-add-to-job-status');
+  const recipe = qcEffectiveRecipe();
+  const colors = qcState.colors.filter(c => c.name.trim());
+  if (colors.length === 0) {
+    statusEl.textContent = 'Add at least one named color first.';
+    return;
+  }
+
+  const sel = document.getElementById('qc-job-select');
+  let job;
+  if (sel.value === '__new__') {
+    const name = document.getElementById('qc-newjob-name').value.trim();
+    const date = document.getElementById('qc-newjob-date').value.trim();
+    job = psBlankJob({ jobName: name, eventDate: date });
+  } else {
+    job = psFindJob(sel.value);
+    if (!job) { statusEl.textContent = "Couldn't find that job."; return; }
+  }
+
+  job.productionItems.push({
+    recipeId: qcState.sizeMode === 'preset' ? recipe.id : null,
+    customRecipe: qcState.sizeMode === 'custom' ? {
+      display: recipe.display, label: recipe.label, category: recipe.category, style: recipe.style,
+      formula: recipe.formula, rates: recipe.rates, topperFt: psTopperFt(recipe), linearFt: recipe.linearFt
+    } : null,
+    qty: qcState.qty,
+    colors: colors.map(c => c.name),
+    colorDist: colors.map(c => ({ name: c.name, pct: c.pct })),
+    customLinear: null,
+    design: '', location: '', topperNote: '', notes: ''
+  });
+  psExpandedProduction = job.id;
+  psSaveJob(job);
+
+  statusEl.textContent = `Added to ${job.jobName || 'the job'} — opening Production…`;
+  showView('production');
+}
+
+// ═══════════════════════════════════════ FORMULAS & RECIPES VIEW ═══════════════════════════════════════
+//
+// Two independent halves: FORMULAS (the balloon-math rates — editable here, shared with every
+// calculation in the app) and CUSTOM_RECIPES (a free-form, team-shared reference notebook for
+// occasional/seasonal items). Custom recipes never feed into any calculator or Production math —
+// they're notes, not formulas.
+
+let CUSTOM_RECIPES = [];
+let frEditingRecipeId = null; // id of the recipe open for editing, '__new__' for a fresh one, or null
+
+function frInit() {
+  const root = document.getElementById('fr-root');
+  root.innerHTML = `
+    <div class="section-label" style="margin-top:0">Balloon math</div>
+    <div id="fr-formulas-root"></div>
+    <div class="section-label">Custom recipes</div>
+    <div class="card" style="text-align:center; color:var(--text-secondary); font-size:12px; margin-bottom:0.5rem;">
+      For reference only — seasonal or one-off items you won't add to Production. These never affect the Quantity Calculator or Production math.
+    </div>
+    <div id="fr-recipes-root"></div>
+  `;
+  frRenderFormulas();
+  frRenderRecipes();
+
+  window.fbLoadFormulas().then(snap => {
+    if (snap.exists()) {
+      frApplyFormulasOverride(snap.data());
+      frRenderFormulas();
+      qcRenderResults(); // in case the Quantity Calculator was already showing stale rates
+    }
+  }).catch(err => console.error('Formulas load failed:', err));
+
+  window.fbOnSnapshotCustomRecipes(
+    (snapshot) => { CUSTOM_RECIPES = snapshot.docs.map(d => d.data()); frRenderRecipes(); },
+    (err) => console.error('Custom recipes sync error:', err)
+  );
+}
+
+function frApplyFormulasOverride(saved) {
+  if (!saved) return;
+  if (typeof saved.classicPerFt === 'number') FORMULAS.classicPerFt = saved.classicPerFt;
+  if (typeof saved.columnTopperFt === 'number') FORMULAS.columnTopperFt = saved.columnTopperFt;
+  if (saved.freeformRates) {
+    Object.keys(FORMULAS.freeformRates).forEach(cat => {
+      if (saved.freeformRates[cat]) Object.assign(FORMULAS.freeformRates[cat], saved.freeformRates[cat]);
+    });
+  }
+}
+
+// The raw rate keys (e.g. `5"`) aren't safe inside an element id, so strip the inch mark.
+function frSizeId(size) { return size.replace(/"/g, ''); }
+
+function frRenderFormulas() {
+  const container = document.getElementById('fr-formulas-root');
+  if (!container) return;
+  let html = '';
+
+  html += `<div class="card">
+    <div class="card-title">Classic (Columns &amp; Arches)</div>
+    <div class="settings-field" style="margin-bottom:0">
+      <label>Balloons (11") per linear ft</label>
+      <input type="number" step="0.1" min="0" id="fr-classicPerFt" value="${FORMULAS.classicPerFt}">
+    </div>
+  </div>`;
+
+  html += `<div class="card">
+    <div class="card-title">Column topper</div>
+    <div class="settings-field" style="margin-bottom:0">
+      <label>Feet subtracted from a column's height before the rate applies</label>
+      <input type="number" step="0.1" min="0" id="fr-columnTopperFt" value="${FORMULAS.columnTopperFt}">
+    </div>
+  </div>`;
+
+  Object.keys(FORMULAS.freeformRates).forEach(cat => {
+    const rates = FORMULAS.freeformRates[cat];
+    html += `<div class="card">
+      <div class="card-title">Freeform ${psEscape(cat)}</div>
+      <div class="row">` +
+      Object.keys(rates).map(size => `
+        <div class="settings-field" style="margin-bottom:0">
+          <label>${psEscape(size)} balloons per ft</label>
+          <input type="number" step="0.01" min="0" id="fr-rate-${cat}-${frSizeId(size)}" value="${rates[size]}">
+        </div>`).join('') +
+      `</div>
+    </div>`;
+  });
+
+  html += `<div style="display:flex; gap:8px; margin-bottom:0.5rem;">
+    <button class="save-btn" style="width:auto; padding:10px 20px;" onclick="frSaveFormulas()">Save formulas</button>
+    <button class="icon-btn" style="width:auto; padding:10px 16px; font-size:13px;" onclick="frResetFormulas()">Reset to defaults</button>
+  </div>
+  <div id="fr-formulas-status" style="font-size:12px; color:var(--text-secondary);"></div>`;
+
+  container.innerHTML = html;
+}
+
+function frSaveFormulas() {
+  FORMULAS.classicPerFt = parseFloat(document.getElementById('fr-classicPerFt').value) || 0;
+  FORMULAS.columnTopperFt = parseFloat(document.getElementById('fr-columnTopperFt').value) || 0;
+  Object.keys(FORMULAS.freeformRates).forEach(cat => {
+    Object.keys(FORMULAS.freeformRates[cat]).forEach(size => {
+      const el = document.getElementById(`fr-rate-${cat}-${frSizeId(size)}`);
+      if (el) FORMULAS.freeformRates[cat][size] = parseFloat(el.value) || 0;
+    });
+  });
+
+  const statusEl = document.getElementById('fr-formulas-status');
+  window.fbSaveFormulas(JSON.parse(JSON.stringify(FORMULAS))).catch(err => {
+    console.error(err);
+    statusEl.textContent = "Couldn't save — check your connection and try again.";
+  });
+  statusEl.textContent = 'Saved. This applies to every job and calculation from now on.';
+
+  // Refresh anything already rendered elsewhere that shows a balloon count.
+  qcRenderResults();
+  psRenderAllJobViews();
+}
+
+function frResetFormulas() {
+  if (!confirm('Reset all formulas to the original defaults?')) return;
+  const defaults = JSON.parse(JSON.stringify(FORMULAS_DEFAULTS));
+  FORMULAS.classicPerFt = defaults.classicPerFt;
+  FORMULAS.columnTopperFt = defaults.columnTopperFt;
+  Object.keys(defaults.freeformRates).forEach(cat => Object.assign(FORMULAS.freeformRates[cat], defaults.freeformRates[cat]));
+  frRenderFormulas();
+  window.fbSaveFormulas(JSON.parse(JSON.stringify(FORMULAS))).catch(err => console.error(err));
+  qcRenderResults();
+  psRenderAllJobViews();
+}
+
+function psNewCustomRecipeId() {
+  return 'recipe_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+function frRenderRecipes() {
+  const container = document.getElementById('fr-recipes-root');
+  if (!container) return;
+  let html = '';
+
+  if (CUSTOM_RECIPES.length === 0 && frEditingRecipeId !== '__new__') {
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No custom recipes yet.</div>`;
+  } else {
+    CUSTOM_RECIPES.forEach(r => {
+      if (frEditingRecipeId === r.id) {
+        html += frRecipeFormHtml(r);
+        return;
+      }
+      html += `<div class="card">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.3rem;">
+          <div style="font-size:14px; font-weight:700;">${psEscape(r.name)}</div>
+          <div style="display:flex; gap:4px;">
+            <button class="icon-btn" onclick="frEditRecipe('${r.id}')" aria-label="Edit"><i class="fa-solid fa-pen"></i></button>
+            <button class="icon-btn" onclick="frDeleteRecipe('${r.id}')" aria-label="Delete"><i class="fa-solid fa-trash"></i></button>
+          </div>
+        </div>
+        <div style="font-size:13px; color:var(--text-secondary); white-space:pre-wrap;">${psEscape(r.notes || '')}</div>
+      </div>`;
+    });
+  }
+
+  if (frEditingRecipeId === '__new__') {
+    html += frRecipeFormHtml(null);
+  } else {
+    html += `<button class="save-btn" onclick="frNewRecipe()"><i class="fa-solid fa-plus"></i> Add recipe</button>`;
+  }
+
+  container.innerHTML = html;
+}
+
+function frRecipeFormHtml(r) {
+  const idAttr = r ? r.id : '__new__';
+  return `<div class="card">
+    <div class="settings-field">
+      <label>Name</label>
+      <input type="text" id="fr-recipe-name-${idAttr}" value="${r ? psEscape(r.name) : ''}" placeholder="e.g. Christmas Tree">
+    </div>
+    <div class="settings-field" style="margin-bottom:0">
+      <label>Notes</label>
+      <textarea rows="4" id="fr-recipe-notes-${idAttr}" placeholder="Sizes, colors, build notes — whatever's useful to remember next time.">${r ? psEscape(r.notes || '') : ''}</textarea>
+    </div>
+    <div style="display:flex; gap:8px; margin-top:0.75rem;">
+      <button class="save-btn" style="width:auto; padding:8px 16px;" onclick="frSaveRecipe('${idAttr}')">Save</button>
+      <button class="icon-btn" style="width:auto; padding:8px 16px; font-size:13px;" onclick="frCancelRecipeEdit()">Cancel</button>
+    </div>
+  </div>`;
+}
+
+function frNewRecipe() {
+  frEditingRecipeId = '__new__';
+  frRenderRecipes();
+}
+function frEditRecipe(id) {
+  frEditingRecipeId = id;
+  frRenderRecipes();
+}
+function frCancelRecipeEdit() {
+  frEditingRecipeId = null;
+  frRenderRecipes();
+}
+function frSaveRecipe(idAttr) {
+  const name = document.getElementById(`fr-recipe-name-${idAttr}`).value.trim();
+  const notes = document.getElementById(`fr-recipe-notes-${idAttr}`).value.trim();
+  if (!name) { alert('Give this recipe a name first.'); return; }
+  const id = idAttr === '__new__' ? psNewCustomRecipeId() : idAttr;
+  window.fbSaveCustomRecipe({ id, name, notes, updatedAt: Date.now() }).catch(err => {
+    console.error(err);
+    alert("Couldn't save that recipe — check your connection and try again.");
+  });
+  frEditingRecipeId = null;
+}
+function frDeleteRecipe(id) {
+  if (!confirm('Delete this recipe?')) return;
+  window.fbDeleteCustomRecipe(id).catch(err => {
+    console.error(err);
+    alert("Couldn't delete that recipe — check your connection and try again.");
+  });
+}
+
+// ═══════════════════════════════════════ INVENTORY (LATEX) ═══════════════════════════════════════
+//
+// Colors are tracked per color+brand combo, each with its own price/open-bin-status/backstock/par
+// across 5 standard latex size groups. "Upcoming" isn't stored — it's computed live from every
+// not-yet-completed job's production items, reusing the exact same balloon math and color-split
+// Production itself uses, matched to a color by NAME ONLY (brand-agnostic, since Jobs don't track
+// brand — if two brands share a color name, both show the same upcoming demand; it's on the
+// person pulling stock to decide which brand's bag to grab). Orders are their own objects with a
+// status, so a color's backstock/par stay untouched until an order is actually marked received —
+// that's what keeps "pressed order" from getting lost before it "arrives and we've got it."
+
+const INV_SIZES = ['5"/7"', '11"', '17"/18"', '24"', '30"/36"'];
+// Maps a Production balloon size to the inventory size group it belongs to.
+const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '18"': '17"/18"', '24"': '24"', '36"': '30"/36"' };
+const INV_OPEN_STATUSES = ['Full', 'Partial', 'Empty'];
+
+let INVENTORY_ITEMS = [];
+let INVENTORY_ORDERS = [];
+let invExpandedItem = null;
+let invOrderFormKey = null; // `${itemId}|${size}` of the order form currently open, or null
+let invSearchQuery = '';
+let invGroupBy = 'tier'; // 'tier' (Main/Misc) or 'brand'
+let invCollapsedGroups = new Set(); // group keys currently collapsed
+
+function invStartListeners() {
+  // Render the shell immediately (Firestore reads are async, and onSnapshot's first callback
+  // can be delayed or — if the security rules don't cover these paths yet — never arrive at
+  // all) so the view always shows something instead of staying blank while waiting.
+  invRenderLatex();
+  window.fbOnSnapshotInventoryItems(
+    (snapshot) => { INVENTORY_ITEMS = snapshot.docs.map(d => d.data()); invRenderLatex(); },
+    (err) => console.error('Inventory items sync error:', err)
+  );
+  window.fbOnSnapshotInventoryOrders(
+    (snapshot) => { INVENTORY_ORDERS = snapshot.docs.map(d => d.data()); invRenderLatex(); },
+    (err) => console.error('Inventory orders sync error:', err)
+  );
+}
+
+function psNewInventoryItemId() { return 'invitem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+function psNewInventoryOrderId() { return 'invorder_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+
+// One-time starter data parsed from the real Master Calculators spreadsheet (Inventory Tab),
+// so the first visit isn't a blank list you have to hand-populate. Re-running the import is
+// safe to skip if you already have colors — invImportSeedData asks first.
+const INV_SEED_DATA = [{"color":"White","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":5},"11\"":{"price":14.39,"openStatus":"Full","backstock":9,"par":6},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":5,"par":8},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":2}}},{"color":"Black","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":4},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":4},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":4,"par":6},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":1}}},{"color":"Imperial Red","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Red","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":5},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":5},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":5},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":2}}},{"color":"Reflex Red","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Pink","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Bubblegum Pink","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":3},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":2,"par":1}}},{"color":"Rose","brand":"Decomex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":10,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":6,"par":2},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":5,"par":0}}},{"color":"Raspberry","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Wildberry","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":3,"par":0}}},{"color":"Reflex Fuchsia","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fuchsia","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":0},"24\"":{"price":20.23,"openStatus":"Full","backstock":3,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Rose","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Rosewood","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Pink","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Rose Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":13.6,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Rose Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Coral","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Aloha","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Melon","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Peach Blush","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Malibu Peach","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Blush","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Cheeky","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Orange","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":3},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Sunset Orange","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Terracotta","brand":"Sempertex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Honey Yellow","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":3},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Gold","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Partial","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Partial","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Mustard","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":3,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Yellow","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":3,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":1}}},{"color":"Pastel Yellow","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Shamrock Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":4},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":4},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":5},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Eucalyptus","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":15,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Key Lime","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":2},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Fiona Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Key Lime","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Chrome Green","brand":"Qualatex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":13.6,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Green","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Evergreen","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Forest Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":3},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":4},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":5},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Forest Green","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pearl Emerald Green","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":1},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fashion Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Empowermint","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Q Robins Egg/Dupe","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":5,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"S Robins Egg","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Tuftex Teal","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":3,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Turquoise","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Caribbean Blue","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Tropical Teal","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pearl Midnight Blue","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Deep Teal","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Sea Glass","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Pearl Light Blue","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":5,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Matte Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fog","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Blue Slate","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fashion Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":2},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":3},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":3,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":2,"par":1}}},{"color":"Reflex Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":13.6,"openStatus":"Full","backstock":5,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Royal Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":4},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":5},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":5},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":1}}},{"color":"Fashion Navy","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":3},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":2,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Metallic Midnight Blue","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":14.39,"openStatus":"Partial","backstock":2,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":4,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Lavender","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Canyon Rose","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Sangria","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Samba","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Orchid","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Lilac","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Blossom","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Lilac","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Spring Lilac","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Violet","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":13.6,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Violet","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Coffee","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Chrome Copper","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Cameo","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"White Sand","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Cream","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Lace","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pearl White","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Reflex Champagne","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":4,"par":1},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":1,"par":3},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":4},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":4},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Silver","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":1,"par":4},"11\"":{"price":13.6,"openStatus":"Full","backstock":5,"par":6},"17\"/18\"":{"price":23.79,"openStatus":"Full","backstock":3,"par":6},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Silver","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Gray","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Gray Smoke","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Stone","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Diamond Clear","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}}];
+
+function invImportSeedData() {
+  if (INVENTORY_ITEMS.length > 0 && !confirm('This adds ' + INV_SEED_DATA.length + ' colors from your spreadsheet. You already have ' + INVENTORY_ITEMS.length + ' color(s) — continue anyway?')) return;
+  INV_SEED_DATA.forEach(seed => {
+    // Everything from the spreadsheet import is your established, consistent lineup — Main.
+    const item = { id: psNewInventoryItemId(), color: seed.color, brand: seed.brand, tier: 'main', sizes: JSON.parse(JSON.stringify(seed.sizes)) };
+    window.fbSaveInventoryItem(item).catch(err => console.error('Import failed for', seed.color, err));
+  });
+}
+
+
+function invBlankSizeData() {
+  const sizes = {};
+  INV_SIZES.forEach(s => { sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0 }; });
+  return sizes;
+}
+function invFindItem(id) { return INVENTORY_ITEMS.find(i => i.id === id); }
+function invSaveItem(item) {
+  window.fbSaveInventoryItem(item).catch(err => {
+    console.error(err);
+    alert("Couldn't save that change — check your connection and try again.");
+  });
+}
+
+// Aggregates every not-yet-completed job's production items into { colorNameKey: { invSize: count } }.
+function invComputeUpcoming() {
+  const upcoming = {};
+  const addTo = (colorName, invSize, n) => {
+    if (n <= 0) return;
+    const key = colorName.trim().toLowerCase();
+    if (!key) return;
+    if (!upcoming[key]) upcoming[key] = {};
+    upcoming[key][invSize] = (upcoming[key][invSize] || 0) + n;
+  };
+
+  JOBS.forEach(job => {
+    if (job.status === 'completed') return;
+    (job.productionItems || []).forEach(line => {
+      const r = psLineRecipe(line);
+      if (!r) return;
+      const totals = psComputeTotals(r, line.qty, line.customLinear);
+      const nColors = line.colors.length || 1;
+      Object.keys(totals).forEach(size => {
+        const invSize = INV_SIZE_FROM_PRODUCTION[size];
+        if (!invSize) return;
+        if (line.colorDist && line.colorDist.length) {
+          line.colorDist.forEach(cd => addTo(cd.name, invSize, Math.round(totals[size] * (cd.pct / 100))));
+        } else {
+          const perColor = psColorCount(totals[size], nColors);
+          line.colors.forEach(name => addTo(name, invSize, perColor));
+        }
+      });
+    });
+  });
+
+  return upcoming;
+}
+function invUpcomingFor(colorName, invSize, upcomingMap) {
+  const key = colorName.trim().toLowerCase();
+  return (upcomingMap[key] && upcomingMap[key][invSize]) || 0;
+}
+function invPendingOrderedQty(itemId, size) {
+  return INVENTORY_ORDERS
+    .filter(o => o.itemId === itemId && o.size === size && (o.status === 'ordered' || o.status === 'backordered'))
+    .reduce((sum, o) => sum + o.qty, 0);
+}
+// The core "how many do I need to buy" number: par plus what's coming up, minus what's
+// already on the shelf, minus what's already on order (so it's not double-counted).
+function invToOrder(par, upcoming, backstock, pending) {
+  return Math.max(0, (par || 0) + upcoming - (backstock || 0) - pending);
+}
+function invSortedItems() {
+  return [...INVENTORY_ITEMS].sort((a, b) => a.color.localeCompare(b.color) || (a.brand || '').localeCompare(b.brand || ''));
+}
+// Search matches color OR brand (case-insensitive substring); items are always alphabetical
+// by color name within whatever group they land in — grouping (Main/Misc vs. brand) is a
+// separate axis from this sort, set via invGroupBy.
+function invFilteredSortedItems() {
+  const q = invSearchQuery.trim().toLowerCase();
+  const items = invSortedItems();
+  if (!q) return items;
+  return items.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q));
+}
+// Buckets the given items into groups per invGroupBy, preserving a sensible group order
+// (Main before Misc; brands alphabetically with blank brand last).
+function invGroupedItems(items) {
+  if (invGroupBy === 'brand') {
+    const byBrand = {};
+    items.forEach(i => {
+      const key = i.brand || '(No brand)';
+      (byBrand[key] = byBrand[key] || []).push(i);
+    });
+    return Object.keys(byBrand).sort((a, b) => {
+      if (a === '(No brand)') return 1;
+      if (b === '(No brand)') return -1;
+      return a.localeCompare(b);
+    }).map(key => ({ key: 'brand:' + key, label: key, items: byBrand[key] }));
+  }
+  const main = items.filter(i => (i.tier || 'main') === 'main');
+  const misc = items.filter(i => (i.tier || 'main') === 'misc');
+  return [
+    { key: 'tier:main', label: 'Main', items: main },
+    { key: 'tier:misc', label: 'Miscellaneous', items: misc }
+  ];
+}
+function invSetSearch(val) {
+  invSearchQuery = val;
+  invRenderLatex();
+}
+function invSetGroupBy(mode) {
+  invGroupBy = mode;
+  invRenderLatex();
+}
+function invToggleGroup(key) {
+  if (invCollapsedGroups.has(key)) invCollapsedGroups.delete(key);
+  else invCollapsedGroups.add(key);
+  invRenderLatex();
+}
+
+function invToggleExpand(itemId) {
+  invExpandedItem = (invExpandedItem === itemId) ? null : itemId;
+  invOrderFormKey = null;
+  invRenderLatex();
+}
+function invAddColor() {
+  const nameEl = document.getElementById('inv-new-color');
+  const brandEl = document.getElementById('inv-new-brand');
+  const color = nameEl.value.trim();
+  const brand = brandEl.value.trim();
+  if (!color) { alert('Enter a color name first.'); return; }
+  // One-off manual additions default to Misc — Main is for your established, consistent lineup.
+  const item = { id: psNewInventoryItemId(), color, brand, tier: 'misc', sizes: invBlankSizeData() };
+  nameEl.value = ''; brandEl.value = '';
+  invExpandedItem = item.id;
+  invSaveItem(item);
+}
+function invSetTier(itemId, tier) {
+  const item = invFindItem(itemId);
+  if (!item) return;
+  item.tier = tier;
+  invSaveItem(item);
+}
+function invDeleteColor(itemId) {
+  if (!confirm("Delete this color from inventory? This can't be undone.")) return;
+  if (invExpandedItem === itemId) invExpandedItem = null;
+  window.fbDeleteInventoryItem(itemId).catch(err => {
+    console.error(err);
+    alert("Couldn't delete that color — check your connection and try again.");
+  });
+}
+function invUpdateSizeField(itemId, size, field, value) {
+  const item = invFindItem(itemId);
+  if (!item) return;
+  item.sizes[size][field] = field === 'openStatus' ? value : (parseFloat(value) || 0);
+  invSaveItem(item);
+}
+
+function invOpenOrderForm(itemId, size) {
+  invOrderFormKey = `${itemId}|${size}`;
+  invRenderLatex();
+}
+function invCancelOrderForm() {
+  invOrderFormKey = null;
+  invRenderLatex();
+}
+function invSubmitOrder(itemId, size) {
+  const qty = parseFloat(document.getElementById('inv-order-qty').value) || 0;
+  const vendor = document.getElementById('inv-order-vendor').value.trim();
+  const date = document.getElementById('inv-order-date').value.trim();
+  if (qty <= 0) { alert("Enter how many you're ordering."); return; }
+  const order = { id: psNewInventoryOrderId(), itemId, size, qty, vendor, orderedDate: date, status: 'ordered', receivedDate: '' };
+  invOrderFormKey = null;
+  window.fbSaveInventoryOrder(order).catch(err => {
+    console.error(err);
+    alert("Couldn't save that order — check your connection and try again.");
+  });
+}
+// Marking an order received is the ONLY thing that touches backstock automatically —
+// crediting the ordered qty straight to that size's shelf count, no manual re-entry.
+function invMarkReceived(orderId) {
+  const order = INVENTORY_ORDERS.find(o => o.id === orderId);
+  if (!order) return;
+  const item = invFindItem(order.itemId);
+  if (item) {
+    item.sizes[order.size].backstock = (item.sizes[order.size].backstock || 0) + order.qty;
+    invSaveItem(item);
+  }
+  order.status = 'received';
+  order.receivedDate = new Date().toLocaleDateString();
+  window.fbSaveInventoryOrder(order).catch(err => console.error(err));
+}
+function invMarkBackordered(orderId) {
+  const order = INVENTORY_ORDERS.find(o => o.id === orderId);
+  if (!order) return;
+  order.status = 'backordered';
+  window.fbSaveInventoryOrder(order).catch(err => console.error(err));
+}
+function invMarkOrderedAgain(orderId) {
+  const order = INVENTORY_ORDERS.find(o => o.id === orderId);
+  if (!order) return;
+  order.status = 'ordered';
+  window.fbSaveInventoryOrder(order).catch(err => console.error(err));
+}
+function invCancelOrder(orderId) {
+  if (!confirm('Cancel this order? It will stop counting toward pending stock.')) return;
+  const order = INVENTORY_ORDERS.find(o => o.id === orderId);
+  if (!order) return;
+  order.status = 'cancelled';
+  window.fbSaveInventoryOrder(order).catch(err => console.error(err));
+}
+
+function invRenderLatex() {
+  const root = document.getElementById('inv-latex-root');
+  if (!root) return;
+  const upcomingMap = invComputeUpcoming();
+  let html = '';
+
+  // Pending orders — the "what's in flight" list, so nothing gets lost between pressing
+  // order and it actually landing in backstock.
+  const pending = INVENTORY_ORDERS.filter(o => o.status === 'ordered' || o.status === 'backordered');
+  html += `<div class="section-label" style="margin-top:0">Pending orders</div>`;
+  if (pending.length === 0) {
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">Nothing on order right now.</div>`;
+  } else {
+    pending.forEach(o => {
+      const item = invFindItem(o.itemId);
+      const label = item ? `${item.color}${item.brand ? ' (' + item.brand + ')' : ''} — ${o.size}` : 'Unknown color';
+      html += `<div class="card">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem;">
+          <div>
+            <div style="font-size:14px; font-weight:700;">${psEscape(label)}</div>
+            <div style="font-size:12px; color:var(--text-secondary);">Qty ${o.qty}${o.vendor ? ' · ' + psEscape(o.vendor) : ''}${o.orderedDate ? ' · ordered ' + psEscape(o.orderedDate) : ''}</div>
+          </div>
+          <span class="ps-status-btn ${o.status === 'backordered' ? 'ps-status-waiting' : 'ps-staffstatus-scheduled'}">${o.status === 'backordered' ? 'Backordered' : 'Ordered'}</span>
+        </div>
+        <div style="display:flex; gap:6px; margin-top:0.6rem; flex-wrap:wrap;">
+          <button class="save-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="invMarkReceived('${o.id}')">Mark received</button>
+          ${o.status === 'ordered'
+            ? `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="invMarkBackordered('${o.id}')">Mark backordered</button>`
+            : `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="invMarkOrderedAgain('${o.id}')">Back to ordered</button>`}
+          <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="invCancelOrder('${o.id}')">Cancel</button>
+        </div>
+      </div>`;
+    });
+  }
+
+  if (INVENTORY_ITEMS.length === 0) {
+    html += `<div class="card" style="text-align:center;">
+      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Starting from scratch? Import your existing colors from the Master Calculators spreadsheet instead of typing them in one by one.</div>
+      <button class="save-btn" onclick="invImportSeedData()"><i class="fa-solid fa-file-import"></i> Import starter inventory (${INV_SEED_DATA.length} colors)</button>
+    </div>`;
+  }
+
+  html += `<div class="section-label">Add a color</div>
+  <div class="card">
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Color</label><input type="text" id="inv-new-color" placeholder="e.g. White"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Brand</label><input type="text" id="inv-new-brand" placeholder="e.g. Sempertex"></div>
+    </div>
+    <button class="save-btn" onclick="invAddColor()">Add color</button>
+  </div>`;
+
+  html += `<div class="section-label">Colors</div>`;
+  if (INVENTORY_ITEMS.length === 0) {
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — add one above.</div>`;
+  } else {
+    html += `<div class="card">
+      <div class="settings-field" style="margin-bottom:0.6rem;">
+        <input type="text" id="inv-search" placeholder="Search colors or brands..." value="${psEscape(invSearchQuery)}" oninput="invSetSearch(this.value)">
+      </div>
+      <div class="trip-toggle" style="margin:0;">
+        <button class="trip-btn ${invGroupBy === 'tier' ? 'active' : ''}" onclick="invSetGroupBy('tier')">Group: Main / Misc</button>
+        <button class="trip-btn ${invGroupBy === 'brand' ? 'active' : ''}" onclick="invSetGroupBy('brand')">Group: Brand</button>
+      </div>
+    </div>`;
+
+    const items = invFilteredSortedItems();
+    if (items.length === 0) {
+      html += `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No colors match "${psEscape(invSearchQuery)}".</div>`;
+    } else {
+      const groups = invGroupedItems(items);
+      groups.forEach(g => {
+        if (g.items.length === 0) return; // hide empty groups (e.g. no Misc colors, or a search with no brand matches)
+        const collapsed = invCollapsedGroups.has(g.key);
+        html += `<div class="inv-group-header" onclick="invToggleGroup('${g.key}')">
+          <span>${psEscape(g.label)} (${g.items.length})</span>
+          <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+        </div>`;
+        if (!collapsed) {
+          html += `<div class="inv-color-list">` + g.items.map(item => invColorCardHtml(item, upcomingMap)).join('') + `</div>`;
+        }
+      });
+    }
+
+    let totalValue = 0;
+    INVENTORY_ITEMS.forEach(item => {
+      INV_SIZES.forEach(size => { totalValue += (item.sizes[size].backstock || 0) * (item.sizes[size].price || 0); });
+    });
+    html += `<div class="ps-pack-note">Estimated backstock value: $${totalValue.toFixed(2)}</div>`;
+  }
+
+  root.innerHTML = html;
+}
+
+// Renders one color's card — collapsed header (name, brand, "N to order" badge) and, when
+// expanded, the Main/Misc toggle plus each size's editable fields and order action.
+function invColorCardHtml(item, upcomingMap) {
+  const expanded = invExpandedItem === item.id;
+  const tier = item.tier || 'main';
+  let itemToOrderTotal = 0;
+  INV_SIZES.forEach(size => {
+    const sd = item.sizes[size];
+    const upcoming = invUpcomingFor(item.color, size, upcomingMap);
+    const pendingQty = invPendingOrderedQty(item.id, size);
+    itemToOrderTotal += invToOrder(sd.par, upcoming, sd.backstock, pendingQty);
+  });
+
+  let html = `<div class="inv-color-row">`;
+  html += `<div class="inv-color-row-header" onclick="invToggleExpand('${item.id}')">
+    <div class="inv-color-row-text">
+      <div class="inv-color-row-name">${psEscape(item.color)}</div>
+      <div class="inv-color-row-brand">${psEscape(item.brand || 'No brand')}</div>
+    </div>
+    ${itemToOrderTotal > 0 ? `<span class="ps-status-btn ps-status-waiting">${itemToOrderTotal} to order</span>` : ''}
+    <button class="icon-btn" style="padding:4px;" onclick="event.stopPropagation(); invDeleteColor('${item.id}')" aria-label="Delete color"><i class="fa-solid fa-trash"></i></button>
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+  </div>`;
+
+  if (expanded) {
+    html += `<div class="ps-job-body">`;
+    html += `<div class="trip-toggle" style="margin:0.75rem 0 0;">
+      <button class="trip-btn ${tier === 'main' ? 'active' : ''}" onclick="invSetTier('${item.id}','main')">Main</button>
+      <button class="trip-btn ${tier === 'misc' ? 'active' : ''}" onclick="invSetTier('${item.id}','misc')">Misc</button>
+    </div>`;
+    INV_SIZES.forEach(size => {
+      const sd = item.sizes[size];
+      const upcoming = invUpcomingFor(item.color, size, upcomingMap);
+      const pendingQty = invPendingOrderedQty(item.id, size);
+      const toOrder = invToOrder(sd.par, upcoming, sd.backstock, pendingQty);
+      const formKey = `${item.id}|${size}`;
+
+      html += `<div class="ps-item-block">`;
+      html += `<div style="font-size:14px; font-weight:700; margin-bottom:0.5rem; margin-top:0.75rem;">${psEscape(size)}</div>`;
+      html += `<div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Price per bag</label><input type="number" step="0.01" min="0" value="${sd.price}" onchange="invUpdateSizeField('${item.id}','${size}','price',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Open bin</label>
+          <select onchange="invUpdateSizeField('${item.id}','${size}','openStatus',this.value)">
+            ${INV_OPEN_STATUSES.map(s => `<option value="${s}" ${s === sd.openStatus ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+        </div>
+      </div>`;
+      html += `<div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Backstock</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${size}','backstock',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Par</label><input type="number" min="0" value="${sd.par}" onchange="invUpdateSizeField('${item.id}','${size}','par',this.value)"></div>
+      </div>`;
+      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Upcoming (from open jobs): ${upcoming}${pendingQty ? ` · Pending order: ${pendingQty}` : ''}</div>`;
+      html += `<div style="display:flex; align-items:center; justify-content:space-between;">
+        <div style="font-weight:700; font-size:14px;">${toOrder > 0 ? `Order ${toOrder}` : 'Stocked'}</div>
+        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenOrderForm('${item.id}','${size}')"><i class="fa-solid fa-cart-plus"></i> Order</button>
+      </div>`;
+
+      if (invOrderFormKey === formKey) {
+        html += `<div style="margin-top:0.75rem;">
+          <div class="row">
+            <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" id="inv-order-qty" min="1" value="${toOrder > 0 ? toOrder : 1}"></div>
+            <div class="settings-field" style="margin-bottom:0"><label>Ordered from</label><input type="text" id="inv-order-vendor" placeholder="e.g. Loftus"></div>
+          </div>
+          <div class="settings-field"><label>Order date</label><input type="text" id="inv-order-date" placeholder="e.g. 3/14"></div>
+          <div style="display:flex; gap:8px;">
+            <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="invSubmitOrder('${item.id}','${size}')">Save order</button>
+            <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invCancelOrderForm()">Cancel</button>
+          </div>
+        </div>`;
+      }
+      html += `</div>`; // ps-item-block
+    });
+    html += `</div>`; // ps-job-body
+  }
+  html += `</div>`; // inv-color-row
+  return html;
 }
 
 // ═══════════════════════════════════════ EVENT SCHEDULE & STAFFING VIEW ═══════════════════════════════════════
@@ -2057,7 +3302,10 @@ function setTopBar(v) {
 
 function goBack() {
   const inSettings = document.getElementById('view-settings').classList.contains('active');
-  showView(inSettings ? lastToolView : 'home');
+  if (inSettings) { showView(lastToolView); return; }
+  // Latex is a level below the Inventory category picker, not directly off home.
+  const inLatexInventory = document.getElementById('view-inventory-latex').classList.contains('active');
+  showView(inLatexInventory ? 'inventory' : 'home');
 }
 
 function showTrip(t, btn) {
@@ -2084,11 +3332,29 @@ function handleSignOutClick() {
   window.fbSignOut();
 }
 
+// TEMPORARY, LOCAL-DEV-ONLY: Firebase's signInWithRedirect doesn't reliably complete on
+// localhost (third-party storage restrictions between this origin and the firebaseapp.com
+// auth domain), which made it impossible to preview the app while developing. This skips
+// the gate ONLY when running on localhost — the deployed site (GitHub Pages) always goes
+// through the real check below untouched. Firestore/Storage security rules are the actual
+// access control either way, so this only affects the friendly client-side gate.
+// TODO: remove this block once local sign-in isn't needed for previewing anymore.
+const DEV_SKIP_AUTH_GATE = ['localhost', '127.0.0.1'].includes(location.hostname);
+
 // Called every time sign-in state changes (on load, after sign-in, after sign-out).
 function handleAuthStateChanged(user, allowedEmails) {
   const gate = document.getElementById('auth-gate');
   const signinBox = document.getElementById('auth-gate-signin');
   const deniedBox = document.getElementById('auth-gate-denied');
+
+  if (DEV_SKIP_AUTH_GATE) {
+    gate.style.display = 'none';
+    if (!window.__appBooted) {
+      window.__appBooted = true;
+      bootApp();
+    }
+    return;
+  }
 
   if (!user) {
     gate.style.display = 'flex';
@@ -2122,6 +3388,9 @@ function bootApp() {
   try { psStartJobsListener(); } catch (e) { console.error('Jobs listener failed to start:', e); }
   try { loadSettings(); } catch (e) { console.error('loadSettings failed:', e); }
   try { calc(); } catch (e) { console.error('calc failed:', e); }
+  try { qcInit(); } catch (e) { console.error('qcInit failed:', e); }
+  try { frInit(); } catch (e) { console.error('frInit failed:', e); }
+  try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
 }
 </script>
