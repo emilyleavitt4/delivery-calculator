@@ -667,6 +667,43 @@
   .inv-color-suggest-item { padding: 8px 10px; font-size: 13px; cursor: pointer; }
   .inv-color-suggest-item:hover, .inv-color-suggest-item:active { background: var(--accent-light); }
 
+  /* Job Cost Calculator's custom-items table — one dense line per item (item/qty/cost/total),
+     since a real job commonly has 8-15 of these and the earlier one-card-per-item layout
+     took up too much vertical space. */
+  .jcc-table-header { display: flex; align-items: center; gap: 6px; padding: 0 2px 6px; font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.3px; }
+  .jcc-row-line { display: flex; align-items: center; gap: 6px; padding: 6px 2px; border-top: 0.5px solid var(--border); }
+  .jcc-row-line:first-of-type { border-top: none; }
+  .jcc-col-item { flex: 1; min-width: 0; position: relative; }
+  .jcc-col-qty { width: 42px; flex-shrink: 0; }
+  .jcc-col-cost { width: 56px; flex-shrink: 0; }
+  .jcc-col-total { width: 58px; flex-shrink: 0; text-align: right; font-size: 13px; font-weight: 600; }
+  .jcc-col-del { width: 20px; flex-shrink: 0; text-align: center; color: var(--text-tertiary); cursor: pointer; font-size: 13px; }
+  .jcc-row-line input[type="text"] { width: 100%; font-size: 13px; padding: 6px 8px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); -webkit-appearance: none; }
+  .jcc-row-line input[type="number"] { width: 100%; font-size: 13px; padding: 6px 4px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); text-align: center; -webkit-appearance: none; }
+  .jcc-row-line input:focus { outline: none; border-color: var(--accent); }
+  /* Overlays below the item field instead of pushing the rows underneath it down the page. */
+  .jcc-row-line .inv-color-suggest { position: absolute; top: 100%; left: 0; right: 0; z-index: 20; }
+
+  /* Tap-to-reveal info bubble next to a field label (e.g. clarifying what "employee cost"
+     actually means) — keeps the explanation out of sight until someone asks for it. */
+  .jcc-info-icon { color: var(--text-tertiary); font-size: 12px; cursor: pointer; margin: -10px -10px -10px 2px; padding: 10px; }
+  .jcc-info-bubble {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 20; margin-top: 4px;
+    font-size: 12px; font-weight: 400; text-transform: none; color: var(--text-secondary);
+    background: var(--surface); border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 8px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  }
+
+  /* Compact summary line (label + value, e.g. inside Calculation totals) with room for a
+     small inline number input in the label itself, instead of a whole settings-field row. */
+  .jcc-summary-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; padding: 4px 0; gap: 8px; }
+  .jcc-inline-input {
+    width: 44px; font-size: 12px; padding: 3px 4px; text-align: center;
+    border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm);
+    background: var(--bg); color: var(--text); font-family: var(--font); -webkit-appearance: none;
+  }
+  .jcc-inline-input:focus { outline: none; border-color: var(--accent); }
+
   @media print {
     .topbar, .no-print, #ps-production-empty, #ps-staffing-empty { display: none !important; }
   }
@@ -3899,6 +3936,21 @@ let jccCollapsedCategories = new Set(JCC_CATEGORIES.map(c => c.key)); // start c
 let jccState = null;
 let jccRowSeq = 0;
 
+// A small (i) next to a field label that toggles a short explanation on tap — for anything
+// that needs a sentence of context but would clutter the screen if always shown (e.g.
+// "employee cost" meaning fully-loaded cost, not paycheck rate). Reusable anywhere in this
+// view via jccInfoIconHtml(key, text); one open bubble at a time.
+function jccInfoIconHtml(key, text) {
+  return `<i class="fa-solid fa-circle-info jcc-info-icon" onclick="event.preventDefault(); jccToggleInfo('${key}')"></i><div id="jcc-info-${key}" class="jcc-info-bubble" style="display:none;">${psEscape(text)}</div>`;
+}
+function jccToggleInfo(key) {
+  const el = document.getElementById('jcc-info-' + key);
+  if (!el) return;
+  const opening = el.style.display === 'none';
+  document.querySelectorAll('.jcc-info-bubble').forEach(b => { b.style.display = 'none'; });
+  if (opening) el.style.display = 'block';
+}
+
 function jccFmtMoney(n) {
   n = n || 0;
   const decimals = (n > 0 && n < 0.01) ? 4 : 2;
@@ -3918,7 +3970,11 @@ function jccAllCatalogItems() {
 }
 
 function jccInit() {
-  jccState = { rows: [], consumablesPct: 5 };
+  jccState = {
+    rows: [], consumablesPct: 5,
+    orderPrepMin: 0, buildMin: 0, loadUnloadMin: 0, setupMin: 0, otherMin: 0, employeeWage: 35,
+    profitMarginPct: 45, coreMultiplier: 1.1, complexMultiplier: 1.2, premiumMultiplier: 1.33
+  };
   jccRenderShell();
 
   window.fbLoadJccCatalog().then(snap => {
@@ -3937,18 +3993,50 @@ function jccRenderShell() {
   if (!root) return;
   const s = jccState;
   root.innerHTML = `
-    <div class="section-label" style="margin-top:0">Custom items</div>
+    <div class="section-label" style="margin-top:0">Material Cost Calculator</div>
     <div id="jcc-rows"></div>
     <button class="icon-btn" style="width:auto; padding:8px 16px; font-size:13px; margin-bottom:0.75rem;" onclick="jccAddRow()"><i class="fa-solid fa-plus"></i> Add item</button>
 
+    <div class="section-label">Labor Cost Calculator</div>
     <div class="card">
-      <div class="settings-field">
-        <label>Consumables / waste (%)</label>
-        <input type="number" step="0.1" min="0" value="${s.consumablesPct}" onchange="jccUpdateConsumablesPct(this.value)">
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Order prep (min)</label><input type="number" min="0" value="${s.orderPrepMin}" oninput="jccUpdateLaborField('orderPrepMin', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Build time (min)</label><input type="number" min="0" value="${s.buildMin}" oninput="jccUpdateLaborField('buildMin', this.value)"></div>
       </div>
-      <div style="font-size:13px; display:flex; justify-content:space-between; margin-bottom:4px;"><span>Material cost</span><b id="jcc-material-cost">$0.00</b></div>
-      <div style="font-size:13px; display:flex; justify-content:space-between; margin-bottom:8px; color:var(--text-secondary);"><span>Consumables / waste</span><b id="jcc-consumables-amt">$0.00</b></div>
-      <div style="font-size:15px; display:flex; justify-content:space-between; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total material cost</span><b id="jcc-total-material-cost" style="color:var(--accent);">$0.00</b></div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Load / unload (min)</label><input type="number" min="0" value="${s.loadUnloadMin}" oninput="jccUpdateLaborField('loadUnloadMin', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Setup time (min)</label><input type="number" min="0" value="${s.setupMin}" oninput="jccUpdateLaborField('setupMin', this.value)"></div>
+      </div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Other (min)</label><input type="number" min="0" value="${s.otherMin}" oninput="jccUpdateLaborField('otherMin', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0.6rem; position:relative;">
+          <label>Employee cost ($/hr) ${jccInfoIconHtml('employee-cost', 'What they cost you per hour, not their paycheck rate — include payroll tax, workers comp, etc.')}</label>
+          <input type="number" step="0.01" min="0" value="${s.employeeWage}" oninput="jccUpdateLaborField('employeeWage', this.value)">
+        </div>
+      </div>
+      <div class="jcc-summary-row"><span>Total labor time</span><b id="jcc-labor-time">0 min</b></div>
+      <div class="jcc-summary-row" style="font-size:15px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total labor cost</span><b id="jcc-labor-cost" style="color:var(--accent);">$0.00</b></div>
+    </div>
+
+    <div class="section-label">Calculation totals</div>
+    <div class="card">
+      <div class="jcc-summary-row" style="font-size:15px; margin-bottom:6px;"><span>Total direct cost</span><b id="jcc-direct-cost">$0.00</b></div>
+      <div class="jcc-summary-row" style="color:var(--text-secondary);">
+        <span>Minimum sale price <span style="font-size:11px;">(margin <input type="number" step="1" min="1" max="99" class="jcc-inline-input" value="${s.profitMarginPct}" onchange="jccUpdateProfitMargin(this.value)">%)</span></span>
+        <b id="jcc-min-sale">$0.00</b>
+      </div>
+      <div class="jcc-summary-row" style="font-size:14px; border-top:0.5px solid var(--border); padding-top:8px;">
+        <span>Retail — Core <span style="font-size:11px; color:var(--text-secondary);">(×<input type="number" step="0.01" min="1" class="jcc-inline-input" style="width:52px;" value="${s.coreMultiplier}" onchange="jccUpdateMultiplier('coreMultiplier', this.value)">)</span></span>
+        <b id="jcc-retail-core" style="color:var(--accent);">$0.00</b>
+      </div>
+      <div class="jcc-summary-row" style="font-size:14px;">
+        <span>Retail — Complex <span style="font-size:11px; color:var(--text-secondary);">(×<input type="number" step="0.01" min="1" class="jcc-inline-input" style="width:52px;" value="${s.complexMultiplier}" onchange="jccUpdateMultiplier('complexMultiplier', this.value)">)</span></span>
+        <b id="jcc-retail-complex" style="color:var(--accent);">$0.00</b>
+      </div>
+      <div class="jcc-summary-row" style="font-size:14px;">
+        <span>Retail — Premium <span style="font-size:11px; color:var(--text-secondary);">(×<input type="number" step="0.01" min="1" class="jcc-inline-input" style="width:52px;" value="${s.premiumMultiplier}" onchange="jccUpdateMultiplier('premiumMultiplier', this.value)">)</span></span>
+        <b id="jcc-retail-premium" style="color:var(--accent);">$0.00</b>
+      </div>
     </div>
 
     <div class="section-label">Reference catalog <span style="text-transform:none; font-weight:400;">(editable costs)</span></div>
@@ -3972,9 +4060,21 @@ function jccRenderShell() {
 function jccRenderRows() {
   const container = document.getElementById('jcc-rows');
   if (!container) return;
-  container.innerHTML = jccState.rows.length === 0
-    ? `<div class="card" style="text-align:center; color:var(--text-secondary); margin-bottom:0.75rem;">No items yet — add one below.</div>`
-    : jccState.rows.map(row => jccRowHtml(row)).join('');
+  const hasRows = jccState.rows.length > 0;
+  container.innerHTML = `<div class="card" style="margin-bottom:0.75rem;">
+    ${hasRows ? `<div class="jcc-table-header">
+          <div class="jcc-col-item">Item</div>
+          <div class="jcc-col-qty">Qty</div>
+          <div class="jcc-col-cost">Cost</div>
+          <div class="jcc-col-total">Total</div>
+          <div class="jcc-col-del"></div>
+        </div>
+        ${jccState.rows.map(row => jccRowHtml(row)).join('')}`
+      : `<div style="text-align:center; color:var(--text-secondary); padding:6px 0;">No items yet — add one below.</div>`}
+    <div class="jcc-summary-row" style="border-top:0.5px solid var(--border); margin-top:6px; padding-top:8px;"><span>Material cost</span><b id="jcc-material-cost">$0.00</b></div>
+    <div class="jcc-summary-row" style="color:var(--text-secondary);"><span>Consumables / waste <input type="number" step="0.1" min="0" class="jcc-inline-input" value="${jccState.consumablesPct}" onchange="jccUpdateConsumablesPct(this.value)">%</span><b id="jcc-consumables-amt">$0.00</b></div>
+    <div class="jcc-summary-row" style="font-size:14px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total material cost</span><b id="jcc-total-material-cost" style="color:var(--accent);">$0.00</b></div>
+  </div>`;
   jccRecalcTotals();
 }
 
@@ -3982,23 +4082,18 @@ function jccNameInputId(rowId) { return 'jcc-row-name-' + rowId; }
 
 function jccRowHtml(row) {
   const inputId = jccNameInputId(row.id);
-  return `<div class="card" style="margin-bottom:0.5rem;">
-    <div class="settings-field" style="margin-bottom:0.6rem;">
-      <label>Item</label>
-      <input type="text" id="${inputId}" value="${invAttr(row.name)}" placeholder="Start typing e.g. EMT..." autocomplete="off"
+  return `<div class="jcc-row-line">
+    <div class="jcc-col-item">
+      <input type="text" id="${inputId}" value="${invAttr(row.name)}" placeholder="e.g. EMT" autocomplete="off"
         oninput="jccUpdateRowName('${row.id}', this.value)"
         onfocus="jccShowItemSuggestions('${row.id}')"
         onblur="jccHideItemSuggestionsSoon('${row.id}')">
       <div id="${inputId}-suggest" class="inv-color-suggest" style="display:none;"></div>
     </div>
-    <div class="row">
-      <div class="settings-field" style="margin-bottom:0"><label>Qty</label><input type="number" step="0.01" min="0" value="${row.qty}" oninput="jccUpdateRowQty('${row.id}', this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0"><label>Unit cost ($)</label><input type="number" step="0.01" min="0" id="jcc-row-unitcost-${row.id}" value="${row.unitCost}" oninput="jccUpdateRowUnitCost('${row.id}', this.value)"></div>
-    </div>
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">
-      <div style="font-size:13px;">Total: <b id="jcc-row-total-${row.id}">$0.00</b></div>
-      <button class="icon-btn" style="width:auto; padding:5px 12px; font-size:12px;" onclick="jccRemoveRow('${row.id}')"><i class="fa-solid fa-trash"></i></button>
-    </div>
+    <div class="jcc-col-qty"><input type="number" step="0.01" min="0" value="${row.qty}" oninput="jccUpdateRowQty('${row.id}', this.value)"></div>
+    <div class="jcc-col-cost"><input type="number" step="0.01" min="0" id="jcc-row-unitcost-${row.id}" value="${row.unitCost}" oninput="jccUpdateRowUnitCost('${row.id}', this.value)"></div>
+    <div class="jcc-col-total" id="jcc-row-total-${row.id}">$0.00</div>
+    <div class="jcc-col-del" onclick="jccRemoveRow('${row.id}')"><i class="fa-solid fa-trash"></i></div>
   </div>`;
 }
 
@@ -4033,10 +4128,26 @@ function jccUpdateConsumablesPct(value) {
   jccState.consumablesPct = parseFloat(value) || 0;
   jccRecalcTotals();
 }
+function jccUpdateLaborField(field, value) {
+  jccState[field] = parseFloat(value) || 0;
+  jccRecalcTotals();
+}
+function jccUpdateProfitMargin(value) {
+  jccState.profitMarginPct = parseFloat(value) || 0;
+  jccRecalcTotals();
+}
+function jccUpdateMultiplier(field, value) {
+  jccState[field] = parseFloat(value) || 0;
+  jccRecalcTotals();
+}
 
-// Updates only the computed totals (never rebuilds the row inputs), so typing a qty or unit
-// cost doesn't blow away focus mid-keystroke — same split-render trick used elsewhere in this
-// app (Inventory's results list, the Letter Styling Calculator).
+// Updates only the computed totals (never rebuilds the row inputs), so typing a qty, unit
+// cost, or labor field doesn't blow away focus mid-keystroke — same split-render trick used
+// elsewhere in this app (Inventory's results list, the Letter Styling Calculator).
+//
+// Minimum Sale Price = Direct Cost ÷ profit margin (the margin is editable per job, not fixed).
+// Retail Core/Complex/Premium = Minimum Sale Price × their own editable multiplier (defaults
+// 1.1 / 1.2 / 1.33, confirmed against the real spreadsheet's formulas).
 function jccRecalcTotals() {
   let materialCost = 0;
   jccState.rows.forEach(row => {
@@ -4046,12 +4157,31 @@ function jccRecalcTotals() {
     if (el) el.textContent = jccFmtMoney(total);
   });
   const consumables = materialCost * (jccState.consumablesPct / 100);
-  const mcEl = document.getElementById('jcc-material-cost');
-  const caEl = document.getElementById('jcc-consumables-amt');
-  const tmEl = document.getElementById('jcc-total-material-cost');
-  if (mcEl) mcEl.textContent = jccFmtMoney(materialCost);
-  if (caEl) caEl.textContent = jccFmtMoney(consumables);
-  if (tmEl) tmEl.textContent = jccFmtMoney(materialCost + consumables);
+  const totalMaterialCost = materialCost + consumables;
+
+  const laborMinutes = jccState.orderPrepMin + jccState.buildMin + jccState.loadUnloadMin + jccState.setupMin + jccState.otherMin;
+  const laborCost = (laborMinutes / 60) * jccState.employeeWage;
+
+  const directCost = totalMaterialCost + laborCost;
+  // Profit margin is profit ÷ sale price, so cost is (1 - margin) of the sale price —
+  // e.g. a 45% margin means cost is 55% of price, matching the spreadsheet's own ÷0.55.
+  const costRatio = 1 - (jccState.profitMarginPct / 100);
+  const minSale = costRatio > 0 ? directCost / costRatio : 0;
+  const retailCore = minSale * jccState.coreMultiplier;
+  const retailComplex = minSale * jccState.complexMultiplier;
+  const retailPremium = minSale * jccState.premiumMultiplier;
+
+  const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+  set('jcc-material-cost', jccFmtMoney(materialCost));
+  set('jcc-consumables-amt', jccFmtMoney(consumables));
+  set('jcc-total-material-cost', jccFmtMoney(totalMaterialCost));
+  set('jcc-labor-time', laborMinutes + ' min');
+  set('jcc-labor-cost', jccFmtMoney(laborCost));
+  set('jcc-direct-cost', jccFmtMoney(directCost));
+  set('jcc-min-sale', jccFmtMoney(minSale));
+  set('jcc-retail-core', jccFmtMoney(retailCore));
+  set('jcc-retail-complex', jccFmtMoney(retailComplex));
+  set('jcc-retail-premium', jccFmtMoney(retailPremium));
 }
 
 // Type-ahead: matches the catalog by substring on name, same interaction pattern as
