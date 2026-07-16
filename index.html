@@ -2029,8 +2029,18 @@ function psBlankJob(overrides) {
     staffingStatus: 'open',
     createdAt: Date.now(),
     staffing: { setupTime: '', eventStartTime: '', eventTakeDown: '', eventLocation: '', dayOfContact: '', notes: '' },
-    productionItems: []
+    productionItems: [],
+    // Non-production classifications from the Mapping Layer land here instead of
+    // productionItems — see psMapRawItemToEvent. Old jobs saved before this existed just
+    // won't have these fields; every reader treats a missing array as empty (`|| []`).
+    rentalItems: [],   // { id, name, qty, pulled, packed, returned } — shown in Production's Rentals section
+    serviceItems: [],  // { id, name, qty } — logistics-affecting, not a build item; no dedicated view yet
+    fees: []           // { id, name, qty } — attached to the event record only
   }, overrides || {});
+}
+
+function psNewLineItemId() {
+  return 'li_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
 }
 
 // Constructs a blank Event Model from an Import Layer result — populates only true
@@ -2113,22 +2123,40 @@ function psUpdateStaffingField(jobId, field, value) {
   psSaveJob(job);
 }
 
+function psToggleRentalStatus(jobId, itemId, field, checked) {
+  const job = psFindJob(jobId);
+  if (!job || !job.rentalItems) return;
+  const item = job.rentalItems.find(i => i.id === itemId);
+  if (!item) return;
+  item[field] = checked;
+  psSaveJob(job);
+}
+
 // ═══════════════════════════════════════ MAPPING LAYER ═══════════════════════════════════════
 //
-// Translates an import's raw line items onto the Internal Event Model, using mapping rules —
-// today, the same two rules the import handler used to run inline, preserved exactly:
-// (1) a raw item carrying an "Event Date" detail is event/staffing metadata, not a decor item;
-// (2) everything else gets matched against the RECIPES catalog (see the Production Sheet
-// Generator section above) by normalized name equality. This is the ONLY place that should
-// ever compare raw imported text against RECIPES, or write import data into a Job's
-// staffing/productionItems — keeping that logic out of the Import Layer (which knows nothing
-// about recipes) and out of the Production Layer (which only ever reads the already-mapped
-// Event Model, never raw import data). A future editable-mapping-rules UI would live here,
-// replacing the RECIPES.find(...) lookup below with a lookup into a user-editable rules table
-// — everything calling into this layer would be unaffected.
+// Translates an import's raw line items onto the Internal Event Model, using mapping rules.
+// Every rule now carries a classification alongside its production template — this is what
+// routes a matched raw item to the right part of the event instead of always assuming
+// "production." This is the ONLY place that should ever compare raw imported text against
+// RECIPES, or write import data into a Job's fields — keeping that logic out of the Import
+// Layer (which knows nothing about recipes or classifications) and out of the Production Layer
+// (which only ever reads the already-mapped Event Model, never raw import data).
+//
+// Classifications and where they land on the event:
+//   production — event.productionItems (build items, shown on the production sheet — this is
+//                the ONLY classification that existed before classifications did, so every
+//                seeded default rule uses it, preserving prior behavior exactly)
+//   rental     — event.rentalItems (shown in Production's pull/pack/return section)
+//   service    — event.serviceItems (affects logistics/scheduling, but is never a build item —
+//                no dedicated view yet, per "don't build a new review screen yet")
+//   fee        — event.fees (attached to the event record; never creates a production task)
+//   note       — appended as a line in event.staffing.notes (the existing Staffing notes field)
+//   ignore     — dropped; not even reported as unmatched, since it was deliberately excluded
 
 // Returns true if this raw item was event/staffing metadata (and was applied to `event`) —
-// false if it's still a candidate production line item for psMapRawItemToProductionItem.
+// false if it's still a candidate line item for psMapRawItemToEvent. This check runs before
+// classification lookup because "Event Date" is a structural detail-field marker, not a named
+// line item a mapping rule would ever match.
 function psMapRawItemToEventFields(pItem, event) {
   if (!pItem.details['Event Date']) return false;
   event.eventDate = pItem.details['Event Date'];
@@ -2141,42 +2169,85 @@ function psMapRawItemToEventFields(pItem, event) {
 }
 
 // Matches a raw item's name against the Import Mapping Rules table (see IMPORT_MAPPING_RULES,
-// below) and builds a production item ready for event.productionItems — or returns null if
-// nothing matched, so the caller can report it as unmatched instead of silently dropping it.
-function psMapRawItemToProductionItem(pItem) {
+// below), then routes it onto `event` according to the matched rule's classification. Returns
+// the classification actually applied ('production'/'rental'/'service'/'fee'/'note'/'ignore'),
+// or 'unmatched' if no rule matched (or the matched rule points at a production template that
+// no longer exists) — so the caller can report it instead of silently dropping it.
+function psMapRawItemToEvent(pItem, event) {
   const rule = IMPORT_MAPPING_RULES.find(r => psNormalize(r.rawName) === psNormalize(pItem.name));
-  const recipe = rule && RECIPES.find(r => r.id === rule.recipeId);
-  if (!recipe) return null;
-  const colors = pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : ['Unspecified'];
-  return { recipeId: recipe.id, qty: pItem.qty, colors, customLinear: null, design: '', location: pItem.details['Location'] || '', topperNote: '', notes: '' };
+  if (!rule) return 'unmatched';
+  const classification = rule.classification || 'production';
+
+  if (classification === 'production') {
+    const recipe = RECIPES.find(r => r.id === rule.recipeId);
+    if (!recipe) return 'unmatched';
+    const colors = pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : ['Unspecified'];
+    event.productionItems.push({ recipeId: recipe.id, qty: pItem.qty, colors, customLinear: null, design: '', location: pItem.details['Location'] || '', topperNote: '', notes: '' });
+    return 'production';
+  }
+  if (classification === 'rental') {
+    event.rentalItems.push({ id: psNewLineItemId(), name: pItem.name, qty: pItem.qty, pulled: false, packed: false, returned: false });
+    return 'rental';
+  }
+  if (classification === 'service') {
+    event.serviceItems.push({ id: psNewLineItemId(), name: pItem.name, qty: pItem.qty });
+    return 'service';
+  }
+  if (classification === 'fee') {
+    event.fees.push({ id: psNewLineItemId(), name: pItem.name, qty: pItem.qty });
+    return 'fee';
+  }
+  if (classification === 'note') {
+    const line = pItem.name + (pItem.qty > 1 ? ` × ${pItem.qty}` : '');
+    event.staffing.notes = event.staffing.notes ? event.staffing.notes + '\n' + line : line;
+    return 'note';
+  }
+  if (classification === 'ignore') return 'ignore';
+  return 'unmatched';
 }
 
-// Runs every raw line item through the mapping rules above, mutating `event` in place (its
-// eventDate/staffing fields and productionItems array). Returns a match report so the caller
-// can tell the user what happened — same report shape the original inline import logic built.
+// Runs every raw line item through the mapping rules above, mutating `event` in place. Returns
+// a match report so the caller can tell the user what happened — `matchedCount` is preserved
+// as "how many went to Production" for the existing status message; `counts` breaks down every
+// classification for the extra detail appended to that message.
 function psApplyMappingToEvent(event, rawItems) {
-  let matchedCount = 0;
+  const counts = { production: 0, rental: 0, service: 0, fee: 0, note: 0, ignore: 0 };
   const unmatched = [];
   rawItems.forEach(pItem => {
     if (psMapRawItemToEventFields(pItem, event)) return;
-    const item = psMapRawItemToProductionItem(pItem);
-    if (item) {
-      event.productionItems.push(item);
-      matchedCount++;
-    } else {
+    const result = psMapRawItemToEvent(pItem, event);
+    if (result === 'unmatched') {
       unmatched.push(`${pItem.name} × ${pItem.qty}`);
+    } else {
+      counts[result]++;
     }
   });
-  return { matchedCount, unmatched };
+  return { matchedCount: counts.production, counts, unmatched };
 }
 
 // ═══════════════════════════════════════ IMPORT MAPPING RULES ═══════════════════════════════════════
 //
 // The Mapping Layer's rule table, now user-editable instead of hardcoded — this is what
-// psMapRawItemToProductionItem (above) looks up. Seeded 1:1 from RECIPES.display, which is
-// exactly the string every raw item name used to be compared against directly, so a fresh
+// psMapRawItemToEvent (above) looks up. Seeded 1:1 from RECIPES.display, which is exactly the
+// string every raw item name used to be compared against directly, all classified
+// 'production' — the only classification that existed before this table did — so a fresh
 // business with no saved rules yet matches invoices identically to before this was editable.
-const IMPORT_MAPPING_DEFAULTS = RECIPES.map(r => ({ id: 'map_' + r.id, rawName: r.display, recipeId: r.id }));
+const IM_CLASSIFICATIONS = [
+  { value: 'production', label: 'Production — build item' },
+  { value: 'rental', label: 'Rental — pull / pack / return' },
+  { value: 'service', label: 'Service — logistics only, no build item' },
+  { value: 'fee', label: 'Fee — attached to event only' },
+  { value: 'note', label: 'Note — added to event notes' },
+  { value: 'ignore', label: 'Ignore — no action' },
+];
+function imClassificationLabel(value) {
+  return (IM_CLASSIFICATIONS.find(c => c.value === value) || {}).label || value;
+}
+function imClassificationOptionsHtml(selected) {
+  return IM_CLASSIFICATIONS.map(c => `<option value="${c.value}"${c.value === selected ? ' selected' : ''}>${psEscape(c.label)}</option>`).join('');
+}
+
+const IMPORT_MAPPING_DEFAULTS = RECIPES.map(r => ({ id: 'map_' + r.id, rawName: r.display, recipeId: r.id, classification: 'production' }));
 let IMPORT_MAPPING_RULES = JSON.parse(JSON.stringify(IMPORT_MAPPING_DEFAULTS));
 let imRuleSeq = 0;
 let imCollapsed = true;
@@ -2233,17 +2304,21 @@ function imRenderRules() {
 }
 
 function imRuleRowHtml(rule) {
+  const classification = rule.classification || 'production';
   const recipe = RECIPES.find(r => r.id === rule.recipeId);
   if (!invAdminUnlocked) {
     return `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:0.5px solid var(--border); font-size:13px;">
       <div style="flex:1;">${psEscape(rule.rawName)}</div>
-      <div style="color:var(--text-secondary); text-align:right;">${recipe ? psEscape(recipe.label) : '(missing template)'}</div>
+      <div style="color:var(--text-secondary); text-align:right;">${classification === 'production' ? (recipe ? psEscape(recipe.label) : '(missing template)') : psEscape(imClassificationLabel(classification))}</div>
     </div>`;
   }
   return `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
     <div class="settings-field" style="margin-bottom:6px;"><label>Raw invoice name</label><input type="text" value="${invAttr(rule.rawName)}" onchange="imUpdateRuleField('${rule.id}','rawName', this.value)"></div>
+    <div class="settings-field" style="margin-bottom:6px;"><label>Classification</label><select onchange="imUpdateRuleField('${rule.id}','classification', this.value)">${imClassificationOptionsHtml(classification)}</select></div>
     <div style="display:flex; align-items:center; gap:8px;">
-      <select style="flex:1;" onchange="imUpdateRuleField('${rule.id}','recipeId', this.value)">${psItemOptionsHtml(rule.recipeId)}</select>
+      ${classification === 'production'
+        ? `<select style="flex:1;" onchange="imUpdateRuleField('${rule.id}','recipeId', this.value)">${psItemOptionsHtml(rule.recipeId)}</select>`
+        : `<div style="flex:1;"></div>`}
       <div class="jcc-col-del" onclick="imRemoveRule('${rule.id}')"><i class="fa-solid fa-trash"></i></div>
     </div>
   </div>`;
@@ -2258,7 +2333,7 @@ function imUpdateRuleField(id, field, value) {
 }
 function imAddRule() {
   const firstRecipe = RECIPES[0];
-  IMPORT_MAPPING_RULES.push({ id: 'map_custom_' + (++imRuleSeq), rawName: '', recipeId: firstRecipe ? firstRecipe.id : '' });
+  IMPORT_MAPPING_RULES.push({ id: 'map_custom_' + (++imRuleSeq), rawName: '', recipeId: firstRecipe ? firstRecipe.id : '', classification: 'production' });
   imRenderRules();
   imSaveToFirestore();
 }
@@ -2489,6 +2564,25 @@ function psProductionBodyHtml(job) {
       }
     });
     html += `<div class="ps-pack-note">Pack extras of each size/color.</div>`;
+  }
+
+  // Rental-classified import items (see the Mapping Layer / IM_CLASSIFICATIONS) land in
+  // job.rentalItems instead of productionItems — they're gear to gather and bring back, not
+  // something to build, so they get their own pull/pack/return checklist instead of a pull
+  // list + build-detail card.
+  const rentalItems = job.rentalItems || [];
+  if (rentalItems.length > 0) {
+    html += `<div class="section-label">Rentals — pull / pack / return</div>`;
+    rentalItems.forEach(item => {
+      html += `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
+        <div style="font-size:14px; font-weight:700; margin-bottom:6px;">${psEscape(item.name)} <span style="font-weight:400; color:var(--text-secondary);">× ${item.qty}</span></div>
+        <div style="display:flex; gap:16px; font-size:13px;">
+          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.pulled ? 'checked' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','pulled',this.checked)"> Pulled</label>
+          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.packed ? 'checked' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','packed',this.checked)"> Packed</label>
+          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.returned ? 'checked' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','returned',this.checked)"> Returned</label>
+        </div>
+      </div>`;
+    });
   }
 
   if (job.productionItems.length > 0) {
@@ -5224,11 +5318,18 @@ async function psHandleInvoiceUpload(fileInput) {
     document.getElementById('ps-import-debug-toggle').style.display = 'block';
 
     const event = psEventModelFromImport(rawImportData);           // Internal Event Model
-    const { matchedCount, unmatched } = psApplyMappingToEvent(event, rawImportData.rawItems); // Mapping Layer
+    const { matchedCount, counts, unmatched } = psApplyMappingToEvent(event, rawImportData.rawItems); // Mapping Layer
 
     psSaveJob(event);                                               // → Production Layer reads this back via Firestore
 
     let msg = `Created a new job${event.jobName ? ' for ' + psEscape(event.jobName) : ''} — ${matchedCount} decor item${matchedCount === 1 ? '' : 's'} went to Production, event details went to Staffing.`;
+    const extras = [];
+    if (counts.rental) extras.push(`${counts.rental} rental item${counts.rental === 1 ? '' : 's'}`);
+    if (counts.service) extras.push(`${counts.service} service${counts.service === 1 ? '' : 's'}`);
+    if (counts.fee) extras.push(`${counts.fee} fee${counts.fee === 1 ? '' : 's'}`);
+    if (counts.note) extras.push(`${counts.note} note${counts.note === 1 ? '' : 's'}`);
+    if (extras.length) msg += ` Also recorded: ${extras.join(', ')}.`;
+    if (counts.ignore) msg += ` (${counts.ignore} item${counts.ignore === 1 ? '' : 's'} ignored per mapping rules.)`;
     if (unmatched.length) msg += ` Couldn't auto-match (add manually in Production): ${unmatched.join('; ')}.`;
     statusEl.textContent = msg;
     statusEl.className = unmatched.length ? 'warn' : 'ok';
