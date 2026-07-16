@@ -800,6 +800,13 @@
   window.fbLoadHeliumCalc = () => getDoc(heliumDocRef);
   window.fbSaveHeliumCalc = (data) => setDoc(heliumDocRef, data);
 
+  // Import Mapping Rules — the Mapping Layer's editable rule table (raw invoice item name →
+  // production template), seeded from RECIPES.display so existing invoices keep matching
+  // exactly as before this became editable. Business-wide reference data, like Formulas.
+  const importMappingDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'importMappingRules');
+  window.fbLoadImportMappingRules = () => getDoc(importMappingDocRef);
+  window.fbSaveImportMappingRules = (data) => setDoc(importMappingDocRef, data);
+
   // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
   // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
   const customRecipesRef = collection(db, 'businesses', BUSINESS_ID, 'customRecipes');
@@ -819,6 +826,18 @@
   window.fbOnSnapshotInventoryOrders = (onNext, onError) => onSnapshot(inventoryOrdersRef, onNext, onError);
   window.fbSaveInventoryOrder = (order) => setDoc(doc(inventoryOrdersRef, order.id), order);
   window.fbDeleteInventoryOrder = (id) => deleteDoc(doc(inventoryOrdersRef, id));
+
+  // Time Tracker — clock in/out shifts (whoever's clocking in just types their name; entries
+  // are shared live across the team like Jobs) and saved stopwatch task timings.
+  const timeEntriesRef = collection(db, 'businesses', BUSINESS_ID, 'timeEntries');
+  window.fbOnSnapshotTimeEntries = (onNext, onError) => onSnapshot(timeEntriesRef, onNext, onError);
+  window.fbSaveTimeEntry = (entry) => setDoc(doc(timeEntriesRef, entry.id), entry);
+  window.fbDeleteTimeEntry = (id) => deleteDoc(doc(timeEntriesRef, id));
+
+  const stopwatchLogsRef = collection(db, 'businesses', BUSINESS_ID, 'stopwatchLogs');
+  window.fbOnSnapshotStopwatchLogs = (onNext, onError) => onSnapshot(stopwatchLogsRef, onNext, onError);
+  window.fbSaveStopwatchLog = (log) => setDoc(doc(stopwatchLogsRef, log.id), log);
+  window.fbDeleteStopwatchLog = (id) => deleteDoc(doc(stopwatchLogsRef, id));
 
   const ALLOWED_EMAILS = [
     'emily@utahballooncreations.com',
@@ -923,6 +942,11 @@
       <div class="tool-tile" onclick="showView('inventory')">
         <div class="tool-tile-icon"><i class="fa-solid fa-boxes-stacked"></i></div>
         <div class="tool-tile-title">Inventory</div>
+      </div>
+
+      <div class="tool-tile" onclick="showView('timetracker')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-clock"></i></div>
+        <div class="tool-tile-title">Time Tracker</div>
       </div>
 
       <div class="tool-tile soon">
@@ -1156,6 +1180,7 @@
         <textarea id="ps-import-debug-text" readonly rows="10" style="display:none; width:100%; margin-top:0.5rem; font-family:monospace; font-size:11px; padding:8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--bg); color:var(--text);"></textarea>
       </div>
     </div>
+    <div id="im-root"></div>
     <div class="home-footer-note">Creates one job — decor items go to Production, event details go to Event Schedule &amp; Staffing.</div>
   </div><!-- end view-import -->
 
@@ -1275,6 +1300,17 @@
   <div class="view" id="view-helium">
     <div id="he-root"></div>
   </div><!-- end view-helium -->
+
+  <!-- ═══════════════════════════════════════ TIME TRACKER VIEW -->
+  <!-- Two independent tools sharing one screen: a name-based clock in/out log (no per-user
+       login exists in this app, so whoever's clocking in just types their own name and the
+       log filters to it) with optional mileage per shift and a "Send Hours" share action, and
+       a stopwatch for timing one-off tasks (e.g. "how long does a 12ft garland take"), saved
+       with a label. Both are shared Firestore collections so the whole team sees the same
+       data regardless of device. -->
+  <div class="view" id="view-timetracker">
+    <div id="tt-root"></div>
+  </div><!-- end view-timetracker -->
 
   <!-- ═══════════════════════════════════════ SETTINGS VIEW -->
   <div class="view" id="view-settings">
@@ -1662,6 +1698,7 @@ const TOOL_META = {
   letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: false },
   jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: false },
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: false },
+  timetracker:{ title: 'Time Tracker',                  icon: 'fa-solid fa-clock',               showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
 };
 
@@ -1699,6 +1736,12 @@ function psTopperFt(recipe) {
 }
 
 // ═══════════════════════════════════════ PRODUCTION SHEET GENERATOR ═══════════════════════════════════════
+//
+// This is Production Layer data + math (RECIPES is the production-template catalog; psColorCount/
+// psComputeTotals further down turn a template + qty into an actual pull list). It never reads
+// raw imported text itself — the Mapping Layer (see psMapRawItemToProductionItem, defined near
+// the Internal Event Model) is the only thing that ever resolves an imported item's name to one
+// of these RECIPES entries.
 //
 // RECIPES holds the balloon-quantity formulas for each standard item, pulled directly from the
 // Quantity Calc tab of the Master Calculators spreadsheet, matched to the exact item names from
@@ -1750,7 +1793,14 @@ if (window.pdfjsLib) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
 
-// ─── INVOICE IMPORT ───
+// ═══════════════════════════════════════ IMPORT LAYER ═══════════════════════════════════════
+//
+// CRM-agnostic by design: reads a raw source (today, a 17hats PDF invoice) and produces plain
+// extracted data ONLY — no recipe matching, no production-item construction, nothing
+// balloon-specific happens anywhere in this section. A future HoneyBook/Shopify importer would
+// add its own extraction here and hand the Mapping Layer (further down) the same
+// { clientName, rawItems } shape produced by psImportInvoicePdf below — everything downstream
+// (Internal Event Model, Mapping, Production) stays untouched regardless of source.
 //
 // Reads the invoice PDF entirely in the browser (nothing uploaded anywhere), reconstructs
 // readable lines from the PDF's raw text positions, then parses those lines into line items.
@@ -1860,6 +1910,20 @@ function psExtractClientName(text) {
   return (toIdx >= 0 && lines[toIdx + 1]) ? lines[toIdx + 1] : '';
 }
 
+// The Import Layer's single entry point. Everything above this line is a 17hats-PDF-specific
+// extraction detail; everything below it — and everywhere else in the app — only ever sees
+// this returned shape. Swapping in a different source later means writing a new function with
+// this same async (source) => { clientName, rawItems } contract, not touching anything
+// downstream of it.
+async function psImportInvoicePdf(file) {
+  const rawText = await psExtractPdfText(file);
+  return {
+    rawText,
+    clientName: psExtractClientName(rawText),
+    rawItems: psParseInvoiceText(rawText),
+  };
+}
+
 function psEscape(str) {
   const div = document.createElement('div');
   div.textContent = str || '';
@@ -1895,12 +1959,15 @@ function psComputeTotals(recipe, qty, customLinear) {
   return totals;
 }
 
-// ═══════════════════════════════════════ JOBS (shared by Production & Staffing) ═══════════════════════════════════════
+// ═══════════════════════════════════════ INTERNAL EVENT MODEL (shared by Production & Staffing) ═══════════════════════════════════════
 //
-// A "Job" is one client/event. It holds two independent halves of data — productionItems
-// (decor + math, shown in Production) and staffing (event logistics, shown in Event Schedule
-// & Staffing) — plus a shared status. Jobs persist in localStorage so they build up into a
-// real, ongoing schedule rather than resetting each session.
+// A "Job" is this app's standardized event object — the single source of truth every import
+// method populates (17hats today, via the Mapping Layer just below; a future HoneyBook/
+// Shopify importer or manual entry would populate this exact same shape) and the ONLY thing
+// Production's and Staffing's own render functions ever read from. It holds two independent
+// halves of data — productionItems (decor + math, shown in Production) and staffing (event
+// logistics, shown in Event Schedule & Staffing) — plus a shared status. Jobs persist in
+// Firestore so they build up into a real, ongoing schedule rather than resetting each session.
 
 const STATUS_ORDER = ['not_started', 'in_progress', 'waiting', 'completed'];
 const STATUS_LABELS = { not_started: 'Not Started', in_progress: 'In Progress', waiting: 'Waiting', completed: 'Completed' };
@@ -1966,6 +2033,14 @@ function psBlankJob(overrides) {
   }, overrides || {});
 }
 
+// Constructs a blank Event Model from an Import Layer result — populates only true
+// event-level identity (who/what this event is). The Mapping Layer (below) is responsible
+// for everything else: staffing details and production items both come from mapping the
+// import's raw line items onto this event afterward.
+function psEventModelFromImport(rawImportData) {
+  return psBlankJob({ jobName: rawImportData.clientName });
+}
+
 // Jobs with a real, parseable date sort chronologically first; anything without a usable
 // date (blank, or free text that isn't a date) sorts to the bottom by creation order.
 function psJobDateValue(job) {
@@ -2010,6 +2085,9 @@ function psDeleteJob(jobId) {
   psDeleteJobRemote(jobId);
 }
 
+// Manual entry is itself a valid "import method" with no raw source to run through the Import
+// or Mapping Layers — it constructs an Event Model directly with just name/date, and items get
+// added one at a time afterward via psAddItemToJob instead of a bulk mapping pass.
 function psCreateManualJob(view) {
   const nameEl = document.getElementById('pj-new-name-' + view);
   const dateEl = document.getElementById('pj-new-date-' + view);
@@ -2033,6 +2111,175 @@ function psUpdateStaffingField(jobId, field, value) {
   if (!job.staffing) job.staffing = {};
   job.staffing[field] = value;
   psSaveJob(job);
+}
+
+// ═══════════════════════════════════════ MAPPING LAYER ═══════════════════════════════════════
+//
+// Translates an import's raw line items onto the Internal Event Model, using mapping rules —
+// today, the same two rules the import handler used to run inline, preserved exactly:
+// (1) a raw item carrying an "Event Date" detail is event/staffing metadata, not a decor item;
+// (2) everything else gets matched against the RECIPES catalog (see the Production Sheet
+// Generator section above) by normalized name equality. This is the ONLY place that should
+// ever compare raw imported text against RECIPES, or write import data into a Job's
+// staffing/productionItems — keeping that logic out of the Import Layer (which knows nothing
+// about recipes) and out of the Production Layer (which only ever reads the already-mapped
+// Event Model, never raw import data). A future editable-mapping-rules UI would live here,
+// replacing the RECIPES.find(...) lookup below with a lookup into a user-editable rules table
+// — everything calling into this layer would be unaffected.
+
+// Returns true if this raw item was event/staffing metadata (and was applied to `event`) —
+// false if it's still a candidate production line item for psMapRawItemToProductionItem.
+function psMapRawItemToEventFields(pItem, event) {
+  if (!pItem.details['Event Date']) return false;
+  event.eventDate = pItem.details['Event Date'];
+  event.staffing.setupTime = pItem.details['Setup Time'] || '';
+  event.staffing.eventStartTime = pItem.details['Event Start Time'] || '';
+  event.staffing.eventTakeDown = pItem.details['Event Take Down'] || '';
+  event.staffing.eventLocation = pItem.details['Event Location'] || '';
+  event.staffing.dayOfContact = pItem.details['Day-of Contact'] || '';
+  return true;
+}
+
+// Matches a raw item's name against the Import Mapping Rules table (see IMPORT_MAPPING_RULES,
+// below) and builds a production item ready for event.productionItems — or returns null if
+// nothing matched, so the caller can report it as unmatched instead of silently dropping it.
+function psMapRawItemToProductionItem(pItem) {
+  const rule = IMPORT_MAPPING_RULES.find(r => psNormalize(r.rawName) === psNormalize(pItem.name));
+  const recipe = rule && RECIPES.find(r => r.id === rule.recipeId);
+  if (!recipe) return null;
+  const colors = pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : ['Unspecified'];
+  return { recipeId: recipe.id, qty: pItem.qty, colors, customLinear: null, design: '', location: pItem.details['Location'] || '', topperNote: '', notes: '' };
+}
+
+// Runs every raw line item through the mapping rules above, mutating `event` in place (its
+// eventDate/staffing fields and productionItems array). Returns a match report so the caller
+// can tell the user what happened — same report shape the original inline import logic built.
+function psApplyMappingToEvent(event, rawItems) {
+  let matchedCount = 0;
+  const unmatched = [];
+  rawItems.forEach(pItem => {
+    if (psMapRawItemToEventFields(pItem, event)) return;
+    const item = psMapRawItemToProductionItem(pItem);
+    if (item) {
+      event.productionItems.push(item);
+      matchedCount++;
+    } else {
+      unmatched.push(`${pItem.name} × ${pItem.qty}`);
+    }
+  });
+  return { matchedCount, unmatched };
+}
+
+// ═══════════════════════════════════════ IMPORT MAPPING RULES ═══════════════════════════════════════
+//
+// The Mapping Layer's rule table, now user-editable instead of hardcoded — this is what
+// psMapRawItemToProductionItem (above) looks up. Seeded 1:1 from RECIPES.display, which is
+// exactly the string every raw item name used to be compared against directly, so a fresh
+// business with no saved rules yet matches invoices identically to before this was editable.
+const IMPORT_MAPPING_DEFAULTS = RECIPES.map(r => ({ id: 'map_' + r.id, rawName: r.display, recipeId: r.id }));
+let IMPORT_MAPPING_RULES = JSON.parse(JSON.stringify(IMPORT_MAPPING_DEFAULTS));
+let imRuleSeq = 0;
+let imCollapsed = true;
+
+function imInit() {
+  imRenderShell();
+  window.fbLoadImportMappingRules().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().rules) && snap.data().rules.length > 0) {
+      IMPORT_MAPPING_RULES = snap.data().rules;
+      imRenderShell();
+    }
+  }).catch(err => console.error('Import mapping rules load failed:', err));
+}
+
+function imSaveToFirestore() {
+  window.fbSaveImportMappingRules({ rules: IMPORT_MAPPING_RULES }).catch(err => console.error('Import mapping rules save failed:', err));
+}
+
+function imToggleCollapsed() {
+  imCollapsed = !imCollapsed;
+  imRenderShell();
+}
+
+function imRenderShell() {
+  const root = document.getElementById('im-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="imToggleCollapsed()">
+      <span>Import Mapping Rules <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— raw invoice text → production template</span></span>
+      <i class="fa-solid fa-chevron-${imCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
+    </div>
+    ${imCollapsed ? '' : `
+    <div class="card" style="margin-bottom:0.75rem;">
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">When an invoice line item's name matches "Raw invoice name" below (not case- or dash-sensitive), it's automatically added to Production using that template. Add a rule if an item isn't auto-matching, or edit one if your invoice wording changes.</div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Rules unlocked' : 'Rules locked'}</div>
+        ${invAdminUnlocked
+          ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="imLockAdmin()">Lock</button>`
+          : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="imUnlockAdmin()">Unlock</button>`}
+      </div>
+      <div id="im-rules"></div>
+      ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="imAddRule()"><i class="fa-solid fa-plus"></i> Add rule</button>` : ''}
+    </div>`}
+  `;
+  imRenderRules();
+}
+
+function imRenderRules() {
+  const container = document.getElementById('im-rules');
+  if (!container) return;
+  container.innerHTML = IMPORT_MAPPING_RULES.length === 0
+    ? `<div style="text-align:center; color:var(--text-secondary); padding:6px 0;">No mapping rules yet.</div>`
+    : IMPORT_MAPPING_RULES.map(rule => imRuleRowHtml(rule)).join('');
+}
+
+function imRuleRowHtml(rule) {
+  const recipe = RECIPES.find(r => r.id === rule.recipeId);
+  if (!invAdminUnlocked) {
+    return `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:0.5px solid var(--border); font-size:13px;">
+      <div style="flex:1;">${psEscape(rule.rawName)}</div>
+      <div style="color:var(--text-secondary); text-align:right;">${recipe ? psEscape(recipe.label) : '(missing template)'}</div>
+    </div>`;
+  }
+  return `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
+    <div class="settings-field" style="margin-bottom:6px;"><label>Raw invoice name</label><input type="text" value="${invAttr(rule.rawName)}" onchange="imUpdateRuleField('${rule.id}','rawName', this.value)"></div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <select style="flex:1;" onchange="imUpdateRuleField('${rule.id}','recipeId', this.value)">${psItemOptionsHtml(rule.recipeId)}</select>
+      <div class="jcc-col-del" onclick="imRemoveRule('${rule.id}')"><i class="fa-solid fa-trash"></i></div>
+    </div>
+  </div>`;
+}
+
+function imUpdateRuleField(id, field, value) {
+  const rule = IMPORT_MAPPING_RULES.find(r => r.id === id);
+  if (!rule) return;
+  rule[field] = value;
+  imRenderRules();
+  imSaveToFirestore();
+}
+function imAddRule() {
+  const firstRecipe = RECIPES[0];
+  IMPORT_MAPPING_RULES.push({ id: 'map_custom_' + (++imRuleSeq), rawName: '', recipeId: firstRecipe ? firstRecipe.id : '' });
+  imRenderRules();
+  imSaveToFirestore();
+}
+function imRemoveRule(id) {
+  IMPORT_MAPPING_RULES = IMPORT_MAPPING_RULES.filter(r => r.id !== id);
+  imRenderRules();
+  imSaveToFirestore();
+}
+function imUnlockAdmin() {
+  const entered = prompt('Enter the admin passcode to edit mapping rules:');
+  if (entered === null) return;
+  if (entered === ADMIN_PASSCODE) {
+    invAdminUnlocked = true;
+    imRenderShell();
+  } else {
+    alert('Incorrect passcode.');
+  }
+}
+function imLockAdmin() {
+  invAdminUnlocked = false;
+  imRenderShell();
 }
 
 // ─── SHARED JOB CARD HEADER (used by both Production and Staffing) ───
@@ -2066,11 +2313,11 @@ function psToggleExpand(view, jobId) {
 }
 
 // ═══════════════════════════════════════ PRODUCTION VIEW ═══════════════════════════════════════
-function psItemOptionsHtml() {
+function psItemOptionsHtml(selectedId) {
   const groups = {};
   RECIPES.forEach(r => { (groups[r.category] = groups[r.category] || []).push(r); });
   return Object.keys(groups).map(cat =>
-    `<optgroup label="${cat}s">` + groups[cat].map(r => `<option value="${r.id}">${psEscape(r.label)}</option>`).join('') + `</optgroup>`
+    `<optgroup label="${cat}s">` + groups[cat].map(r => `<option value="${r.id}"${r.id === selectedId ? ' selected' : ''}>${psEscape(r.label)}</option>`).join('') + `</optgroup>`
   ).join('');
 }
 
@@ -4636,6 +4883,298 @@ function heLockAdmin() {
   heRenderShell();
 }
 
+// ═══════════════════════════════════════ TIME TRACKER VIEW ═══════════════════════════════════════
+//
+// Two independent tools. Clock In/Out: since this app has no per-employee login, whoever's
+// clocking in just types their own name and the log/totals filter to it — TT_ENTRIES is the
+// full shared list, everything else derives from filtering it by the typed name. "Hide this
+// section" is a personal per-device preference (localStorage, not synced), for salaried/owner
+// users who never need it. Task Timer: an unrelated shared stopwatch for timing one-off builds
+// (e.g. "how long does a 12ft garland take"), saved with a label for later reference.
+
+let TT_ENTRIES = [];
+let SW_LOGS = [];
+let ttName = localStorage.getItem('tt_name') || '';
+let ttHideClockSection = localStorage.getItem('tt_hideClock') === '1';
+let ttShowMileageInput = false;
+let ttPendingMileage = 0;
+let ttSeq = 0;
+
+let swRunning = false;
+let swStartedAt = null;
+let swTimerHandle = null;
+let swSeq = 0;
+
+function ttInit() {
+  window.fbOnSnapshotTimeEntries(
+    (snapshot) => { TT_ENTRIES = snapshot.docs.map(d => d.data()); ttRenderClockSection(); },
+    (err) => console.error('Time entries sync error:', err)
+  );
+  window.fbOnSnapshotStopwatchLogs(
+    (snapshot) => {
+      SW_LOGS = snapshot.docs.map(d => d.data()).sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
+      ttRenderStopwatchLogs();
+    },
+    (err) => console.error('Stopwatch logs sync error:', err)
+  );
+  ttRenderShell();
+}
+
+function ttRenderShell() {
+  const root = document.getElementById('tt-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="section-label" style="margin-top:0; display:flex; justify-content:space-between; align-items:center;">
+      <span>Clock In / Clock Out</span>
+      <span style="text-transform:none; font-weight:400; font-size:12px; color:var(--text-secondary); cursor:pointer; text-decoration:underline;" onclick="ttToggleHideClockSection()">${ttHideClockSection ? 'Show' : 'Hide this section'}</span>
+    </div>
+    <div id="tt-clock-section"></div>
+
+    <div class="section-label">Task Timer <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— optional stopwatch</span></div>
+    <div class="card" style="margin-bottom:0.75rem;">
+      <div style="text-align:center; font-size:40px; font-weight:700; font-variant-numeric:tabular-nums; margin-bottom:12px;" id="tt-sw-display">00:00</div>
+      <div style="display:flex; gap:8px; justify-content:center;">
+        <button class="save-btn" style="width:auto; padding:10px 28px;" id="tt-sw-startstop" onclick="ttStopwatchToggle()">Start</button>
+        <button class="icon-btn" style="width:auto; padding:10px 16px; font-size:13px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="ttStopwatchReset()"><i class="fa-solid fa-rotate-left"></i> Reset</button>
+      </div>
+    </div>
+    <div id="tt-sw-logs"></div>
+  `;
+  ttRenderClockSection();
+  ttRenderStopwatchLogs();
+}
+
+function ttToggleHideClockSection() {
+  ttHideClockSection = !ttHideClockSection;
+  localStorage.setItem('tt_hideClock', ttHideClockSection ? '1' : '0');
+  ttRenderShell();
+}
+
+// ─── Clock In / Clock Out ────────────────────────────────────────────────────
+
+function ttRenderClockSection() {
+  const container = document.getElementById('tt-clock-section');
+  if (!container) return;
+  if (ttHideClockSection) {
+    container.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); margin-bottom:0.75rem;">Hidden — tap "Show" above if you need it.</div>`;
+    return;
+  }
+
+  const name = ttName.trim();
+  const myEntries = name ? TT_ENTRIES.filter(e => e.name.toLowerCase() === name.toLowerCase()) : [];
+  const openEntry = myEntries.find(e => !e.clockOutAt);
+  const weekEntries = ttThisWeekEntries(myEntries);
+  const totals = ttWeekTotals(weekEntries);
+
+  container.innerHTML = `
+    <div class="card">
+      <div class="settings-field" style="margin-bottom:${name ? '0.75rem' : '0'};">
+        <label>Your name</label>
+        <input type="text" value="${invAttr(ttName)}" placeholder="Type your name" onchange="ttUpdateName(this.value)">
+      </div>
+      ${!name ? '' : openEntry ? `
+        <div style="text-align:center; font-size:13px; color:var(--text-secondary); margin-bottom:10px;">Clocked in since ${ttFormatTime(openEntry.clockInAt)}</div>
+        ${ttMileageInputHtml()}
+        <button class="save-btn" onclick="ttClockOut()">Clock Out</button>
+      ` : `
+        <button class="save-btn" onclick="ttClockIn()">Clock In</button>
+      `}
+    </div>
+
+    ${name ? `
+    <div class="card" style="margin-bottom:0.75rem;">
+      <div class="section-label" style="margin-top:0; margin-bottom:6px;">This week</div>
+      ${weekEntries.length === 0 ? `<div style="text-align:center; color:var(--text-secondary); padding:6px 0;">No shifts yet this week.</div>` : ttWeekTableHtml(weekEntries)}
+      <div class="jcc-summary-row" style="border-top:0.5px solid var(--border); margin-top:8px; padding-top:8px; font-size:14px;"><span>Total hours</span><b>${totals.hours.toFixed(2)}</b></div>
+      ${totals.mileage > 0 ? `<div class="jcc-summary-row" style="color:var(--text-secondary);"><span>Total mileage</span><b>${totals.mileage} mi</b></div>` : ''}
+      <div style="display:flex; gap:8px; margin-top:10px;">
+        <button class="icon-btn" style="flex:1; justify-content:center; padding:10px; font-size:13px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="ttSendHours('sms')"><i class="fa-solid fa-comment"></i> Text</button>
+        <button class="icon-btn" style="flex:1; justify-content:center; padding:10px; font-size:13px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="ttSendHours('email')"><i class="fa-solid fa-envelope"></i> Email</button>
+      </div>
+    </div>` : ''}
+  `;
+}
+
+function ttMileageInputHtml() {
+  if (!ttShowMileageInput) {
+    return `<div style="text-align:center; margin-bottom:10px;"><span style="font-size:12px; color:var(--text-secondary); cursor:pointer;" onclick="ttToggleMileageInput()"><i class="fa-solid fa-plus"></i> Add mileage</span></div>`;
+  }
+  return `<div class="settings-field" style="margin-bottom:10px; position:relative;">
+    <label>Miles driven (own vehicle) ${jccInfoIconHtml('tt-mileage', 'Reimbursement for using your own vehicle for work — deliveries, supply runs, etc. Enter the miles driven this shift; it saves when you clock out.')}</label>
+    <input type="number" step="0.1" min="0" value="${ttPendingMileage || ''}" placeholder="0" oninput="ttUpdatePendingMileage(this.value)">
+  </div>`;
+}
+function ttToggleMileageInput() {
+  ttShowMileageInput = true;
+  ttRenderClockSection();
+}
+function ttUpdatePendingMileage(value) {
+  ttPendingMileage = parseFloat(value) || 0;
+}
+
+function ttUpdateName(value) {
+  ttName = value;
+  localStorage.setItem('tt_name', ttName);
+  ttRenderClockSection();
+}
+
+function ttClockIn() {
+  const name = ttName.trim();
+  if (!name) return;
+  const entry = { id: 'tt_' + Date.now() + '_' + (++ttSeq), name, date: ttTodayStr(), clockInAt: new Date().toISOString(), clockOutAt: null, mileage: 0 };
+  TT_ENTRIES.push(entry);
+  ttRenderClockSection();
+  window.fbSaveTimeEntry(entry).catch(err => console.error('Clock in save failed:', err));
+}
+function ttClockOut() {
+  const name = ttName.trim();
+  const entry = TT_ENTRIES.find(e => e.name.toLowerCase() === name.toLowerCase() && !e.clockOutAt);
+  if (!entry) return;
+  entry.clockOutAt = new Date().toISOString();
+  entry.mileage = ttPendingMileage || 0;
+  ttPendingMileage = 0;
+  ttShowMileageInput = false;
+  ttRenderClockSection();
+  window.fbSaveTimeEntry(entry).catch(err => console.error('Clock out save failed:', err));
+}
+function ttDeleteEntry(id) {
+  if (!confirm('Delete this shift entry?')) return;
+  TT_ENTRIES = TT_ENTRIES.filter(e => e.id !== id);
+  ttRenderClockSection();
+  window.fbDeleteTimeEntry(id).catch(err => console.error('Time entry delete failed:', err));
+}
+
+function ttWeekTableHtml(entries) {
+  return entries.map(e => {
+    const hours = e.clockOutAt ? ((new Date(e.clockOutAt) - new Date(e.clockInAt)) / 3600000) : null;
+    return `<div style="display:flex; align-items:center; gap:6px; padding:6px 0; border-top:0.5px solid var(--border); font-size:13px;">
+      <div style="flex:1; min-width:0;">${psEscape(e.date)}<div style="font-size:11px; color:var(--text-secondary);">${ttFormatTime(e.clockInAt)} – ${e.clockOutAt ? ttFormatTime(e.clockOutAt) : 'now'}${e.mileage > 0 ? ` • ${e.mileage} mi` : ''}</div></div>
+      <div style="width:46px; text-align:right; font-weight:600; flex-shrink:0;">${hours != null ? hours.toFixed(2) : '—'}</div>
+      <div class="jcc-col-del" onclick="ttDeleteEntry('${e.id}')"><i class="fa-solid fa-trash"></i></div>
+    </div>`;
+  }).join('');
+}
+
+function ttWeekStart() {
+  const now = new Date();
+  const day = now.getDay(); // 0 = Sunday
+  const diff = day === 0 ? 6 : day - 1; // days since Monday
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff);
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+}
+function ttThisWeekEntries(entries) {
+  const start = ttWeekStart();
+  return entries.filter(e => new Date(e.clockInAt) >= start).sort((a, b) => new Date(a.clockInAt) - new Date(b.clockInAt));
+}
+function ttWeekTotals(entries) {
+  let hours = 0, mileage = 0;
+  entries.forEach(e => {
+    if (e.clockOutAt) hours += (new Date(e.clockOutAt) - new Date(e.clockInAt)) / 3600000;
+    mileage += (e.mileage || 0);
+  });
+  return { hours, mileage };
+}
+function ttTodayStr() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function ttFormatTime(iso) {
+  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+// Opens the phone's own text or email compose screen with the week's hours pre-filled — no
+// preset recipient, the sender just picks who to send it to, same as sharing normally.
+function ttSendHours(method) {
+  const name = ttName.trim();
+  if (!name) return;
+  const myEntries = TT_ENTRIES.filter(e => e.name.toLowerCase() === name.toLowerCase());
+  const weekEntries = ttThisWeekEntries(myEntries);
+  const totals = ttWeekTotals(weekEntries);
+
+  let body = `Hours for ${name} — week of ${ttWeekStart().toLocaleDateString()}\n\n`;
+  weekEntries.forEach(e => {
+    const hours = e.clockOutAt ? ((new Date(e.clockOutAt) - new Date(e.clockInAt)) / 3600000).toFixed(2) + ' hrs' : '(in progress)';
+    body += `${e.date}: ${ttFormatTime(e.clockInAt)} - ${e.clockOutAt ? ttFormatTime(e.clockOutAt) : 'now'} = ${hours}${e.mileage > 0 ? `, ${e.mileage} mi` : ''}\n`;
+  });
+  body += `\nTotal hours: ${totals.hours.toFixed(2)}`;
+  if (totals.mileage > 0) body += `\nTotal mileage: ${totals.mileage} mi`;
+
+  if (method === 'sms') {
+    window.location.href = 'sms:?&body=' + encodeURIComponent(body);
+  } else {
+    window.location.href = 'mailto:?subject=' + encodeURIComponent(`Hours — ${name}`) + '&body=' + encodeURIComponent(body);
+  }
+}
+
+// ─── Task Timer (stopwatch) ──────────────────────────────────────────────────
+
+function ttStopwatchToggle() {
+  const btn = document.getElementById('tt-sw-startstop');
+  if (!swRunning) {
+    swRunning = true;
+    swStartedAt = Date.now();
+    swTimerHandle = setInterval(ttStopwatchTick, 250);
+    if (btn) btn.textContent = 'Stop';
+  } else {
+    swRunning = false;
+    clearInterval(swTimerHandle);
+    const elapsedSeconds = Math.round((Date.now() - swStartedAt) / 1000);
+    if (btn) btn.textContent = 'Start';
+    ttStopwatchPromptSave(elapsedSeconds);
+  }
+}
+function ttStopwatchTick() {
+  const el = document.getElementById('tt-sw-display');
+  if (el) el.textContent = ttFormatDuration(Math.floor((Date.now() - swStartedAt) / 1000));
+}
+function ttStopwatchReset() {
+  if (swRunning) {
+    swRunning = false;
+    clearInterval(swTimerHandle);
+    const btn = document.getElementById('tt-sw-startstop');
+    if (btn) btn.textContent = 'Start';
+  }
+  swStartedAt = null;
+  const el = document.getElementById('tt-sw-display');
+  if (el) el.textContent = '00:00';
+}
+function ttFormatDuration(totalSeconds) {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+function ttStopwatchPromptSave(elapsedSeconds) {
+  const label = prompt(`Saved time: ${ttFormatDuration(elapsedSeconds)}\n\nLabel this (e.g. "12' freeform garland"):`);
+  if (label === null) return; // Cancel — discard without saving
+  const log = { id: 'sw_' + Date.now() + '_' + (++swSeq), label: label.trim() || 'Untitled task', durationSeconds: elapsedSeconds, savedAt: new Date().toISOString() };
+  SW_LOGS.unshift(log);
+  ttRenderStopwatchLogs();
+  window.fbSaveStopwatchLog(log).catch(err => console.error('Stopwatch log save failed:', err));
+}
+function ttRenderStopwatchLogs() {
+  const container = document.getElementById('tt-sw-logs');
+  if (!container) return;
+  if (SW_LOGS.length === 0) {
+    container.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary);">No saved times yet.</div>`;
+    return;
+  }
+  container.innerHTML = `<div class="card">` + SW_LOGS.map(log => `
+    <div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:0.5px solid var(--border);">
+      <div style="flex:1; font-size:13px;">${psEscape(log.label)}</div>
+      <div style="font-size:13px; font-weight:600;">${ttFormatDuration(log.durationSeconds)}</div>
+      <div class="jcc-col-del" onclick="ttDeleteStopwatchLog('${log.id}')"><i class="fa-solid fa-trash"></i></div>
+    </div>
+  `).join('') + `</div>`;
+}
+function ttDeleteStopwatchLog(id) {
+  SW_LOGS = SW_LOGS.filter(l => l.id !== id);
+  ttRenderStopwatchLogs();
+  window.fbDeleteStopwatchLog(id).catch(err => console.error('Stopwatch log delete failed:', err));
+}
+
 // ═══════════════════════════════════════ EVENT SCHEDULE & STAFFING VIEW ═══════════════════════════════════════
 function psRenderStaffingJobs() {
   const container = document.getElementById('ps-staffing-job-list');
@@ -4665,6 +5204,12 @@ function psStaffingBodyHtml(job) {
 }
 
 // ═══════════════════════════════════════ INVOICE IMPORT → creates a Job ═══════════════════════════════════════
+//
+// This function is now pure orchestration — it sequences the four layers in order (Import →
+// Internal Event Model → Mapping → save, which is what makes the mapped event visible to the
+// Production Layer's own render functions) and reports their result to the UI. It contains no
+// extraction, event-construction, or recipe-matching logic itself anymore; that all lives in
+// the layer functions it calls, above.
 async function psHandleInvoiceUpload(fileInput) {
   const file = fileInput.files[0];
   if (!file) return;
@@ -4674,38 +5219,16 @@ async function psHandleInvoiceUpload(fileInput) {
   statusEl.textContent = 'Reading invoice…';
 
   try {
-    const text = await psExtractPdfText(file);
-    document.getElementById('ps-import-debug-text').value = text;
+    const rawImportData = await psImportInvoicePdf(file);          // Import Layer
+    document.getElementById('ps-import-debug-text').value = rawImportData.rawText;
     document.getElementById('ps-import-debug-toggle').style.display = 'block';
-    const parsedItems = psParseInvoiceText(text);
-    const job = psBlankJob({ jobName: psExtractClientName(text) });
 
-    let matchedCount = 0;
-    const unmatched = [];
+    const event = psEventModelFromImport(rawImportData);           // Internal Event Model
+    const { matchedCount, unmatched } = psApplyMappingToEvent(event, rawImportData.rawItems); // Mapping Layer
 
-    parsedItems.forEach(pItem => {
-      if (pItem.details['Event Date']) {
-        job.eventDate = pItem.details['Event Date'];
-        job.staffing.setupTime = pItem.details['Setup Time'] || '';
-        job.staffing.eventStartTime = pItem.details['Event Start Time'] || '';
-        job.staffing.eventTakeDown = pItem.details['Event Take Down'] || '';
-        job.staffing.eventLocation = pItem.details['Event Location'] || '';
-        job.staffing.dayOfContact = pItem.details['Day-of Contact'] || '';
-        return;
-      }
-      const recipe = RECIPES.find(r => psNormalize(r.display) === psNormalize(pItem.name));
-      if (recipe) {
-        const colors = pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : ['Unspecified'];
-        job.productionItems.push({ recipeId: recipe.id, qty: pItem.qty, colors, customLinear: null, design: '', location: pItem.details['Location'] || '', topperNote: '', notes: '' });
-        matchedCount++;
-      } else {
-        unmatched.push(`${pItem.name} × ${pItem.qty}`);
-      }
-    });
+    psSaveJob(event);                                               // → Production Layer reads this back via Firestore
 
-    psSaveJob(job);
-
-    let msg = `Created a new job${job.jobName ? ' for ' + psEscape(job.jobName) : ''} — ${matchedCount} decor item${matchedCount === 1 ? '' : 's'} went to Production, event details went to Staffing.`;
+    let msg = `Created a new job${event.jobName ? ' for ' + psEscape(event.jobName) : ''} — ${matchedCount} decor item${matchedCount === 1 ? '' : 's'} went to Production, event details went to Staffing.`;
     if (unmatched.length) msg += ` Couldn't auto-match (add manually in Production): ${unmatched.join('; ')}.`;
     statusEl.textContent = msg;
     statusEl.className = unmatched.length ? 'warn' : 'ok';
@@ -4819,12 +5342,14 @@ function bootApp() {
   // Jobs is the most important shared feature, so it starts first and on its own —
   // nothing later in this function can block it from connecting.
   try { psStartJobsListener(); } catch (e) { console.error('Jobs listener failed to start:', e); }
+  try { imInit(); } catch (e) { console.error('imInit failed:', e); }
   try { loadSettings(); } catch (e) { console.error('loadSettings failed:', e); }
   try { calc(); } catch (e) { console.error('calc failed:', e); }
   try { qcInit(); } catch (e) { console.error('qcInit failed:', e); }
   try { frInit(); } catch (e) { console.error('frInit failed:', e); }
   try { letInit(); } catch (e) { console.error('letInit failed:', e); }
   try { heInit(); } catch (e) { console.error('heInit failed:', e); }
+  try { ttInit(); } catch (e) { console.error('ttInit failed:', e); }
   try { jccInit(); } catch (e) { console.error('jccInit failed:', e); }
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
