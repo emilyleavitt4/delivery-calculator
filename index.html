@@ -1817,6 +1817,23 @@ let RECIPES = [
   { id:'arch-freeform-28', display:'Freeform Arch – 28 ft',     category:'Arch', style:'Freeform', label:'Freeform — 28 ft (42 linear)', formula:'freeform', linearFt:42, rates:FORMULAS.freeformRates.Arch },
 ];
 
+// Step 8 (User-Owned Production Templates) added build/equipment/pack/install/labor/staffing
+// fields to what a template can hold — this fills in blank defaults on every entry above so
+// they all have the full shape without having to write out six empty fields 22 times over.
+// Anything loaded from Firestore (a business's own saved/edited library) gets the same
+// treatment, so an older saved template missing a newer field doesn't break rendering.
+function psNormalizeTemplateFields(t) {
+  if (typeof t.buildInstructions !== 'string') t.buildInstructions = '';
+  if (!Array.isArray(t.equipmentList)) t.equipmentList = [];
+  if (!Array.isArray(t.packList)) t.packList = [];
+  if (typeof t.installNotes !== 'string') t.installNotes = '';
+  if (typeof t.pullListNotes !== 'string') t.pullListNotes = '';
+  if (typeof t.laborEstimateMinutes !== 'number') t.laborEstimateMinutes = 0;
+  if (typeof t.staffingRecommendation !== 'string') t.staffingRecommendation = '';
+  return t;
+}
+RECIPES.forEach(psNormalizeTemplateFields);
+
 if (window.pdfjsLib) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
@@ -1984,7 +2001,12 @@ function psComputeTotals(recipe, qty, customLinear) {
   const totalLinear = linear * qty;
   const totals = {};
   if (recipe.formula === 'classic') {
-    totals['11"'] = Math.ceil(totalLinear * FORMULAS.classicPerFt);
+    // Same freeze pattern as topperFt above: a snapshotted template carries its own
+    // classicPerFt captured at creation time, so editing Formulas later doesn't retroactively
+    // change a job someone already built. Catalog RECIPES entries (no snapshot yet) still use
+    // the live rate, unchanged from before.
+    const rate = typeof recipe.classicPerFt === 'number' ? recipe.classicPerFt : FORMULAS.classicPerFt;
+    totals['11"'] = Math.ceil(totalLinear * rate);
   } else {
     Object.keys(recipe.rates).forEach(size => {
       const v = recipe.rates[size] * totalLinear;
@@ -1992,6 +2014,19 @@ function psComputeTotals(recipe, qty, customLinear) {
     });
   }
   return totals;
+}
+
+// Deep-copies a production template (RECIPES entry) into a self-contained snapshot suitable
+// for embedding on a job item as `line.customRecipe` — baking in psTopperFt's resolved value
+// and, for classic-formula templates, the current FORMULAS.classicPerFt, so this specific job
+// item's math is fully frozen at creation time. Everywhere a production item gets created
+// (import approval, manual add, Quantity Calculator add) should call this instead of storing a
+// bare recipeId, so editing a template later never changes a job that already used it.
+function psSnapshotTemplate(recipe) {
+  const snapshot = JSON.parse(JSON.stringify(recipe));
+  snapshot.topperFt = psTopperFt(recipe);
+  if (snapshot.formula === 'classic') snapshot.classicPerFt = FORMULAS.classicPerFt;
+  return snapshot;
 }
 
 // ═══════════════════════════════════════ INTERNAL EVENT MODEL (shared by Production & Staffing) ═══════════════════════════════════════
@@ -2351,23 +2386,11 @@ function imLockAdmin() {
 // keeps its raw* fields untouched alongside the editable working copy, so "the original
 // imported text" survives any edit or split.
 
-const CUSTOM_PRODUCTION_TEMPLATES_DEFAULT = [];
-let CUSTOM_PRODUCTION_TEMPLATES = [];
 let IMPORT_REVIEW_DRAFT = null;
 let irExpandedItems = new Set();
 const IM_FUZZY_THRESHOLD = 0.65; // below this, a raw item's best candidate isn't worth suggesting at all
 
 function irInit() {
-  window.fbLoadCustomProductionTemplates().then(snap => {
-    if (snap.exists() && Array.isArray(snap.data().templates)) {
-      CUSTOM_PRODUCTION_TEMPLATES = snap.data().templates;
-      // Re-hydrate the shared rates-object reference (Firestore round-trips a plain copy, not
-      // the live FORMULAS.freeformRates object) so editing Formulas still updates these too.
-      CUSTOM_PRODUCTION_TEMPLATES.forEach(t => { if (t.formula === 'freeform') t.rates = FORMULAS.freeformRates[t.category] || FORMULAS.freeformRates.Garland; });
-      RECIPES = RECIPES.concat(CUSTOM_PRODUCTION_TEMPLATES);
-    }
-  }).catch(err => console.error('Custom production templates load failed:', err));
-
   window.fbLoadImportReviewDraft().then(snap => {
     if (snap.exists() && snap.data().draft) {
       IMPORT_REVIEW_DRAFT = snap.data().draft;
@@ -2532,8 +2555,11 @@ function psApplyReviewDraftToEvent(draft) {
     if (item.status === 'ignored' || item.classification === 'ignore') return;
     if (item.classification === 'production') {
       if (!item.recipeId) return;
+      const recipe = RECIPES.find(r => r.id === item.recipeId);
+      if (!recipe) return;
       event.productionItems.push({
         recipeId: item.recipeId,
+        customRecipe: psSnapshotTemplate(recipe), // frozen at approval time — editing the template later won't change this job
         qty: item.qty,
         colors: item.colors && item.colors.length ? item.colors : ['Unspecified'],
         customLinear: item.customLinear || null,
@@ -2768,7 +2794,7 @@ function irCreateTemplateFromItem(id) {
   if (categoryInput === null) return;
   const category = ['Column', 'Garland', 'Arch'].find(c => c.toLowerCase() === categoryInput.trim().toLowerCase()) || 'Garland';
 
-  const newRecipe = {
+  const newRecipe = psNormalizeTemplateFields({
     id: 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
     display: name.trim(),
     category,
@@ -2777,10 +2803,9 @@ function irCreateTemplateFromItem(id) {
     formula: 'freeform',
     customLinear: true,
     rates: FORMULAS.freeformRates[category] || FORMULAS.freeformRates.Garland,
-  };
+  });
   RECIPES = RECIPES.concat([newRecipe]);
-  CUSTOM_PRODUCTION_TEMPLATES = CUSTOM_PRODUCTION_TEMPLATES.concat([newRecipe]);
-  window.fbSaveCustomProductionTemplates({ templates: CUSTOM_PRODUCTION_TEMPLATES }).catch(err => console.error('Custom template save failed:', err));
+  ptSaveLibrary();
 
   item.classification = 'production';
   item.recipeId = newRecipe.id;
@@ -2993,6 +3018,11 @@ function psProductionBodyHtml(job) {
       if (line.topperNote) {
         html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>Topper: ${psEscape(line.topperNote)}</label></div>`;
       }
+      // Template-owned supplementary pull note (e.g. non-balloon pull items) — alongside the
+      // calculated balloon counts above, never replacing them.
+      if (r.pullListNotes) {
+        html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>${psEscape(r.pullListNotes)}</label></div>`;
+      }
     });
     html += `<div class="ps-pack-note">Pack extras of each size/color.</div>`;
   }
@@ -3060,6 +3090,17 @@ function psProductionBodyHtml(job) {
         if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
         html += `<b>Colors:</b> ${psEscape(line.colors.join(' / '))}<br>`;
         html += `</div>`;
+
+        // Template-owned build details, carried on whatever this line's recipe/customRecipe
+        // snapshot is — set once in Production Templates (Formulas & Recipes), shown here
+        // read-only per job item. Only rendered when the template actually has something.
+        if (r.buildInstructions) html += `<div class="ps-build-fields"><b>Build instructions:</b> ${psEscape(r.buildInstructions)}</div>`;
+        if (r.equipmentList && r.equipmentList.length) html += `<div class="ps-build-fields"><b>Equipment:</b> ${r.equipmentList.map(psEscape).join(', ')}</div>`;
+        if (r.packList && r.packList.length) html += `<div class="ps-build-fields"><b>Pack list:</b> ${r.packList.map(psEscape).join(', ')}</div>`;
+        if (r.installNotes) html += `<div class="ps-build-fields"><b>Install notes:</b> ${psEscape(r.installNotes)}</div>`;
+        if (r.laborEstimateMinutes || r.staffingRecommendation) {
+          html += `<div class="ps-build-fields">${r.laborEstimateMinutes ? `<b>Labor estimate:</b> ${r.laborEstimateMinutes} min` : ''}${r.laborEstimateMinutes && r.staffingRecommendation ? ' — ' : ''}${r.staffingRecommendation ? `<b>Staffing:</b> ${psEscape(r.staffingRecommendation)}` : ''}</div>`;
+        }
       }
 
       html += `<div class="settings-field no-print" style="margin-top:0.5rem;">
@@ -3133,7 +3174,7 @@ function psAddItemToJob(jobId) {
     if (!customLinear || customLinear <= 0) { alert('Enter the actual footage for this garland.'); return; }
   }
 
-  job.productionItems.push({ recipeId: recipe.id, qty, colors, customLinear, design, location, topperNote, notes: '' });
+  job.productionItems.push({ recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, topperNote, notes: '' });
   delete psColorDraftStore[draftKey]; // reset the color picker to a single blank row for next time
   psSaveJob(job);
 }
@@ -3599,10 +3640,7 @@ function qcAddToJob() {
 
   job.productionItems.push({
     recipeId: qcState.sizeMode === 'preset' ? recipe.id : null,
-    customRecipe: qcState.sizeMode === 'custom' ? {
-      display: recipe.display, label: recipe.label, category: recipe.category, style: recipe.style,
-      formula: recipe.formula, rates: recipe.rates, topperFt: psTopperFt(recipe), linearFt: recipe.linearFt
-    } : null,
+    customRecipe: psSnapshotTemplate(recipe), // frozen at add-time — editing the template later won't change this job, for either size mode
     qty: qcState.qty,
     colors: colors.map(c => c.name),
     colorDist: colors.map(c => ({ name: c.name, pct: c.pct })),
@@ -3631,6 +3669,7 @@ function frInit() {
   root.innerHTML = `
     <div class="section-label" style="margin-top:0">Balloon math</div>
     <div id="fr-formulas-root"></div>
+    <div id="pt-root"></div>
     <div class="section-label">Custom recipes</div>
     <div class="card" style="text-align:center; color:var(--text-secondary); font-size:12px; margin-bottom:0.5rem;">
       For reference only — seasonal or one-off items you won't add to Production. These never affect the Quantity Calculator or Production math.
@@ -3639,6 +3678,7 @@ function frInit() {
   `;
   frRenderFormulas();
   frRenderRecipes();
+  ptRenderShell();
 
   window.fbLoadFormulas().then(snap => {
     if (snap.exists()) {
@@ -3652,6 +3692,185 @@ function frInit() {
     (snapshot) => { CUSTOM_RECIPES = snapshot.docs.map(d => d.data()); frRenderRecipes(); },
     (err) => console.error('Custom recipes sync error:', err)
   );
+}
+
+// ═══════════════════════════════════════ PRODUCTION TEMPLATES (Step 8: user-owned library) ═══════════════════════════════════════
+//
+// RECIPES is this business's own production-template library — the 22 built-in entries are
+// just the default starter set, and every field on every one of them (including the built-ins)
+// is editable here, persisted as a whole so it survives a reload and never reverts to the
+// hardcoded defaults once customized. A mapping (Import Mapping Rules) only ever points at a
+// template's id; a template itself owns build instructions, equipment, pack list, install
+// notes, labor estimate, and staffing recommendation — none of that lives in the mapping.
+// Formula/rate numbers stay owned by "Balloon math" above (never duplicated here) — a template
+// only references a category's shared rate group, exactly as it always has.
+
+function ptInit() {
+  window.fbLoadCustomProductionTemplates().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().templates) && snap.data().templates.length > 0) {
+      const saved = snap.data().templates;
+      saved.forEach(t => {
+        psNormalizeTemplateFields(t);
+        // Firestore round-trips a plain copy of `rates`, not the live FORMULAS.freeformRates
+        // object — re-point it so editing Balloon math above still updates these templates.
+        if (t.formula === 'freeform') t.rates = FORMULAS.freeformRates[t.category] || FORMULAS.freeformRates.Garland;
+      });
+      RECIPES = saved; // this business's saved library entirely replaces the starter defaults
+      ptRenderShell();
+    }
+  }).catch(err => console.error('Production templates load failed:', err));
+}
+
+function ptSaveLibrary() {
+  window.fbSaveCustomProductionTemplates({ templates: RECIPES }).catch(err => console.error('Production templates save failed:', err));
+}
+
+let ptCollapsed = true;
+let ptExpandedTemplates = new Set();
+
+function ptToggleCollapsed() {
+  ptCollapsed = !ptCollapsed;
+  ptRenderShell();
+}
+function ptToggleExpanded(id) {
+  if (ptExpandedTemplates.has(id)) ptExpandedTemplates.delete(id); else ptExpandedTemplates.add(id);
+  ptRenderList();
+}
+
+function ptRenderShell() {
+  const root = document.getElementById('pt-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="ptToggleCollapsed()">
+      <span>Production Templates <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— your own build/equipment/labor library</span></span>
+      <i class="fa-solid fa-chevron-${ptCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
+    </div>
+    ${ptCollapsed ? '' : `
+    <div class="card" style="margin-bottom:0.75rem;">
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Every field here is yours to change — names, categories, build steps, equipment, pack list, install notes, labor estimate, staffing. Balloon-count math still comes from Balloon math above, referenced by category, never duplicated.</div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Templates unlocked' : 'Templates locked'}</div>
+        ${invAdminUnlocked
+          ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="ptLockAdmin()">Lock</button>`
+          : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="ptUnlockAdmin()">Unlock</button>`}
+      </div>
+      <div id="pt-list"></div>
+      ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="ptAddTemplate()"><i class="fa-solid fa-plus"></i> Add template</button>` : ''}
+    </div>`}
+  `;
+  ptRenderList();
+}
+
+function ptUnlockAdmin() {
+  const entered = prompt('Enter the admin passcode to edit production templates:');
+  if (entered === null) return;
+  if (entered === ADMIN_PASSCODE) {
+    invAdminUnlocked = true;
+    ptRenderShell();
+  } else {
+    alert('Incorrect passcode.');
+  }
+}
+function ptLockAdmin() {
+  invAdminUnlocked = false;
+  ptRenderShell();
+}
+
+function ptRenderList() {
+  const container = document.getElementById('pt-list');
+  if (!container) return;
+  container.innerHTML = RECIPES.map(t => ptTemplateHtml(t)).join('');
+}
+
+function ptTemplateHtml(t) {
+  const expanded = ptExpandedTemplates.has(t.id);
+  let html = `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
+    <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" onclick="ptToggleExpanded('${t.id}')">
+      <div>
+        <div style="font-size:13px; font-weight:600;">${psEscape(t.display)}</div>
+        <div style="font-size:11px; color:var(--text-secondary);">${psEscape(t.category)} — ${psEscape(t.style || '')}</div>
+      </div>
+      <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'}" style="color:var(--text-tertiary); font-size:11px;"></i>
+    </div>`;
+
+  if (expanded) {
+    html += `<div style="margin-top:8px;">`;
+    if (invAdminUnlocked) {
+      html += `<div class="row">
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Name</label><input type="text" value="${invAttr(t.display)}" onchange="ptUpdateField('${t.id}','display', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Category</label>
+          <select onchange="ptUpdateField('${t.id}','category', this.value)">
+            ${['Column', 'Garland', 'Arch'].map(c => `<option value="${c}"${c === t.category ? ' selected' : ''}>${c}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Style label</label><input type="text" value="${invAttr(t.label)}" onchange="ptUpdateField('${t.id}','label', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Linear feet</label><input type="number" step="0.5" min="0" value="${t.linearFt || ''}" ${t.customLinear ? 'disabled placeholder="entered per job"' : ''} onchange="ptUpdateField('${t.id}','linearFt', this.value)"></div>
+      </div>
+      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">
+        <input type="checkbox" ${t.customLinear ? 'checked' : ''} onchange="ptUpdateField('${t.id}','customLinear', this.checked)">
+        Footage is entered per job (not a fixed size)
+      </label>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Build instructions</label><textarea rows="3" onchange="ptUpdateField('${t.id}','buildInstructions', this.value)">${psEscape(t.buildInstructions)}</textarea></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Equipment list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','equipmentList', this.value)">${psEscape(t.equipmentList.join('\n'))}</textarea></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pack list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','packList', this.value)">${psEscape(t.packList.join('\n'))}</textarea></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pull list notes <span style="font-weight:400;">(optional, alongside the calculated balloon counts)</span></label><input type="text" value="${invAttr(t.pullListNotes)}" onchange="ptUpdateField('${t.id}','pullListNotes', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Install notes</label><textarea rows="2" onchange="ptUpdateField('${t.id}','installNotes', this.value)">${psEscape(t.installNotes)}</textarea></div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Default labor estimate (min)</label><input type="number" min="0" value="${t.laborEstimateMinutes || ''}" onchange="ptUpdateField('${t.id}','laborEstimateMinutes', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Staffing recommendation</label><input type="text" value="${invAttr(t.staffingRecommendation)}" placeholder="e.g. 2 people, 30 min" onchange="ptUpdateField('${t.id}','staffingRecommendation', this.value)"></div>
+      </div>
+      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="ptRemoveTemplate('${t.id}')"><i class="fa-solid fa-trash"></i> Delete template</button>`;
+    } else {
+      html += `<div style="font-size:12px; color:var(--text-secondary);">
+        ${t.buildInstructions ? `<div style="margin-bottom:6px;"><b>Build:</b> ${psEscape(t.buildInstructions)}</div>` : ''}
+        ${t.equipmentList.length ? `<div style="margin-bottom:6px;"><b>Equipment:</b> ${t.equipmentList.map(psEscape).join(', ')}</div>` : ''}
+        ${t.packList.length ? `<div style="margin-bottom:6px;"><b>Pack list:</b> ${t.packList.map(psEscape).join(', ')}</div>` : ''}
+        ${t.installNotes ? `<div style="margin-bottom:6px;"><b>Install notes:</b> ${psEscape(t.installNotes)}</div>` : ''}
+        ${t.laborEstimateMinutes ? `<div style="margin-bottom:6px;"><b>Labor estimate:</b> ${t.laborEstimateMinutes} min</div>` : ''}
+        ${t.staffingRecommendation ? `<div style="margin-bottom:6px;"><b>Staffing:</b> ${psEscape(t.staffingRecommendation)}</div>` : ''}
+        ${!t.buildInstructions && !t.equipmentList.length && !t.packList.length && !t.installNotes && !t.laborEstimateMinutes && !t.staffingRecommendation ? 'No build details added yet.' : ''}
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+function ptUpdateField(id, field, value) {
+  const t = RECIPES.find(r => r.id === id);
+  if (!t) return;
+  if (field === 'linearFt' || field === 'laborEstimateMinutes') t[field] = parseFloat(value) || 0;
+  else if (field === 'customLinear') t[field] = value;
+  else t[field] = value;
+  ptRenderList();
+  ptSaveLibrary();
+}
+function ptUpdateListField(id, field, value) {
+  const t = RECIPES.find(r => r.id === id);
+  if (!t) return;
+  t[field] = value.split('\n').map(s => s.trim()).filter(Boolean);
+  ptSaveLibrary();
+}
+function ptAddTemplate() {
+  const newTemplate = psNormalizeTemplateFields({
+    id: 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+    display: 'New template', category: 'Garland', style: 'Freeform', label: 'New template',
+    formula: 'freeform', customLinear: true, rates: FORMULAS.freeformRates.Garland,
+  });
+  RECIPES = RECIPES.concat([newTemplate]);
+  ptExpandedTemplates.add(newTemplate.id);
+  ptRenderList();
+  ptSaveLibrary();
+}
+function ptRemoveTemplate(id) {
+  if (!confirm('Delete this template? Jobs that already used it keep working — they carry their own frozen copy — but you won\'t be able to pick it for new items.')) return;
+  RECIPES = RECIPES.filter(r => r.id !== id);
+  ptRenderList();
+  ptSaveLibrary();
 }
 
 function frApplyFormulasOverride(saved) {
@@ -5869,6 +6088,7 @@ function bootApp() {
   try { loadSettings(); } catch (e) { console.error('loadSettings failed:', e); }
   try { calc(); } catch (e) { console.error('calc failed:', e); }
   try { qcInit(); } catch (e) { console.error('qcInit failed:', e); }
+  try { ptInit(); } catch (e) { console.error('ptInit failed:', e); }
   try { frInit(); } catch (e) { console.error('frInit failed:', e); }
   try { letInit(); } catch (e) { console.error('letInit failed:', e); }
   try { heInit(); } catch (e) { console.error('heInit failed:', e); }
