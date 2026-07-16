@@ -657,8 +657,15 @@
   .inv-color-row-brand { font-size: 11px; color: var(--text-secondary); }
   .inv-color-row-chevron { color: var(--text-tertiary); font-size: 12px; }
 
-  /* Type-ahead suggestions for matching a typed color name to an actual Inventory color */
+  /* Type-ahead suggestions for matching a typed color name to a Color Library color. Always
+     overlays below its input instead of pushing the rest of the form down — every call site
+     wraps the input + this div in a position:relative container. */
   .inv-color-suggest {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 20;
     border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-sm);
     background: var(--surface);
@@ -683,8 +690,6 @@
   .jcc-row-line input[type="text"] { width: 100%; font-size: 13px; padding: 6px 8px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); -webkit-appearance: none; }
   .jcc-row-line input[type="number"] { width: 100%; font-size: 13px; padding: 6px 4px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); text-align: center; -webkit-appearance: none; }
   .jcc-row-line input:focus { outline: none; border-color: var(--accent); }
-  /* Overlays below the item field instead of pushing the rows underneath it down the page. */
-  .jcc-row-line .inv-color-suggest { position: absolute; top: 100%; left: 0; right: 0; z-index: 20; }
 
   /* Tap-to-reveal info bubble next to a field label (e.g. clarifying what "employee cost"
      actually means) — keeps the explanation out of sight until someone asks for it. */
@@ -819,6 +824,12 @@
   const customTemplatesDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'customProductionTemplates');
   window.fbLoadCustomProductionTemplates = () => getDoc(customTemplatesDocRef);
   window.fbSaveCustomProductionTemplates = (data) => setDoc(customTemplatesDocRef, data);
+
+  // Color Library — the single source of truth for "colors this business actually uses",
+  // referenced by Inventory (stock levels) and searched by every color autocomplete in the app.
+  const colorLibraryDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'colorLibrary');
+  window.fbLoadColorLibrary = () => getDoc(colorLibraryDocRef);
+  window.fbSaveColorLibrary = (data) => setDoc(colorLibraryDocRef, data);
 
   // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
   // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
@@ -2476,6 +2487,8 @@ function psResolveRawItem(pItem) {
       const recipe = RECIPES.find(r => r.id === recipeId);
       if (recipe && recipe.customLinear) reasons.push('This template needs an actual footage — enter it below.');
     }
+    const initialColors = pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : [];
+    if (clColorsNeedReview(initialColors, [])) reasons.push('One or more colors need review — pick a match, add new, or mark general.');
   }
 
   let status;
@@ -2497,6 +2510,7 @@ function irRecomputeItemStatus(item) {
       const recipe = RECIPES.find(r => r.id === item.recipeId);
       if (recipe && recipe.customLinear && !item.customLinear) reasons.push('This template needs an actual footage — enter it below.');
     }
+    if (clColorsNeedReview(item.colors, item.colorGeneralNotes)) reasons.push('One or more colors need review — pick a match, add new, or mark general.');
   }
   item.reasons = reasons;
   if (reasons.length > 0) item.status = 'needs_review';
@@ -2524,6 +2538,7 @@ function psReviewItemFromRaw(pItem) {
     recipeId: resolution.recipeId,
     customLinear: null,
     colors: pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : [],
+    colorGeneralNotes: [], // colors explicitly confirmed as general/non-inventory notes (lowercased)
     location: pItem.details['Location'] || '',
 
     status: resolution.status,
@@ -2705,7 +2720,7 @@ function irItemCardHtml(item) {
       if (recipe && recipe.customLinear) {
         html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Actual footage</label><input type="number" step="0.5" min="0" value="${item.customLinear || ''}" placeholder="e.g. 30" onchange="irUpdateItemField('${item.id}','customLinear', this.value)"></div>`;
       }
-      html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Colors (comma separated)</label><input type="text" value="${invAttr(item.colors.join(', '))}" onchange="irUpdateItemColors('${item.id}', this.value)"></div>`;
+      html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Colors</label>${irColorPickerHtml(item)}</div>`;
       html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Location (optional)</label><input type="text" value="${invAttr(item.location)}" onchange="irUpdateItemField('${item.id}','location', this.value)"></div>`;
     }
 
@@ -2739,12 +2754,111 @@ function irUpdateItemField(id, field, value) {
   irRecomputeItemStatus(item);
   irRenderShell();
 }
-function irUpdateItemColors(id, value) {
-  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === id);
+// ─── Color picker: one row per color, each resolved against the Color Library. Typing reuses
+// the same shared autocomplete as Production/Quantity Calculator (invShowColorSuggestions); an
+// unresolved color (no exact Library match, or more than one could match) shows its own inline
+// "Needs Color Review" actions instead of guessing, per Step 9 — pick a suggested Library color,
+// add the typed text as a brand-new color, or mark it a general/non-inventory note. ────────────
+function irColorPickerHtml(item) {
+  const colors = item.colors.length ? item.colors : [''];
+  return `<div>${colors.map((c, idx) => irColorRowHtml(item, idx, c)).join('')}</div>
+    <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px; margin-top:2px;" onclick="irAddColorRow('${item.id}')"><i class="fa-solid fa-plus"></i> Add color</button>`;
+}
+function irColorRowHtml(item, idx, value) {
+  const inputId = 'ir-color-' + item.id + '-' + idx;
+  const text = (value || '').trim();
+  const isNote = (item.colorGeneralNotes || []).some(n => n === text.toLowerCase());
+  const resolution = text ? clResolveName(text) : { status: 'empty' };
+  let statusHtml = '';
+  if (isNote) {
+    statusHtml = `<div style="font-size:11px; color:var(--text-secondary); margin-top:2px;"><i class="fa-solid fa-note-sticky"></i> General note — not inventory-tracked</div>`;
+  } else if (resolution.status === 'resolved') {
+    statusHtml = `<div style="font-size:11px; color:var(--accent); margin-top:2px;"><i class="fa-solid fa-check"></i> Matches your Color Library</div>`;
+  } else if (text) {
+    const suggestions = clSearch(text).slice(0, 4);
+    statusHtml = `<div style="font-size:11px; color:var(--warning-text); margin-top:4px;">
+      <i class="fa-solid fa-triangle-exclamation"></i> Needs Color Review — ${resolution.status === 'ambiguous' ? 'more than one Library color could match' : 'no match in your Color Library'}
+      <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;">
+        ${suggestions.map(s => `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irResolveColorRow('${item.id}',${idx},'${s.colorName.replace(/'/g, "\\'")}')">${psEscape(s.colorName)}</button>`).join('')}
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irAddColorAsNew('${item.id}',${idx})"><i class="fa-solid fa-plus"></i> Add "${psEscape(text)}" as new color</button>
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irMarkColorGeneralNote('${item.id}',${idx})">Mark as general note</button>
+      </div>
+    </div>`;
+  }
+  return `<div style="position:relative; margin-bottom:8px;">
+    <div style="display:flex; gap:6px;">
+      <input type="text" id="${inputId}" value="${psEscape(value)}" placeholder="Start typing a color..." style="flex:1;"
+        oninput="irUpdateColorRowLive('${item.id}', ${idx}, this.value); invShowColorSuggestions('${inputId}')"
+        onblur="invHideColorSuggestionsSoon('${inputId}'); irScheduleColorRecompute('${item.id}', ${idx})">
+      <button class="icon-btn" style="padding:4px;" onclick="irRemoveColorRow('${item.id}', ${idx})" aria-label="Remove color"><i class="fa-solid fa-trash"></i></button>
+    </div>
+    <div id="${inputId}-suggest" class="inv-color-suggest" style="display:none;"></div>
+    ${statusHtml}
+  </div>`;
+}
+function irUpdateColorRowLive(itemId, idx, value) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
   if (!item) return;
-  item.colors = value.split(',').map(c => c.trim()).filter(Boolean);
+  item.colors[idx] = value; // live only, no re-render — status recomputes on blur (irScheduleColorRecompute)
+}
+// Blur fires immediately on a suggestion click too (before the click's own value-change takes
+// effect) — delaying past invHideColorSuggestionsSoon's own 150ms window means this reads
+// whatever the field actually ends up holding, typed or picked, before committing status.
+function irScheduleColorRecompute(itemId, idx) {
+  setTimeout(() => {
+    const item = IMPORT_REVIEW_DRAFT && IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+    if (!item) return;
+    const input = document.getElementById('ir-color-' + itemId + '-' + idx);
+    if (input) item.colors[idx] = input.value.trim();
+    item.colors = item.colors.filter(Boolean);
+    irRecomputeItemStatus(item);
+    irRenderShell();
+  }, 160);
+}
+function irAddColorRow(itemId) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  item.colors.push('');
   irRenderShell();
 }
+function irRemoveColorRow(itemId, idx) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  item.colors.splice(idx, 1);
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
+function irResolveColorRow(itemId, idx, colorName) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  item.colors[idx] = colorName;
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
+// Brand is left blank — an invoice line has no manufacturer info, and this is editable from
+// Inventory afterward like any other Library entry.
+function irAddColorAsNew(itemId, idx) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  const text = (item.colors[idx] || '').trim();
+  if (!text) return;
+  clFindOrCreate('', text);
+  clSaveLibrary();
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
+function irMarkColorGeneralNote(itemId, idx) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  const text = (item.colors[idx] || '').trim();
+  if (!text) return;
+  if (!item.colorGeneralNotes) item.colorGeneralNotes = [];
+  const key = text.toLowerCase();
+  if (!item.colorGeneralNotes.includes(key)) item.colorGeneralNotes.push(key);
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
+
 function irMarkIgnored(id) {
   const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === id);
   if (!item) return;
@@ -3486,7 +3600,7 @@ function qcRender() {
   qcState.colors.forEach((c, idx) => {
     html += `<div style="margin-bottom:1rem; padding-bottom:1rem; border-bottom:0.5px solid var(--border);">
       <div class="row" style="grid-template-columns: 1fr 36px; margin-bottom:0.4rem;">
-        <div class="settings-field" style="margin-bottom:0">
+        <div class="settings-field" style="margin-bottom:0; position:relative;">
           ${idx === 0 ? '<label>Color</label>' : ''}
           <input type="text" id="qc-color-name-${idx}" value="${psEscape(c.name)}" placeholder="Start typing a color..."
             oninput="qcColorNameInput(${idx}, this.value); invShowColorSuggestions('qc-color-name-${idx}')"
@@ -4120,6 +4234,13 @@ function invLockAdmin() {
 let invCollapsedGroups = new Set(); // group keys currently collapsed
 let invPendingCollapsed = false;
 let invImportCollapsed = false;
+// Manufacturer color picker (replaces the old bulk "Import [Brand]" buttons) — pick a brand,
+// search its catalog, check the colors you actually want, add just those to the Color Library.
+// (Defaults to 'Sempertex' directly rather than CL_SUPPORTED_MANUFACTURERS[0] — that const is
+// declared later in this same script and isn't available yet at this point during parsing.)
+let clPickerBrand = 'Sempertex';
+let clPickerQuery = '';
+let clPickerSelected = new Set();
 
 function invTogglePendingCollapsed() {
   invPendingCollapsed = !invPendingCollapsed;
@@ -4136,7 +4257,14 @@ function invStartListeners() {
   // all) so the view always shows something instead of staying blank while waiting.
   invRenderLatex();
   window.fbOnSnapshotInventoryItems(
-    (snapshot) => { INVENTORY_ITEMS = snapshot.docs.map(d => d.data()); invRenderLatex(); },
+    (snapshot) => {
+      INVENTORY_ITEMS = snapshot.docs.map(d => d.data());
+      // Guarded on clLoaded so this never runs (and creates/duplicates Library entries) before
+      // the real saved Library has arrived — clInit's own migration pass covers the case where
+      // the Library loads after inventory already has.
+      if (clLoaded) clMigrateFromInventory();
+      invRenderLatex();
+    },
     (err) => console.error('Inventory items sync error:', err)
   );
   window.fbOnSnapshotInventoryOrders(
@@ -4149,7 +4277,8 @@ function psNewInventoryItemId() { return 'invitem_' + Date.now() + '_' + Math.ra
 function psNewInventoryOrderId() { return 'invorder_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 
 // One-time starter data parsed from the real Master Calculators spreadsheet (Inventory Tab),
-// grouped by brand for the per-brand import buttons (invImportByBrand) below.
+// grouped by brand — seeds both BRAND_COLOR_CATALOG below and real historical stock levels
+// when a color is added via the manufacturer color picker.
 const INV_SEED_DATA = [{"color":"White","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":5},"11\"":{"price":14.39,"openStatus":"Full","backstock":9,"par":6},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":5,"par":8},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":2}}},{"color":"Black","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":4},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":4},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":4,"par":6},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":1}}},{"color":"Imperial Red","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Red","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":5},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":5},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":5},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":2}}},{"color":"Reflex Red","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Pink","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Bubblegum Pink","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":3},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":2,"par":1}}},{"color":"Rose","brand":"Decomex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":10,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":6,"par":2},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":5,"par":0}}},{"color":"Raspberry","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Wildberry","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":3,"par":0}}},{"color":"Reflex Fuchsia","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fuchsia","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":0},"24\"":{"price":20.23,"openStatus":"Full","backstock":3,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Rose","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Rosewood","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Pink","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Rose Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":13.6,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Rose Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Coral","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Aloha","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Melon","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Peach Blush","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Malibu Peach","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Blush","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Cheeky","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Orange","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":3},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Sunset Orange","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Terracotta","brand":"Sempertex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Honey Yellow","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":3},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Gold","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Partial","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Partial","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Mustard","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":3,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Yellow","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":3,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":1}}},{"color":"Pastel Yellow","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Shamrock Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":4},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":4},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":5},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Eucalyptus","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":15,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Key Lime","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":2},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Fiona Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Key Lime","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Chrome Green","brand":"Qualatex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":13.6,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Green","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Evergreen","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Forest Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":3},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":4},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":5},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Forest Green","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pearl Emerald Green","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":1},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fashion Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Green","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Empowermint","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Q Robins Egg/Dupe","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":5,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"S Robins Egg","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Tuftex Teal","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":3,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Turquoise","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Caribbean Blue","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Tropical Teal","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pearl Midnight Blue","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Deep Teal","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Sea Glass","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Partial","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Pearl Light Blue","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":5,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Matte Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fog","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Blue Slate","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Fashion Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":2},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":3},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":3,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":2,"par":1}}},{"color":"Reflex Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":13.6,"openStatus":"Full","backstock":5,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Royal Blue","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":4},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":5},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":5},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":1}}},{"color":"Fashion Navy","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":3},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":2,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":2,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Metallic Midnight Blue","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":2,"par":1},"11\"":{"price":14.39,"openStatus":"Partial","backstock":2,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":4,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Lavender","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Canyon Rose","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Sangria","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Samba","brand":"Tuftex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Orchid","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pastel Lilac","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Blossom","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Lilac","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Spring Lilac","brand":"Qualatex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":3,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Violet","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Empty","backstock":0,"par":1},"11\"":{"price":13.6,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Violet","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Coffee","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":3,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Chrome Copper","brand":"Qualatex","sizes":{"5\"/7\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Cameo","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"White Sand","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Dusk Cream","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":2},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":2},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":3},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Lace","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Pearl White","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Full","backstock":1,"par":0}}},{"color":"Reflex Champagne","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":4,"par":1},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":1},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Gold","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":1,"par":3},"11\"":{"price":13.6,"openStatus":"Empty","backstock":0,"par":4},"17\"/18\"":{"price":23.79,"openStatus":"Empty","backstock":0,"par":4},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":1},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Reflex Silver","brand":"Sempertex","sizes":{"5\"/7\"":{"price":11.74,"openStatus":"Full","backstock":1,"par":4},"11\"":{"price":13.6,"openStatus":"Full","backstock":5,"par":6},"17\"/18\"":{"price":23.79,"openStatus":"Full","backstock":3,"par":6},"24\"":{"price":36.49,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Metallic Silver","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":2},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}},{"color":"Gray","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Gray Smoke","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"17\"/18\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0},"30\"/36\"":{"price":0,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Stone","brand":"Tuftex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Empty","backstock":0,"par":0},"11\"":{"price":14.39,"openStatus":"Full","backstock":2,"par":0},"17\"/18\"":{"price":10.14,"openStatus":"Empty","backstock":0,"par":0},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":0},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":0}}},{"color":"Diamond Clear","brand":"Sempertex","sizes":{"5\"/7\"":{"price":6.06,"openStatus":"Full","backstock":1,"par":1},"11\"":{"price":14.39,"openStatus":"Full","backstock":1,"par":1},"17\"/18\"":{"price":10.14,"openStatus":"Full","backstock":1,"par":1},"24\"":{"price":20.23,"openStatus":"Full","backstock":1,"par":1},"30\"/36\"":{"price":5.96,"openStatus":"Empty","backstock":0,"par":1}}}];
 
 // Brands shown as their own import buttons, in this order.
@@ -4162,11 +4291,13 @@ const INV_SEED_BRANDS = ['Sempertex', 'Tuftex', 'Decomex', 'Kalisan', 'Qualatex'
 // par/open-bin status per color). Seeded from the same verified spreadsheet data as
 // INV_SEED_DATA, color names only, no stock levels — a manufacturer catalog doesn't know or
 // care what any particular business has on hand. Kalisan has no verified color list yet, so it
-// stays an empty entry rather than fabricated color names — "Import Kalisan" explains that and
-// points at adding colors manually instead of pretending to know its lineup.
+// stays an empty entry rather than fabricated color names. Only Sempertex/Tuftex/Decomex are
+// offered in the manufacturer color picker (CL_SUPPORTED_MANUFACTURERS) for now, though Kalisan/
+// Qualatex still exist here for whatever else in the app already reads this list.
 //
-// invImportByBrand (below) is the ONLY thing that reads this to populate a business's own
-// catalog; autocomplete and invoice-color-matching (invAllColorNames) never touch it.
+// clAddColor (Color Library, below) is the only thing that reads this to populate a business's
+// own Color Library; every color autocomplete/invoice-color-matching (clAllNames) never touches
+// BRAND_COLOR_CATALOG directly.
 const BRAND_COLOR_CATALOG = {};
 INV_SEED_BRANDS.forEach(b => { BRAND_COLOR_CATALOG[b] = []; });
 INV_SEED_DATA.forEach(seed => {
@@ -4176,32 +4307,153 @@ INV_SEED_DATA.forEach(seed => {
   }
 });
 
-// Copies whichever of a brand's catalog colors this business doesn't already have into its own
-// active catalog (INVENTORY_ITEMS) — it does NOT re-import colors already present, and it does
-// NOT assume a newly-added color is in stock. A color that also happens to have real historical
-// stock levels (from your original spreadsheet import) keeps those; anything else starts at
-// zero backstock/par/Empty open-bin, exactly like adding a color by hand — you decide what's
-// actually on the shelf.
-function invImportByBrand(brand) {
-  const catalogColors = BRAND_COLOR_CATALOG[brand] || [];
-  if (catalogColors.length === 0) {
-    alert(brand + " doesn't have a color catalog here yet. Add its colors one at a time with \"Add a color\" below (tag them with the brand), or tell me the colors you carry and I can build the catalog for you.");
-    return;
-  }
-  const existingColors = new Set(INVENTORY_ITEMS.filter(i => i.brand === brand).map(i => i.color.trim().toLowerCase()));
-  const newColors = catalogColors.filter(c => !existingColors.has(c.trim().toLowerCase()));
-  if (newColors.length === 0) {
-    alert('Every ' + brand + ' color in the catalog is already in your inventory.');
-    return;
-  }
-  if (!confirm(`Add ${newColors.length} ${brand} color${newColors.length === 1 ? '' : 's'} to your catalog? Colors with known stock levels from your original spreadsheet keep those; anything new starts with no stock recorded — fill in backstock/par/price whenever you're ready.`)) return;
-  newColors.forEach(color => {
-    const seed = INV_SEED_DATA.find(s => s.brand === brand && s.color.trim().toLowerCase() === color.trim().toLowerCase());
+// ═══════════════════════════════════════ COLOR LIBRARY (Step 9) ═══════════════════════════════════════
+//
+// COLOR_LIBRARY is the single source of truth for "colors this business actually offers" —
+// separate from BRAND_COLOR_CATALOG (what a manufacturer makes) and from INVENTORY_ITEMS
+// (stock levels, which now reference a Library entry via colorId instead of owning the color
+// name independently). Every color autocomplete in the app — Production, Quantity Calculator,
+// Import Review — searches this, never BRAND_COLOR_CATALOG or INVENTORY_ITEMS directly.
+let COLOR_LIBRARY = [];
+let clLoaded = false; // true once the saved Library has actually arrived — guards migration
+// Only these three manufacturers get the "add colors from catalog" picker for now — Kalisan/
+// Qualatex stay in BRAND_COLOR_CATALOG (used elsewhere) but aren't offered here yet.
+const CL_SUPPORTED_MANUFACTURERS = ['Sempertex', 'Tuftex', 'Decomex'];
+
+function psNewColorId() { return 'color_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+
+function clInit() {
+  window.fbLoadColorLibrary().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().colors)) COLOR_LIBRARY = snap.data().colors;
+    clLoaded = true;
+    clMigrateFromInventory();
+    invRenderLatex();
+  }).catch(err => console.error('Color Library load failed:', err));
+}
+function clSaveLibrary() {
+  window.fbSaveColorLibrary({ colors: COLOR_LIBRARY }).catch(err => console.error('Color Library save failed:', err));
+}
+
+// One-time (and self-healing — safe to call repeatedly) migration: every Inventory color that
+// doesn't yet point at a Library entry gets one, found-or-created from its own (brand, color).
+// This is what makes "nothing changes from the user's perspective" true on day one — today's
+// whole active catalog becomes the starting Library exactly as-is.
+function clMigrateFromInventory() {
+  let libraryChanged = false;
+  INVENTORY_ITEMS.forEach(item => {
+    if (item.colorId) return;
+    const before = COLOR_LIBRARY.length;
+    const entry = clFindOrCreate(item.brand || '', item.color);
+    if (COLOR_LIBRARY.length !== before) libraryChanged = true;
+    if (item.active === false && entry.active !== false) { entry.active = false; libraryChanged = true; }
+    item.colorId = entry.id;
+    invSaveItem(item);
+  });
+  if (libraryChanged) clSaveLibrary();
+}
+
+function clFindEntry(brand, colorName) {
+  const b = (brand || '').trim().toLowerCase();
+  const c = (colorName || '').trim().toLowerCase();
+  return COLOR_LIBRARY.find(e => e.colorName.trim().toLowerCase() === c && (e.brand || '').trim().toLowerCase() === b);
+}
+function clFindOrCreate(brand, colorName) {
+  const existing = clFindEntry(brand, colorName);
+  if (existing) return existing;
+  const entry = { id: psNewColorId(), brand: (brand || '').trim(), colorName: (colorName || '').trim(), aliases: [], active: true };
+  COLOR_LIBRARY.push(entry);
+  return entry;
+}
+
+// Distinct active color names across the whole Library — the shared autocomplete's search
+// space. Dedupes by name only (not brand), matching how colors are picked throughout Production/
+// Quantity Calculator today (by name, regardless of brand).
+function clAllNames({ activeOnly = true } = {}) {
+  const seen = new Set();
+  COLOR_LIBRARY.forEach(e => { if (!activeOnly || e.active !== false) seen.add(e.colorName); });
+  return [...seen].sort((a, b) => a.localeCompare(b));
+}
+// Substring match on name + aliases, returning full entries (so callers can get colorId/brand) —
+// used by Import Review's "search the library" resolution action.
+function clSearch(query, { activeOnly = true } = {}) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return [];
+  return COLOR_LIBRARY.filter(e => {
+    if (activeOnly && e.active === false) return false;
+    return e.colorName.toLowerCase().includes(q) || (e.aliases || []).some(a => a.toLowerCase().includes(q));
+  });
+}
+// Deterministic — no fuzzy guessing — resolution of raw text (an invoice line, a typed color)
+// to a Library color: exact (case-insensitive) name-or-alias match only. Zero matches AND two+
+// distinct-name matches both come back non-"resolved" — either way the caller must not guess.
+function clResolveName(text) {
+  const q = (text || '').trim().toLowerCase();
+  if (!q) return { status: 'empty' };
+  const matches = COLOR_LIBRARY.filter(e => e.active !== false && (e.colorName.toLowerCase() === q || (e.aliases || []).some(a => a.toLowerCase() === q)));
+  const distinctNames = [...new Set(matches.map(m => m.colorName))];
+  if (distinctNames.length === 1) return { status: 'resolved', entry: matches.find(m => m.colorName === distinctNames[0]) };
+  if (distinctNames.length === 0) return { status: 'none' };
+  return { status: 'ambiguous', matches };
+}
+// Used by Import Review to gate Approve: true if any color text isn't a confident (exact)
+// Library match and hasn't been explicitly confirmed as a general/non-inventory note — the
+// "don't guess" rule for ambiguous or unmatched invoice color text.
+function clColorsNeedReview(colors, generalNotes) {
+  const notes = new Set((generalNotes || []).map(n => n.toLowerCase()));
+  return (colors || []).some(c => !notes.has(c.toLowerCase()) && clResolveName(c).status !== 'resolved');
+}
+
+function clArchive(id) {
+  const entry = COLOR_LIBRARY.find(e => e.id === id);
+  if (!entry) return;
+  entry.active = false;
+  INVENTORY_ITEMS.filter(i => i.colorId === id).forEach(i => { i.active = false; invSaveItem(i); });
+  clSaveLibrary();
+}
+function clRestore(id) {
+  const entry = COLOR_LIBRARY.find(e => e.id === id);
+  if (!entry) return;
+  entry.active = true;
+  INVENTORY_ITEMS.filter(i => i.colorId === id).forEach(i => { i.active = true; invSaveItem(i); });
+  clSaveLibrary();
+}
+// Aliases are only ever added here, from an explicit user action — never generated
+// automatically (broad families like "Blue"/"Pink" always require a person to confirm them).
+function clAddAlias(id, alias) {
+  const entry = COLOR_LIBRARY.find(e => e.id === id);
+  if (!entry || !alias || !alias.trim()) return;
+  const a = alias.trim();
+  if (!entry.aliases) entry.aliases = [];
+  if (!entry.aliases.some(x => x.toLowerCase() === a.toLowerCase()) && a.toLowerCase() !== entry.colorName.toLowerCase()) entry.aliases.push(a);
+  clSaveLibrary();
+}
+function clRemoveAlias(id, alias) {
+  const entry = COLOR_LIBRARY.find(e => e.id === id);
+  if (!entry) return;
+  entry.aliases = (entry.aliases || []).filter(a => a !== alias);
+  clSaveLibrary();
+}
+
+// Adds one manufacturer color to the Library and — unless the caller opts out — also creates a
+// stock-tracked Inventory row for it, preserving real historical stock from INV_SEED_DATA when
+// known (same behavior invImportByBrand used to give a whole brand at once, now per-color).
+function clAddColor(brand, colorName, { trackStock = true } = {}) {
+  const entry = clFindOrCreate(brand, colorName);
+  clSaveLibrary();
+  if (trackStock && !INVENTORY_ITEMS.some(i => i.colorId === entry.id)) {
+    const seed = INV_SEED_DATA.find(s => s.brand === brand && s.color.trim().toLowerCase() === colorName.trim().toLowerCase());
     const sizes = seed ? JSON.parse(JSON.stringify(seed.sizes)) : invBlankSizeData();
     INV_SIZES.forEach(s => { if (!sizes[s]) sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100 }; if (!sizes[s].perBag) sizes[s].perBag = 100; });
-    const item = { id: psNewInventoryItemId(), color, brand, tier: 'main', active: true, sizes };
-    window.fbSaveInventoryItem(item).catch(err => console.error('Import failed for', color, err));
-  });
+    const item = { id: psNewInventoryItemId(), color: entry.colorName, brand: entry.brand, tier: 'main', active: true, colorId: entry.id, sizes };
+    window.fbSaveInventoryItem(item).catch(err => console.error('Add color failed for', colorName, err));
+  }
+  return entry;
+}
+// A Library-only color has no Inventory row at all (a general/production-note color that isn't
+// stock-tracked) — used by the "library only" list in the Inventory screen.
+function clLibraryOnlyEntries() {
+  const stockedIds = new Set(INVENTORY_ITEMS.map(i => i.colorId).filter(Boolean));
+  return COLOR_LIBRARY.filter(e => !stockedIds.has(e.id));
 }
 
 
@@ -4290,12 +4542,12 @@ function invSortedItems() {
 // Autocomplete/matching only ever searches the business's ACTIVE catalog — a deactivated
 // color (kept for its record, but not currently used) shouldn't get suggested for a new job or
 // matched against an invoice. This never touches BRAND_COLOR_CATALOG (the manufacturer master
-// list) at all — that's only ever consulted explicitly, via "Import [Brand]" or the master-
-// catalog suggestions on "Add a color" below.
+// list) at all — that's only ever consulted explicitly, via the manufacturer color picker or the
+// master-catalog suggestions on "Add a color" below.
+// Delegates to the Color Library (clAllNames) — kept as its own function since Production,
+// Quantity Calculator, and invoice-color-matching all still call this name.
 function invAllColorNames() {
-  const seen = new Set();
-  INVENTORY_ITEMS.forEach(i => { if (i.active !== false) seen.add(i.color); });
-  return [...seen].sort((a, b) => a.localeCompare(b));
+  return clAllNames({ activeOnly: true });
 }
 // Shows up to 6 Inventory colors matching the current value of #<inputId>, in a sibling
 // #<inputId>-suggest div. Reused anywhere a color name is typed (Production's color rows,
@@ -4462,8 +4714,10 @@ function invAddColor() {
   const color = nameEl.value.trim();
   const brand = brandEl.value.trim();
   if (!color) { alert('Enter a color name first.'); return; }
+  const libraryEntry = clFindOrCreate(brand, color);
+  clSaveLibrary();
   // One-off manual additions default to Misc — Main is for your established, consistent lineup.
-  const item = { id: psNewInventoryItemId(), color, brand, tier: 'misc', active: true, sizes: invBlankSizeData() };
+  const item = { id: psNewInventoryItemId(), color, brand, tier: 'misc', active: true, colorId: libraryEntry.id, sizes: invBlankSizeData() };
   nameEl.value = ''; brandEl.value = '';
   document.getElementById('inv-new-color-suggest').style.display = 'none';
   invExpandedItem = item.id;
@@ -4490,8 +4744,12 @@ function invDeleteColor(itemId) {
 function invToggleActive(itemId) {
   const item = invFindItem(itemId);
   if (!item) return;
-  item.active = item.active === false ? true : false;
-  invSaveItem(item);
+  // The Library entry is the real source of truth for active/inactive (that's what
+  // invAllColorNames/autocomplete actually reads) — clArchive/clRestore mirror it onto this
+  // item too, so the card's own dimmed/INACTIVE display stays in sync.
+  if (item.colorId && (item.active !== false)) clArchive(item.colorId);
+  else if (item.colorId) clRestore(item.colorId);
+  else { item.active = item.active === false ? true : false; invSaveItem(item); }
 }
 function invUpdateSizeField(itemId, size, field, value) {
   const item = invFindItem(itemId);
@@ -4613,17 +4871,21 @@ function invRenderLatex() {
     }
   }
 
-  // Import by brand — its own always-present collapsible section (not just for an empty
-  // inventory), so you can pull in another brand's colors anytime, not only on first setup.
+  // Add colors from a manufacturer — search that brand's catalog and add only the colors you
+  // actually want, rather than importing its whole lineup at once.
   html += `<div class="inv-group-header" onclick="invToggleImportCollapsed()">
-    <span>Import by brand</span>
+    <span>Add colors from a manufacturer</span>
     <i class="fa-solid fa-chevron-${invImportCollapsed ? 'down' : 'up'}"></i>
   </div>`;
   if (!invImportCollapsed) {
     html += `<div class="card">
-      <div style="display:flex; flex-direction:column; gap:6px;">
-        ${INV_SEED_BRANDS.map(b => `<button class="save-btn" style="width:auto;" onclick="invImportByBrand('${b}')"><i class="fa-solid fa-file-import"></i> Import ${b}</button>`).join('')}
+      <div class="trip-toggle" style="margin:0 0 0.6rem;">
+        ${CL_SUPPORTED_MANUFACTURERS.map(b => `<button class="trip-btn ${clPickerBrand === b ? 'active' : ''}" onclick="clSetPickerBrand('${b}')">${b}</button>`).join('')}
       </div>
+      <div class="settings-field" style="margin-bottom:0.6rem;">
+        <input type="text" id="cl-picker-search" placeholder="Search ${psEscape(clPickerBrand)} colors..." value="${psEscape(clPickerQuery)}" oninput="clSetPickerQuery(this.value)">
+      </div>
+      <div id="cl-picker-results"></div>
     </div>`;
   }
 
@@ -4658,7 +4920,7 @@ function invRenderLatex() {
   html += `<div class="section-label">Add a color</div>
   <div class="card">
     <div class="row">
-      <div class="settings-field" style="margin-bottom:0">
+      <div class="settings-field" style="margin-bottom:0; position:relative;">
         <label>Color</label>
         <input type="text" id="inv-new-color" placeholder="e.g. White" autocomplete="off"
           oninput="invShowMasterCatalogSuggestions()"
@@ -4674,6 +4936,58 @@ function invRenderLatex() {
 
   root.innerHTML = html;
   invRenderColorsList();
+  clRenderPicker();
+}
+
+function clSetPickerBrand(brand) {
+  clPickerBrand = brand;
+  clPickerSelected = new Set();
+  clRenderPicker();
+  const search = document.getElementById('cl-picker-search');
+  if (search) search.placeholder = `Search ${brand} colors...`;
+}
+function clSetPickerQuery(value) {
+  clPickerQuery = value;
+  clRenderPicker();
+}
+function clTogglePickerColor(color) {
+  if (clPickerSelected.has(color)) clPickerSelected.delete(color); else clPickerSelected.add(color);
+  clRenderPicker();
+}
+// Populates just the manufacturer color checklist — called on brand switch, search keystrokes,
+// and checkbox toggles, without rebuilding the search input itself (keeps focus while typing).
+function clRenderPicker() {
+  const container = document.getElementById('cl-picker-results');
+  if (!container) return;
+  const catalogColors = BRAND_COLOR_CATALOG[clPickerBrand] || [];
+  if (catalogColors.length === 0) {
+    container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary); padding:8px 0;">${psEscape(clPickerBrand)} doesn't have a color catalog here yet — add its colors one at a time with "Add a color" below (tag them with the brand).</div>`;
+    return;
+  }
+  const q = clPickerQuery.trim().toLowerCase();
+  const matches = catalogColors.filter(c => !q || c.toLowerCase().includes(q)).sort((a, b) => a.localeCompare(b));
+  const alreadyHave = new Set(COLOR_LIBRARY.filter(e => (e.brand || '').toLowerCase() === clPickerBrand.toLowerCase()).map(e => e.colorName.toLowerCase()));
+  let html = `<div style="max-height:260px; overflow-y:auto; margin-bottom:0.6rem;">`;
+  matches.forEach(color => {
+    const have = alreadyHave.has(color.toLowerCase());
+    const checked = clPickerSelected.has(color);
+    html += `<label style="display:flex; align-items:center; gap:8px; padding:6px 2px; font-size:13px; ${have ? 'color:var(--text-tertiary);' : ''}">
+      <input type="checkbox" ${checked ? 'checked' : ''} ${have ? 'disabled' : ''} onchange="clTogglePickerColor('${color.replace(/'/g, "\\'")}')">
+      ${psEscape(color)} ${have ? '<span style="font-size:11px;">— already in your Color Library</span>' : ''}
+    </label>`;
+  });
+  if (matches.length === 0) html += `<div style="font-size:12px; color:var(--text-secondary);">No matching colors.</div>`;
+  html += `</div>`;
+  html += `<button class="save-btn" ${clPickerSelected.size === 0 ? 'disabled' : ''} onclick="clAddSelectedColors()"><i class="fa-solid fa-plus"></i> Add ${clPickerSelected.size || ''} selected to Color Library</button>`;
+  container.innerHTML = html;
+}
+function clAddSelectedColors() {
+  if (clPickerSelected.size === 0) return;
+  const colors = [...clPickerSelected];
+  colors.forEach(color => clAddColor(clPickerBrand, color, { trackStock: true }));
+  clPickerSelected = new Set();
+  alert(`Added ${colors.length} ${clPickerBrand} color${colors.length === 1 ? '' : 's'} to your Color Library.`);
+  clRenderPicker();
 }
 
 // Populates just the color list (search results, grouped/sorted, collapsible) — called on
@@ -4715,8 +5029,59 @@ function invRenderColorsList() {
     INV_SIZES.forEach(size => { totalValue += (item.sizes[size].backstock || 0) * (item.sizes[size].price || 0); });
   });
   html += `<div class="ps-pack-note">Estimated backstock value: $${totalValue.toFixed(2)}</div>`;
+  html += invLibraryOnlyHtml();
 
   container.innerHTML = html;
+}
+
+// Editable aliases for one Color Library entry (e.g. "Sage" → Eucalyptus) — shown inside an
+// Inventory color's expanded card. Aliases are only ever added here, by an explicit click; never
+// generated automatically, so a broad family name like "Blue" never becomes an alias by accident.
+function invAliasEditorHtml(colorId) {
+  const entry = COLOR_LIBRARY.find(e => e.id === colorId);
+  if (!entry) return '';
+  const aliases = entry.aliases || [];
+  return `<div style="margin:0.75rem 0;">
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Aliases <span style="font-weight:400;">(other names this color is found by)</span></div>
+    <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px;">
+      ${aliases.map(a => `<span style="font-size:12px; background:var(--bg); border:0.5px solid var(--border-strong); border-radius:999px; padding:2px 8px;">${psEscape(a)} <i class="fa-solid fa-xmark" style="cursor:pointer;" onclick="clRemoveAlias('${entry.id}','${a.replace(/'/g, "\\'")}'); invRenderColorsList();"></i></span>`).join('')}
+    </div>
+    <div style="display:flex; gap:6px;">
+      <input type="text" id="inv-alias-input-${entry.id}" placeholder="e.g. Sage" style="flex:1;">
+      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="invAddAliasFromField('${entry.id}')">Add</button>
+    </div>
+  </div>`;
+}
+function invAddAliasFromField(colorId) {
+  const input = document.getElementById('inv-alias-input-' + colorId);
+  if (!input || !input.value.trim()) return;
+  clAddAlias(colorId, input.value);
+  invRenderColorsList();
+}
+
+// Colors that exist in the Library but have no Inventory stock row at all — a general/
+// production-note color a business uses without tracking stock for it. Archive/restore and
+// alias-editing work the same as a stocked color; there's no delete here (colors are archived,
+// not removed, whenever practical).
+function invLibraryOnlyHtml() {
+  const entries = clLibraryOnlyEntries();
+  if (entries.length === 0) return '';
+  let html = `<div class="section-label" style="margin-top:1rem;">Color Library only <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— not stock-tracked</span></div><div class="card">`;
+  entries.forEach(e => {
+    const isActive = e.active !== false;
+    html += `<div style="padding:8px 0; border-top:0.5px solid var(--border);"${isActive ? '' : ' style="opacity:0.55;"'}>
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div>
+          <div style="font-size:13px; font-weight:600;">${psEscape(e.colorName)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px;">INACTIVE</span>'}</div>
+          <div style="font-size:11px; color:var(--text-secondary);">${psEscape(e.brand || 'No brand')}${e.aliases && e.aliases.length ? ' · aka ' + e.aliases.map(psEscape).join(', ') : ''}</div>
+        </div>
+        <button class="icon-btn" style="padding:4px;" onclick="${isActive ? `clArchive('${e.id}')` : `clRestore('${e.id}')`}; invRenderColorsList();" aria-label="${isActive ? 'Deactivate' : 'Reactivate'} color"><i class="fa-solid fa-${isActive ? 'eye-slash' : 'eye'}"></i></button>
+      </div>
+      ${invAliasEditorHtml(e.id)}
+    </div>`;
+  });
+  html += `</div>`;
+  return html;
 }
 
 // Renders one color's card — collapsed header (name, brand, "N to order" badge) and, when
@@ -4754,6 +5119,7 @@ function invColorCardHtml(item, upcomingMap) {
       <button class="trip-btn ${tier === 'main' ? 'active' : ''}" onclick="invSetTier('${item.id}','main')">Main</button>
       <button class="trip-btn ${tier === 'misc' ? 'active' : ''}" onclick="invSetTier('${item.id}','misc')">Misc</button>
     </div>`;
+    html += invAliasEditorHtml(item.colorId);
     INV_SIZES.forEach(size => {
       const sd = item.sizes[size];
       const upcoming = invUpcomingFor(item.color, size, upcomingMap);
@@ -6185,6 +6551,7 @@ function bootApp() {
   try { heInit(); } catch (e) { console.error('heInit failed:', e); }
   try { ttInit(); } catch (e) { console.error('ttInit failed:', e); }
   try { jccInit(); } catch (e) { console.error('jccInit failed:', e); }
+  try { clInit(); } catch (e) { console.error('clInit failed:', e); }
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
