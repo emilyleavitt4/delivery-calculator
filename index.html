@@ -2573,6 +2573,7 @@ function psApplyReviewDraftToEvent(draft) {
       const recipe = RECIPES.find(r => r.id === item.recipeId);
       if (!recipe) return;
       event.productionItems.push({
+        id: psNewLineItemId(),
         recipeId: item.recipeId,
         customRecipe: psSnapshotTemplate(recipe), // frozen at approval time — editing the template later won't change this job
         qty: item.qty,
@@ -3288,7 +3289,7 @@ function psAddItemToJob(jobId) {
     if (!customLinear || customLinear <= 0) { alert('Enter the actual footage for this garland.'); return; }
   }
 
-  job.productionItems.push({ recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, topperNote, notes: '' });
+  job.productionItems.push({ id: psNewLineItemId(), recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, topperNote, notes: '' });
   delete psColorDraftStore[draftKey]; // reset the color picker to a single blank row for next time
   psSaveJob(job);
 }
@@ -3753,6 +3754,7 @@ function qcAddToJob() {
   }
 
   job.productionItems.push({
+    id: psNewLineItemId(),
     recipeId: qcState.sizeMode === 'preset' ? recipe.id : null,
     customRecipe: psSnapshotTemplate(recipe), // frozen at add-time — editing the template later won't change this job, for either size mode
     qty: qcState.qty,
@@ -4403,6 +4405,17 @@ function clColorsNeedReview(colors, generalNotes) {
   return (colors || []).some(c => !notes.has(c.toLowerCase()) && clResolveName(c).status !== 'resolved');
 }
 
+// Every active Library entry with this exact (case-insensitive) name or alias, across every
+// brand — deliberately not deduped by name the way clResolveName is. Used only where brand
+// actually matters (inventory requirement generation): a name that exists under two or more
+// brands can't be attributed to one of them without guessing, so the caller needs to see all
+// of them and decide not to pick one, rather than being handed a single arbitrary match.
+function clEntriesByExactName(name) {
+  const q = (name || '').trim().toLowerCase();
+  if (!q) return [];
+  return COLOR_LIBRARY.filter(e => e.active !== false && (e.colorName.toLowerCase() === q || (e.aliases || []).some(a => a.toLowerCase() === q)));
+}
+
 function clArchive(id) {
   const entry = COLOR_LIBRARY.find(e => e.id === id);
   if (!entry) return;
@@ -4473,42 +4486,106 @@ function invSaveItem(item) {
   });
 }
 
-// Aggregates every not-yet-completed job's production items into { colorNameKey: { invSize: count } }.
-function invComputeUpcoming() {
-  const upcoming = {};
-  const addTo = (colorName, invSize, n) => {
-    if (n <= 0) return;
-    const key = colorName.trim().toLowerCase();
-    if (!key) return;
-    if (!upcoming[key]) upcoming[key] = {};
-    upcoming[key][invSize] = (upcoming[key][invSize] || 0) + n;
-  };
+// ═══════════════════════════════════════ INVENTORY REQUIREMENTS (Step 10) ═══════════════════════════════════════
+//
+// The single place production demand turns into inventory-comparable numbers. Recomputed fresh
+// from JOBS + COLOR_LIBRARY on every call — nothing here is persisted, so there is no separate
+// "requirements" record that can go stale, duplicate, or need reconciling after a production
+// item is added/edited/removed: the next call just reflects whatever JOBS currently holds. This
+// is the same property invComputeUpcoming (now built on top of this) always had; Step 10 only
+// makes the underlying rows structured and brand-aware instead of a bare name→count map.
+//
+// One requirement row per (production item × balloon size × color). Only productionItems
+// (balloons) have the size/qty/color structure needed for a real requirement today — rentals/
+// services/fees have no per-unit inventory dimension yet, so this doesn't fabricate requirements
+// for them. `category` defaults to 'balloon' and the schema is shaped to extend later if that
+// changes, not because hardware/supply/equipment tracking exists now.
+function psComputeInventoryRequirements() {
+  const requirements = [];
 
   JOBS.forEach(job => {
-    if (job.status === 'completed') return;
-    (job.productionItems || []).forEach(line => {
-      const r = psLineRecipe(line);
-      if (!r) return;
-      const totals = psComputeTotals(r, line.qty, line.customLinear);
-      const nColors = line.colors.length || 1;
-      Object.keys(totals).forEach(size => {
-        const invSize = INV_SIZE_FROM_PRODUCTION[size];
+    if (job.status === 'completed') return; // matches Production/Staffing's own definition of "no longer upcoming"
+    (job.productionItems || []).forEach((line, lineIdx) => {
+      const recipe = psLineRecipe(line);
+      if (!recipe) return;
+      const totals = psComputeTotals(recipe, line.qty, line.customLinear);
+      const colors = line.colors && line.colors.length ? line.colors : ['Unspecified'];
+      const nColors = colors.length;
+      const productionItemId = line.id || (job.id + ':' + lineIdx); // older items predate the id field
+
+      Object.keys(totals).forEach(prodSize => {
+        const invSize = INV_SIZE_FROM_PRODUCTION[prodSize];
         if (!invSize) return;
-        if (line.colorDist && line.colorDist.length) {
-          line.colorDist.forEach(cd => addTo(cd.name, invSize, Math.round(totals[size] * (cd.pct / 100))));
-        } else {
-          const perColor = psColorCount(totals[size], nColors);
-          line.colors.forEach(name => addTo(name, invSize, perColor));
-        }
+        const total = totals[prodSize];
+        if (total <= 0) return;
+
+        const distEntries = (line.colorDist && line.colorDist.length) ? line.colorDist : colors.map(name => ({ name, pct: null }));
+        distEntries.forEach(cd => {
+          const qty = cd.pct != null ? Math.round(total * (cd.pct / 100)) : psColorCount(total, nColors);
+          if (qty <= 0) return;
+
+          // Resolve against the Color Library by exact name/alias — deliberately not the fuzzy
+          // Import Review matcher. A name shared by two+ brands can't be attributed to one of
+          // them without guessing, so that case is flagged rather than picking arbitrarily —
+          // and inventoryItemId stays null right along with colorId/brand in that case, rather
+          // than quietly picking whichever brand's Inventory row happens to match by name.
+          const isPlaceholder = cd.name === 'Unspecified';
+          const matches = isPlaceholder ? [] : clEntriesByExactName(cd.name);
+          const libraryEntry = matches.length === 1 ? matches[0] : null;
+          const unresolved = !isPlaceholder && !libraryEntry;
+          const invItem = libraryEntry ? INVENTORY_ITEMS.find(i => i.colorId === libraryEntry.id) : null;
+
+          requirements.push({
+            jobId: job.id,
+            productionItemId,
+            colorId: libraryEntry ? libraryEntry.id : null,
+            inventoryItemId: invItem ? invItem.id : null,
+            brand: libraryEntry ? libraryEntry.brand : '',
+            color: libraryEntry ? libraryEntry.colorName : cd.name,
+            size: invSize,
+            qty,
+            unit: 'balloon',
+            requiredBy: job.eventDate || '',
+            category: 'balloon',
+            source: { jobId: job.id, jobName: job.jobName || '', itemLabel: recipe.display || recipe.label || '' },
+            unresolved, // multiple brands share this name (or it's not in the Library at all) — can't attribute precisely
+          });
+        });
       });
     });
   });
 
-  return upcoming;
+  return requirements;
 }
-function invUpcomingFor(colorName, invSize, upcomingMap) {
-  const key = colorName.trim().toLowerCase();
-  return (upcomingMap[key] && upcomingMap[key][invSize]) || 0;
+
+// Folds requirements into { byColorId: {colorId: {invSize: qty}}, byName: {lowercasedName: {invSize: qty}} } —
+// byColorId is brand-accurate (fixes the old name-only bug where two brands sharing a color name
+// saw each other's demand); byName is the fallback for anything that didn't resolve to exactly
+// one Library entry, so that demand still surfaces somewhere instead of silently vanishing.
+function invComputeUpcoming() {
+  const byColorId = {}, byName = {};
+  psComputeInventoryRequirements().forEach(req => {
+    if (req.qty <= 0) return;
+    if (req.colorId) {
+      byColorId[req.colorId] = byColorId[req.colorId] || {};
+      byColorId[req.colorId][req.size] = (byColorId[req.colorId][req.size] || 0) + req.qty;
+    } else {
+      const key = req.color.trim().toLowerCase();
+      if (!key) return;
+      byName[key] = byName[key] || {};
+      byName[key][req.size] = (byName[key][req.size] || 0) + req.qty;
+    }
+  });
+  return { byColorId, byName };
+}
+// Prefers matching by the Inventory item's own colorId (brand-accurate); falls back to matching
+// by plain color name for anything that didn't resolve to a single Library entry.
+function invUpcomingFor(item, invSize, upcomingMap) {
+  if (item.colorId && upcomingMap.byColorId[item.colorId]) {
+    return upcomingMap.byColorId[item.colorId][invSize] || 0;
+  }
+  const key = item.color.trim().toLowerCase();
+  return (upcomingMap.byName[key] && upcomingMap.byName[key][invSize]) || 0;
 }
 function invPendingOrderedQty(itemId, size) {
   return INVENTORY_ORDERS
@@ -4646,7 +4723,7 @@ function invGroupedItems(items, upcomingMap) {
   if (invGroupBy === 'size') {
     const size = invSizeSortSize;
     const ranked = items.map(i => {
-      const upcoming = invUpcomingFor(i.color, size, upcomingMap);
+      const upcoming = invUpcomingFor(i, size, upcomingMap);
       const pendingQty = invPendingOrderedQty(i.id, size);
       return { item: i, totalBags: invNeedBreakdown(i.sizes[size], upcoming, pendingQty).totalBags };
     }).sort((a, b) => b.totalBags - a.totalBags || a.item.color.localeCompare(b.item.color));
@@ -5093,7 +5170,7 @@ function invColorCardHtml(item, upcomingMap) {
   let itemTotalBags = 0, itemUrgentBags = 0;
   INV_SIZES.forEach(size => {
     const sd = item.sizes[size];
-    const upcoming = invUpcomingFor(item.color, size, upcomingMap);
+    const upcoming = invUpcomingFor(item, size, upcomingMap);
     const pendingQty = invPendingOrderedQty(item.id, size);
     const need = invNeedBreakdown(sd, upcoming, pendingQty);
     itemTotalBags += need.totalBags;
@@ -5122,7 +5199,7 @@ function invColorCardHtml(item, upcomingMap) {
     html += invAliasEditorHtml(item.colorId);
     INV_SIZES.forEach(size => {
       const sd = item.sizes[size];
-      const upcoming = invUpcomingFor(item.color, size, upcomingMap);
+      const upcoming = invUpcomingFor(item, size, upcomingMap);
       const pendingQty = invPendingOrderedQty(item.id, size);
       const need = invNeedBreakdown(sd, upcoming, pendingQty);
       const formKey = `${item.id}|${size}`;
