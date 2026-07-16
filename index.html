@@ -734,6 +734,7 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
   import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+  import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyAaOVXNBCXXfO_HpuhTOeFi5dDHZ4hCBro",
@@ -747,6 +748,7 @@
   const fbApp = initializeApp(firebaseConfig);
   const auth = getAuth(fbApp);
   const db = getFirestore(fbApp);
+  const storage = getStorage(fbApp);
 
   // One business exists today (yours). Every job lives under this path — so if a second
   // business is ever added later, it just gets its own BUSINESS_ID and its own jobs
@@ -771,6 +773,19 @@
   window.fbOnSnapshotJobs = (onNext, onError) => onSnapshot(jobsRef, onNext, onError);
   window.fbSaveJob = (job) => setDoc(doc(jobsRef, job.id), job);
   window.fbDeleteJob = (jobId) => deleteDoc(doc(jobsRef, jobId));
+
+  // Job attachments (Step 11) — the file itself lives in Storage (Firestore's ~1MiB document
+  // limit rules out storing real photos/PDFs inline); the Job document only ever holds
+  // lightweight metadata (title, category, visibility, display locations, and this download
+  // URL) in its own attachments array, so the Job stays the single source of truth for what
+  // exists, while Storage just holds the bytes.
+  window.fbUploadJobAttachment = async (jobId, attachmentId, file) => {
+    const fileRef = ref(storage, `businesses/${BUSINESS_ID}/jobs/${jobId}/attachments/${attachmentId}-${file.name}`);
+    await uploadBytes(fileRef, file);
+    const url = await getDownloadURL(fileRef);
+    return { storagePath: fileRef.fullPath, url };
+  };
+  window.fbDeleteJobAttachmentFile = (storagePath) => deleteObject(ref(storage, storagePath));
 
   // Balloon-math rates are business-specific (everyone builds to their own ratios), so they're
   // stored per business instead of hardcoded — one shared doc, editable from the Formulas &
@@ -2116,12 +2131,167 @@ function psBlankJob(overrides) {
     // won't have these fields; every reader treats a missing array as empty (`|| []`).
     rentalItems: [],   // { id, name, qty, pulled, packed, returned } — shown in Production's Rentals section
     serviceItems: [],  // { id, name, qty } — logistics-affecting, not a build item; no dedicated view yet
-    fees: []           // { id, name, qty } — attached to the event record only
+    fees: [],          // { id, name, qty } — attached to the event record only
+    attachments: []    // { id, title, category, visibility, displayLocations, fileName, fileType, storagePath, url, uploadedAt } — see psAttachmentsSectionHtml
   }, overrides || {});
 }
 
 function psNewLineItemId() {
   return 'li_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+// ═══════════════════════════════════════ JOB ATTACHMENTS (Step 11) ═══════════════════════════════════════
+//
+// Attachments belong to the Job — not to Production, Staffing, or Inventory. Each one is a
+// single record in job.attachments[]; `displayLocations` is just a set of flags on that one
+// record ('production', 'event', or both), so the exact same attachment shows up wherever it's
+// flagged for without ever being copied. psAttachmentsSectionHtml is the one shared renderer
+// both Production Sheets and Event/Staffing call, filtered by which context they are.
+// `let` (not const) so the category list can grow later without a data-model change; a plain
+// object per attachment means future fields (comments, versions, approvals) are just new keys,
+// not a schema migration.
+let ATTACHMENT_CATEGORIES = ['Color Palette', 'Inspiration Photo', 'Mockup', 'Venue / Install Reference', 'Floor Plan', 'Other'];
+
+function psNewAttachmentId() {
+  return 'att_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+function psAttachmentIcon(fileType) {
+  if ((fileType || '').startsWith('image/')) return 'fa-image';
+  if (fileType === 'application/pdf') return 'fa-file-pdf';
+  return 'fa-file-lines';
+}
+
+// Uploads the file to Storage, then appends the metadata record to the Job and saves — the
+// Job document itself never holds the file bytes, only this lightweight reference to them.
+async function psHandleAttachmentUpload(jobId, context, fileInput) {
+  const file = fileInput.files[0];
+  if (!file) return;
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const statusEl = document.getElementById('att-upload-status-' + jobId + '-' + context);
+  if (statusEl) { statusEl.textContent = 'Uploading…'; statusEl.style.display = 'block'; statusEl.className = ''; }
+
+  const attachmentId = psNewAttachmentId();
+  try {
+    const { storagePath, url } = await window.fbUploadJobAttachment(jobId, attachmentId, file);
+    job.attachments = job.attachments || [];
+    job.attachments.push({
+      id: attachmentId,
+      title: file.name.replace(/\.[^.]+$/, ''),
+      category: ATTACHMENT_CATEGORIES[0],
+      visibility: 'team',
+      displayLocations: ['production', 'event'],
+      fileName: file.name,
+      fileType: file.type,
+      storagePath,
+      url,
+      uploadedAt: new Date().toISOString(),
+    });
+    psSaveJob(job);
+    if (statusEl) statusEl.style.display = 'none';
+    psRenderProductionJobs();
+    psRenderStaffingJobs();
+  } catch (err) {
+    console.error('Attachment upload failed:', err);
+    if (statusEl) { statusEl.textContent = "Couldn't upload that file — check your connection and try again."; statusEl.className = 'warn'; }
+  }
+  fileInput.value = '';
+}
+
+function psUpdateAttachmentField(jobId, attId, field, value) {
+  const job = psFindJob(jobId);
+  const att = job && (job.attachments || []).find(a => a.id === attId);
+  if (!att) return;
+  att[field] = value;
+  psSaveJob(job);
+}
+function psToggleAttachmentLocation(jobId, attId, loc, checked) {
+  const job = psFindJob(jobId);
+  const att = job && (job.attachments || []).find(a => a.id === attId);
+  if (!att) return;
+  att.displayLocations = att.displayLocations || [];
+  if (checked && !att.displayLocations.includes(loc)) att.displayLocations.push(loc);
+  else if (!checked) att.displayLocations = att.displayLocations.filter(l => l !== loc);
+  psSaveJob(job);
+}
+function psDeleteAttachment(jobId, attId) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const att = (job.attachments || []).find(a => a.id === attId);
+  if (!att) return;
+  if (!confirm(`Delete "${att.title || att.fileName}"? This can't be undone.`)) return;
+  job.attachments = job.attachments.filter(a => a.id !== attId);
+  psSaveJob(job);
+  if (att.storagePath) window.fbDeleteJobAttachmentFile(att.storagePath).catch(err => console.error('Attachment file delete failed:', err));
+  psRenderProductionJobs();
+  psRenderStaffingJobs();
+}
+
+// The one shared renderer — `context` is 'production' or 'event'; only attachments flagged for
+// that context are shown, and 'admin' visibility is gated behind the same shared passcode
+// unlock already used everywhere else in the app for sensitive content (there's no separate
+// per-user role system here to hook into instead).
+function psAttachmentsSectionHtml(job, context) {
+  const all = job.attachments || [];
+  const visible = all.filter(a => (a.displayLocations || []).includes(context) && (a.visibility !== 'admin' || invAdminUnlocked));
+  let html = `<div class="section-label">Attachments</div>`;
+
+  if (visible.length === 0) {
+    html += `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.5rem;">No attachments here yet.</div>`;
+  } else {
+    visible.forEach(a => {
+      const isImage = (a.fileType || '').startsWith('image/');
+      html += `<div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-top:0.5px solid var(--border);">
+        ${isImage
+          ? `<img src="${invAttr(a.url)}" style="width:40px; height:40px; object-fit:cover; border-radius:var(--radius-sm); flex-shrink:0;">`
+          : `<div style="width:40px; height:40px; display:flex; align-items:center; justify-content:center; background:var(--bg); border-radius:var(--radius-sm); flex-shrink:0;"><i class="fa-solid ${psAttachmentIcon(a.fileType)}" style="color:var(--text-secondary); font-size:16px;"></i></div>`}
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${psEscape(a.title || a.fileName)}</div>
+          <div style="font-size:11px; color:var(--text-secondary);">${psEscape(a.category)}${a.visibility === 'admin' ? ' · Admin only' : ''}</div>
+        </div>
+        <a class="icon-btn" style="padding:4px; width:auto;" href="${invAttr(a.url)}" target="_blank" rel="noopener" aria-label="Open"><i class="fa-solid fa-up-right-from-square"></i></a>
+        <a class="icon-btn" style="padding:4px; width:auto;" href="${invAttr(a.url)}" download="${invAttr(a.fileName)}" aria-label="Download"><i class="fa-solid fa-download"></i></a>
+        <button class="icon-btn no-print" style="padding:4px;" onclick="psToggleExpandAttachment('${job.id}','${a.id}')" aria-label="Edit"><i class="fa-solid fa-chevron-${psExpandedAttachment === a.id ? 'up' : 'down'}"></i></button>
+      </div>`;
+      if (psExpandedAttachment === a.id) {
+        html += `<div class="no-print" style="padding:8px 0 8px 50px;">
+          <div class="settings-field" style="margin-bottom:0.5rem;"><label>Title</label><input type="text" value="${invAttr(a.title)}" onchange="psUpdateAttachmentField('${job.id}','${a.id}','title', this.value)"></div>
+          <div class="settings-field" style="margin-bottom:0.5rem;"><label>Category</label>
+            <select onchange="psUpdateAttachmentField('${job.id}','${a.id}','category', this.value)">
+              ${ATTACHMENT_CATEGORIES.map(c => `<option value="${c}" ${c === a.category ? 'selected' : ''}>${c}</option>`).join('')}
+            </select>
+          </div>
+          <div class="settings-field" style="margin-bottom:0.5rem;"><label>Visibility</label>
+            <select onchange="psUpdateAttachmentField('${job.id}','${a.id}','visibility', this.value)">
+              <option value="team" ${a.visibility !== 'admin' ? 'selected' : ''}>Team Visible</option>
+              <option value="admin" ${a.visibility === 'admin' ? 'selected' : ''}>Admin Only</option>
+            </select>
+          </div>
+          <div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Show on</div>
+          <label style="display:inline-flex; align-items:center; gap:4px; font-size:13px; margin-right:16px;"><input type="checkbox" ${(a.displayLocations || []).includes('production') ? 'checked' : ''} onchange="psToggleAttachmentLocation('${job.id}','${a.id}','production', this.checked)"> Production</label>
+          <label style="display:inline-flex; align-items:center; gap:4px; font-size:13px;"><input type="checkbox" ${(a.displayLocations || []).includes('event') ? 'checked' : ''} onchange="psToggleAttachmentLocation('${job.id}','${a.id}','event', this.checked)"> Event / Installation</label>
+          <div style="margin-top:0.6rem;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psDeleteAttachment('${job.id}','${a.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+          </div>
+        </div>`;
+      }
+    });
+  }
+
+  html += `<div class="no-print" style="margin-top:0.5rem;">
+    <input type="file" id="att-upload-${job.id}-${context}" style="display:none" onchange="psHandleAttachmentUpload('${job.id}', '${context}', this)" accept="image/*,application/pdf,.doc,.docx,.txt">
+    <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="document.getElementById('att-upload-${job.id}-${context}').click()"><i class="fa-solid fa-paperclip"></i> Add attachment</button>
+    <div id="att-upload-status-${job.id}-${context}" style="display:none; font-size:12px; margin-top:0.4rem;"></div>
+  </div>`;
+
+  return html;
+}
+let psExpandedAttachment = null;
+function psToggleExpandAttachment(jobId, attId) {
+  psExpandedAttachment = psExpandedAttachment === attId ? null : attId;
+  psRenderProductionJobs();
+  psRenderStaffingJobs();
 }
 
 // Constructs a blank Event Model from an Import Layer result — populates only true
@@ -3255,6 +3425,8 @@ function psProductionBodyHtml(job) {
     <div class="settings-field" style="margin-bottom:0"><label>Client / Event name</label><input type="text" value="${psEscape(job.jobName)}" onchange="psUpdateJobField('${job.id}','jobName',this.value)"></div>
     <div class="settings-field" style="margin-bottom:0"><label>Event date</label><input type="text" value="${psEscape(job.eventDate)}" onchange="psUpdateJobField('${job.id}','eventDate',this.value)"></div>
   </div></div>`;
+
+  html += psAttachmentsSectionHtml(job, 'production');
 
   if (job.productionItems.length > 0) {
     html += `<button class="save-btn no-print" onclick="window.print()"><i class="fa-solid fa-print"></i> Print / Save as PDF</button>`;
@@ -6478,6 +6650,7 @@ function psStaffingBodyHtml(job) {
     html += `<div class="settings-field"><label>${label}</label><input type="text" value="${psEscape(s[key] || '')}" onchange="psUpdateStaffingField('${job.id}','${key}',this.value)"></div>`;
   });
   html += `<div class="settings-field" style="margin-bottom:0"><label>Notes</label><textarea rows="2" onchange="psUpdateStaffingField('${job.id}','notes',this.value)">${psEscape(s.notes || '')}</textarea></div>`;
+  html += psAttachmentsSectionHtml(job, 'event');
   return html;
 }
 
