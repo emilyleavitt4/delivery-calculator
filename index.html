@@ -492,6 +492,7 @@
     letter-spacing: -0.2px;
   }
   .save-btn:active { opacity: 0.85; }
+  .save-btn:disabled { background: var(--border-strong); color: var(--text-tertiary); cursor: not-allowed; }
   .saved-msg {
     text-align: center;
     font-size: 13px;
@@ -806,6 +807,18 @@
   const importMappingDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'importMappingRules');
   window.fbLoadImportMappingRules = () => getDoc(importMappingDocRef);
   window.fbSaveImportMappingRules = (data) => setDoc(importMappingDocRef, data);
+
+  // Import Review — "Save Draft" persists the in-progress review here so it survives a reload
+  // or a trip to another screen; cleared (set to null) once "Approve Import" runs.
+  const importReviewDraftDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'importReviewDraft');
+  window.fbLoadImportReviewDraft = () => getDoc(importReviewDraftDocRef);
+  window.fbSaveImportReviewDraft = (data) => setDoc(importReviewDraftDocRef, data);
+
+  // Custom production templates created from the Import Review screen ("Create new template")
+  // — appended to RECIPES at runtime; persisted here so they survive a reload.
+  const customTemplatesDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'customProductionTemplates');
+  window.fbLoadCustomProductionTemplates = () => getDoc(customTemplatesDocRef);
+  window.fbSaveCustomProductionTemplates = (data) => setDoc(customTemplatesDocRef, data);
 
   // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
   // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
@@ -1180,9 +1193,21 @@
         <textarea id="ps-import-debug-text" readonly rows="10" style="display:none; width:100%; margin-top:0.5rem; font-family:monospace; font-size:11px; padding:8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--bg); color:var(--text);"></textarea>
       </div>
     </div>
+    <div id="ir-resume-banner"></div>
     <div id="im-root"></div>
-    <div class="home-footer-note">Creates one job — decor items go to Production, event details go to Event Schedule &amp; Staffing.</div>
+    <div class="home-footer-note">Parses the invoice and opens a review screen — nothing is added to Production or Staffing until you approve it there.</div>
   </div><!-- end view-import -->
+
+  <!-- ═══════════════════════════════════════ IMPORT REVIEW VIEW -->
+  <!-- The quality-control checkpoint between the Mapping Layer and the Production Layer. Edits
+       here operate on the standardized Event Model + review-item drafts only — never on the
+       raw parser output — and nothing is written to Production/Staffing (via psSaveJob) until
+       "Approve Import" is clicked. Source-agnostic: any future importer (HoneyBook, Shopify,
+       manual entry) that produces the same { clientName, rawItems } shape lands on this exact
+       screen, unchanged. -->
+  <div class="view" id="view-importReview">
+    <div id="ir-root"></div>
+  </div><!-- end view-importReview -->
 
   <!-- ═══════════════════════════════════════ PRODUCTION VIEW -->
   <div class="view" id="view-production">
@@ -1699,6 +1724,7 @@ const TOOL_META = {
   jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: false },
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: false },
   timetracker:{ title: 'Time Tracker',                  icon: 'fa-solid fa-clock',               showBack: true,  showGear: false },
+  importReview:{ title: 'Review Import',                icon: 'fa-solid fa-clipboard-check',     showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
 };
 
@@ -1756,7 +1782,9 @@ function psTopperFt(recipe) {
 // column's height; for garlands it's the garland's own length; for arches it's the arch's real
 // linear footage, which is NOT the same as its marketed size (e.g. a "12 ft" arch is actually
 // built using 25 linear feet — that's taken straight from your items sheet's description text).
-const RECIPES = [
+// `let` (not `const`) so the Import Review screen's "Create new template" action can append
+// user-created custom templates at runtime — see CUSTOM_PRODUCTION_TEMPLATES, further down.
+let RECIPES = [
   // ---- COLUMNS ----
   // All columns get a topper automatically (FORMULAS.columnTopperFt). Starburst and Number
   // Stack are exceptions (no topper / 34" topper) but aren't built yet — no formula exists
@@ -1860,7 +1888,14 @@ function psParseInvoiceText(text) {
     if (qtyMatch) {
       const inlineName = qtyMatch[1].trim();
       const fullName = (pendingName.join(' ') + ' ' + inlineName).trim();
-      current = { name: fullName, qty: parseInt(qtyMatch[2], 10), details: {} };
+      // Unit/total price were always present in this match (groups 3/4) but discarded until
+      // the Import Review screen needed them for display — parsing itself is unchanged.
+      current = {
+        name: fullName, qty: parseInt(qtyMatch[2], 10),
+        unitPrice: parseFloat(qtyMatch[3].replace(/,/g, '')),
+        totalPrice: parseFloat(qtyMatch[4].replace(/,/g, '')),
+        details: {}
+      };
       items.push(current);
       pendingName = [];
       currentHasDetails = false;
@@ -2135,12 +2170,18 @@ function psToggleRentalStatus(jobId, itemId, field, checked) {
 // ═══════════════════════════════════════ MAPPING LAYER ═══════════════════════════════════════
 //
 // Translates an import's raw line items onto the Internal Event Model, using mapping rules.
-// Every rule now carries a classification alongside its production template — this is what
-// routes a matched raw item to the right part of the event instead of always assuming
-// "production." This is the ONLY place that should ever compare raw imported text against
-// RECIPES, or write import data into a Job's fields — keeping that logic out of the Import
-// Layer (which knows nothing about recipes or classifications) and out of the Production Layer
-// (which only ever reads the already-mapped Event Model, never raw import data).
+// Every rule carries a classification alongside its production template — this is what routes
+// a matched raw item to the right part of the event instead of always assuming "production."
+// This is the ONLY place that should ever compare raw imported text against RECIPES, or write
+// import data into a Job's fields — keeping that logic out of the Import Layer (which knows
+// nothing about recipes or classifications) and out of the Production Layer (which only ever
+// reads the already-mapped Event Model, never raw import data).
+//
+// As of the Import Review screen (see further down), this layer no longer writes straight into
+// a Job — psResolveRawItem below scores each raw item (exact match / fuzzy match / no match)
+// and produces a review item instead; psApplyReviewDraftToEvent is what actually populates
+// event.productionItems/rentalItems/serviceItems/fees/staffing.notes, and only runs once the
+// user clicks "Approve Import."
 //
 // Classifications and where they land on the event:
 //   production — event.productionItems (build items, shown on the production sheet — this is
@@ -2148,15 +2189,15 @@ function psToggleRentalStatus(jobId, itemId, field, checked) {
 //                seeded default rule uses it, preserving prior behavior exactly)
 //   rental     — event.rentalItems (shown in Production's pull/pack/return section)
 //   service    — event.serviceItems (affects logistics/scheduling, but is never a build item —
-//                no dedicated view yet, per "don't build a new review screen yet")
+//                no dedicated view yet)
 //   fee        — event.fees (attached to the event record; never creates a production task)
 //   note       — appended as a line in event.staffing.notes (the existing Staffing notes field)
 //   ignore     — dropped; not even reported as unmatched, since it was deliberately excluded
 
 // Returns true if this raw item was event/staffing metadata (and was applied to `event`) —
-// false if it's still a candidate line item for psMapRawItemToEvent. This check runs before
-// classification lookup because "Event Date" is a structural detail-field marker, not a named
-// line item a mapping rule would ever match.
+// false if it's still a candidate line item for the Import Review screen. This check runs
+// before classification lookup because "Event Date" is a structural detail-field marker, not a
+// named line item a mapping rule would ever match.
 function psMapRawItemToEventFields(pItem, event) {
   if (!pItem.details['Event Date']) return false;
   event.eventDate = pItem.details['Event Date'];
@@ -2166,63 +2207,6 @@ function psMapRawItemToEventFields(pItem, event) {
   event.staffing.eventLocation = pItem.details['Event Location'] || '';
   event.staffing.dayOfContact = pItem.details['Day-of Contact'] || '';
   return true;
-}
-
-// Matches a raw item's name against the Import Mapping Rules table (see IMPORT_MAPPING_RULES,
-// below), then routes it onto `event` according to the matched rule's classification. Returns
-// the classification actually applied ('production'/'rental'/'service'/'fee'/'note'/'ignore'),
-// or 'unmatched' if no rule matched (or the matched rule points at a production template that
-// no longer exists) — so the caller can report it instead of silently dropping it.
-function psMapRawItemToEvent(pItem, event) {
-  const rule = IMPORT_MAPPING_RULES.find(r => psNormalize(r.rawName) === psNormalize(pItem.name));
-  if (!rule) return 'unmatched';
-  const classification = rule.classification || 'production';
-
-  if (classification === 'production') {
-    const recipe = RECIPES.find(r => r.id === rule.recipeId);
-    if (!recipe) return 'unmatched';
-    const colors = pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : ['Unspecified'];
-    event.productionItems.push({ recipeId: recipe.id, qty: pItem.qty, colors, customLinear: null, design: '', location: pItem.details['Location'] || '', topperNote: '', notes: '' });
-    return 'production';
-  }
-  if (classification === 'rental') {
-    event.rentalItems.push({ id: psNewLineItemId(), name: pItem.name, qty: pItem.qty, pulled: false, packed: false, returned: false });
-    return 'rental';
-  }
-  if (classification === 'service') {
-    event.serviceItems.push({ id: psNewLineItemId(), name: pItem.name, qty: pItem.qty });
-    return 'service';
-  }
-  if (classification === 'fee') {
-    event.fees.push({ id: psNewLineItemId(), name: pItem.name, qty: pItem.qty });
-    return 'fee';
-  }
-  if (classification === 'note') {
-    const line = pItem.name + (pItem.qty > 1 ? ` × ${pItem.qty}` : '');
-    event.staffing.notes = event.staffing.notes ? event.staffing.notes + '\n' + line : line;
-    return 'note';
-  }
-  if (classification === 'ignore') return 'ignore';
-  return 'unmatched';
-}
-
-// Runs every raw line item through the mapping rules above, mutating `event` in place. Returns
-// a match report so the caller can tell the user what happened — `matchedCount` is preserved
-// as "how many went to Production" for the existing status message; `counts` breaks down every
-// classification for the extra detail appended to that message.
-function psApplyMappingToEvent(event, rawItems) {
-  const counts = { production: 0, rental: 0, service: 0, fee: 0, note: 0, ignore: 0 };
-  const unmatched = [];
-  rawItems.forEach(pItem => {
-    if (psMapRawItemToEventFields(pItem, event)) return;
-    const result = psMapRawItemToEvent(pItem, event);
-    if (result === 'unmatched') {
-      unmatched.push(`${pItem.name} × ${pItem.qty}`);
-    } else {
-      counts[result]++;
-    }
-  });
-  return { matchedCount: counts.production, counts, unmatched };
 }
 
 // ═══════════════════════════════════════ IMPORT MAPPING RULES ═══════════════════════════════════════
@@ -2355,6 +2339,453 @@ function imUnlockAdmin() {
 function imLockAdmin() {
   invAdminUnlocked = false;
   imRenderShell();
+}
+
+// ═══════════════════════════════════════ IMPORT REVIEW (quality-control checkpoint) ═══════════════════════════════════════
+//
+// Sits between the Mapping Layer and the Production Layer. psHandleInvoiceUpload no longer
+// saves a Job directly — it builds an IMPORT_REVIEW_DRAFT (a standardized Event Model plus one
+// review item per raw line item) and shows this screen. Nothing reaches Production/Staffing
+// (psSaveJob is never called) until the user clicks "Approve Import." Editing here only ever
+// touches the draft's event/review-item data, never the raw parser output — every review item
+// keeps its raw* fields untouched alongside the editable working copy, so "the original
+// imported text" survives any edit or split.
+
+const CUSTOM_PRODUCTION_TEMPLATES_DEFAULT = [];
+let CUSTOM_PRODUCTION_TEMPLATES = [];
+let IMPORT_REVIEW_DRAFT = null;
+let irExpandedItems = new Set();
+const IM_FUZZY_THRESHOLD = 0.65; // below this, a raw item's best candidate isn't worth suggesting at all
+
+function irInit() {
+  window.fbLoadCustomProductionTemplates().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().templates)) {
+      CUSTOM_PRODUCTION_TEMPLATES = snap.data().templates;
+      // Re-hydrate the shared rates-object reference (Firestore round-trips a plain copy, not
+      // the live FORMULAS.freeformRates object) so editing Formulas still updates these too.
+      CUSTOM_PRODUCTION_TEMPLATES.forEach(t => { if (t.formula === 'freeform') t.rates = FORMULAS.freeformRates[t.category] || FORMULAS.freeformRates.Garland; });
+      RECIPES = RECIPES.concat(CUSTOM_PRODUCTION_TEMPLATES);
+    }
+  }).catch(err => console.error('Custom production templates load failed:', err));
+
+  window.fbLoadImportReviewDraft().then(snap => {
+    if (snap.exists() && snap.data().draft) {
+      IMPORT_REVIEW_DRAFT = snap.data().draft;
+      irRenderResumeBanner();
+    }
+  }).catch(err => console.error('Import review draft load failed:', err));
+}
+
+function irRenderResumeBanner() {
+  const el = document.getElementById('ir-resume-banner');
+  if (!el) return;
+  if (!IMPORT_REVIEW_DRAFT) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="card" style="margin-bottom:0.75rem; display:flex; align-items:center; justify-content:space-between; gap:8px;">
+    <div style="font-size:13px;">A saved import draft is waiting to be reviewed${IMPORT_REVIEW_DRAFT.event.jobName ? ' — ' + psEscape(IMPORT_REVIEW_DRAFT.event.jobName) : ''}.</div>
+    <button class="save-btn" style="width:auto; padding:8px 14px;" onclick="showView('importReview'); irRenderShell();">Resume</button>
+  </div>`;
+}
+
+// ─── Fuzzy matching (Levenshtein-based similarity) ───────────────────────────
+
+function imLevenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j - 1], prev[j], cur[j - 1]);
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+function imMatchConfidence(a, b) {
+  const na = psNormalize(a || ''), nb = psNormalize(b || '');
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const dist = imLevenshtein(na, nb);
+  return 1 - dist / Math.max(na.length, nb.length);
+}
+
+// ─── Resolving a raw item to a classification + status ──────────────────────
+
+// The four needs_review triggers, in order: no saved mapping at all; more than one saved
+// mapping matches the same text; the best available match is a fuzzy guess, not exact (below
+// the "safe" — i.e. exact — threshold); or required production info (a template that needs an
+// actual footage) is missing. Any of these puts the item in Needs Review with a plain-English
+// reason; none of them does (and classification isn't 'ignore') puts it straight in Recognized.
+function psResolveRawItem(pItem) {
+  const exactMatches = IMPORT_MAPPING_RULES.filter(r => psNormalize(r.rawName) === psNormalize(pItem.name));
+  const reasons = [];
+  let classification = 'production';
+  let recipeId = null;
+  let confidence = 0;
+
+  if (exactMatches.length >= 1) {
+    const rule = exactMatches[0];
+    classification = rule.classification || 'production';
+    recipeId = rule.recipeId || null;
+    confidence = 1;
+    if (exactMatches.length > 1) reasons.push('Multiple saved mappings match this text — pick the right one.');
+  } else {
+    let best = null, bestScore = 0;
+    IMPORT_MAPPING_RULES.forEach(rule => {
+      const score = imMatchConfidence(rule.rawName, pItem.name);
+      if (score > bestScore) { bestScore = score; best = rule; }
+    });
+    confidence = bestScore;
+    if (best && bestScore >= IM_FUZZY_THRESHOLD) {
+      classification = best.classification || 'production';
+      recipeId = best.recipeId || null;
+      reasons.push(`Low-confidence match (${Math.round(bestScore * 100)}%) — check the suggested mapping below.`);
+    } else {
+      reasons.push('No saved mapping found for this item.');
+    }
+  }
+
+  if (classification === 'production') {
+    if (!recipeId) {
+      reasons.push('No production template selected yet.');
+    } else {
+      const recipe = RECIPES.find(r => r.id === recipeId);
+      if (recipe && recipe.customLinear) reasons.push('This template needs an actual footage — enter it below.');
+    }
+  }
+
+  let status;
+  if (reasons.length > 0) status = 'needs_review';
+  else if (classification === 'ignore') status = 'ignored';
+  else status = 'mapped';
+
+  return { classification, recipeId, confidence, status, reasons };
+}
+
+// Re-derives status/reasons for one review item after an edit — called on every field change
+// so an item can move between Needs Review and Recognized live as the user resolves it.
+function irRecomputeItemStatus(item) {
+  const reasons = item.reasons.filter(r => r.startsWith('Multiple saved mappings') || r.startsWith('Low-confidence match')); // keep original-match context
+  if (item.classification === 'production') {
+    if (!item.recipeId) {
+      reasons.push('No production template selected yet.');
+    } else {
+      const recipe = RECIPES.find(r => r.id === item.recipeId);
+      if (recipe && recipe.customLinear && !item.customLinear) reasons.push('This template needs an actual footage — enter it below.');
+    }
+  }
+  item.reasons = reasons;
+  if (reasons.length > 0) item.status = 'needs_review';
+  else if (item.classification === 'ignore') item.status = 'ignored';
+  else item.status = 'mapped';
+}
+
+function psReviewItemFromRaw(pItem) {
+  const resolution = psResolveRawItem(pItem);
+  return {
+    id: psNewLineItemId(),
+    // Immutable provenance — never touched by edits, splits, or re-classification below.
+    rawName: pItem.name,
+    rawDescription: pItem.details['Description'] || '',
+    rawQty: pItem.qty,
+    unitPrice: typeof pItem.unitPrice === 'number' && !isNaN(pItem.unitPrice) ? pItem.unitPrice : null,
+    totalPrice: typeof pItem.totalPrice === 'number' && !isNaN(pItem.totalPrice) ? pItem.totalPrice : null,
+    details: pItem.details,
+
+    // Editable working copy — what Approve actually uses to build the final item.
+    name: pItem.name,
+    qty: pItem.qty,
+    description: pItem.details['Description'] || '',
+    classification: resolution.classification,
+    recipeId: resolution.recipeId,
+    customLinear: null,
+    colors: pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : [],
+    location: pItem.details['Location'] || '',
+
+    status: resolution.status,
+    reasons: resolution.reasons,
+    confidence: resolution.confidence,
+    rememberMapping: false,
+  };
+}
+
+// Builds the full review draft from an Import Layer result: the Event Model (with event-date/
+// staffing metadata already applied, exactly as psApplyMappingToEvent always did) plus one
+// review item per remaining raw line item — nothing is written to productionItems/rentalItems/
+// etc. yet; that only happens in psApplyReviewDraftToEvent, on Approve.
+function psBuildReviewDraft(rawImportData) {
+  const event = psEventModelFromImport(rawImportData);
+  const reviewItems = [];
+  rawImportData.rawItems.forEach(pItem => {
+    if (psMapRawItemToEventFields(pItem, event)) return; // event/staffing metadata, not a line item
+    reviewItems.push(psReviewItemFromRaw(pItem));
+  });
+  return { event, reviewItems };
+}
+
+// ─── Approve: the ONLY place a review draft turns into real Production/Staffing data ────────
+
+function psApplyReviewDraftToEvent(draft) {
+  const event = draft.event;
+  draft.reviewItems.forEach(item => {
+    if (item.status === 'ignored' || item.classification === 'ignore') return;
+    if (item.classification === 'production') {
+      if (!item.recipeId) return;
+      event.productionItems.push({
+        recipeId: item.recipeId,
+        qty: item.qty,
+        colors: item.colors && item.colors.length ? item.colors : ['Unspecified'],
+        customLinear: item.customLinear || null,
+        design: '',
+        location: item.location || '',
+        topperNote: '',
+        notes: item.description || '',
+      });
+    } else if (item.classification === 'rental') {
+      event.rentalItems.push({ id: psNewLineItemId(), name: item.name, qty: item.qty, pulled: false, packed: false, returned: false });
+    } else if (item.classification === 'service') {
+      event.serviceItems.push({ id: psNewLineItemId(), name: item.name, qty: item.qty });
+    } else if (item.classification === 'fee') {
+      event.fees.push({ id: psNewLineItemId(), name: item.name, qty: item.qty });
+    } else if (item.classification === 'note') {
+      const line = item.name + (item.qty > 1 ? ` × ${item.qty}` : '');
+      event.staffing.notes = event.staffing.notes ? event.staffing.notes + '\n' + line : line;
+    }
+
+    if (item.rememberMapping) psRememberMapping(item);
+  });
+  return event;
+}
+
+// "Remember this mapping" — keys on the ORIGINAL invoice phrase (rawName), not any edited
+// display name, since that's what future imports will actually contain.
+function psRememberMapping(item) {
+  const existing = IMPORT_MAPPING_RULES.find(r => psNormalize(r.rawName) === psNormalize(item.rawName));
+  if (existing) {
+    existing.classification = item.classification;
+    if (item.recipeId) existing.recipeId = item.recipeId;
+  } else {
+    IMPORT_MAPPING_RULES.push({ id: 'map_learned_' + (++imRuleSeq), rawName: item.rawName, recipeId: item.recipeId || '', classification: item.classification });
+  }
+  imSaveToFirestore();
+}
+
+function irApproveImport() {
+  const draft = IMPORT_REVIEW_DRAFT;
+  if (!draft) return;
+  const needsReview = draft.reviewItems.filter(i => i.status === 'needs_review');
+  if (needsReview.length > 0) { alert('Resolve every "Needs Review" item — map it, classify it, or mark it ignored — before approving.'); return; }
+
+  const event = psApplyReviewDraftToEvent(draft);
+  psSaveJob(event); // ← the ONLY point in this whole screen that writes to Production/Staffing
+
+  window.fbSaveImportReviewDraft({ draft: null }).catch(err => console.error('Clearing saved import draft failed:', err));
+  IMPORT_REVIEW_DRAFT = null;
+  irRenderResumeBanner();
+
+  psExpandedProduction = event.id;
+  psExpandedStaffing = event.id;
+  showView('production');
+}
+
+function irSaveDraft() {
+  if (!IMPORT_REVIEW_DRAFT) return;
+  window.fbSaveImportReviewDraft({ draft: IMPORT_REVIEW_DRAFT }).then(() => {
+    const el = document.getElementById('ir-save-status');
+    if (el) { el.textContent = 'Draft saved.'; setTimeout(() => { el.textContent = ''; }, 2000); }
+  }).catch(err => {
+    console.error('Import draft save failed:', err);
+    alert("Couldn't save the draft — check your connection and try again.");
+  });
+}
+
+// ─── Rendering ────────────────────────────────────────────────────────────────
+
+function irToggleExpanded(id) {
+  if (irExpandedItems.has(id)) irExpandedItems.delete(id); else irExpandedItems.add(id);
+  irRenderShell();
+}
+
+function irRenderShell() {
+  const root = document.getElementById('ir-root');
+  if (!root) return;
+  const draft = IMPORT_REVIEW_DRAFT;
+  if (!draft) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary);">No import in progress. Upload an invoice from Import Job to start one.</div>`;
+    return;
+  }
+
+  const needsReview = draft.reviewItems.filter(i => i.status === 'needs_review');
+  const recognized = draft.reviewItems.filter(i => i.status !== 'needs_review');
+
+  root.innerHTML = `
+    <div class="card" style="margin-bottom:0.75rem; text-align:center;">
+      <div style="font-size:14px; font-weight:600;">${needsReview.length} item${needsReview.length === 1 ? '' : 's'} need review • ${recognized.length} item${recognized.length === 1 ? '' : 's'} recognized</div>
+      ${draft.event.jobName || draft.event.eventDate ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">${psEscape(draft.event.jobName)}${draft.event.eventDate ? ' — ' + psEscape(draft.event.eventDate) : ''}</div>` : ''}
+    </div>
+
+    <div class="section-label" style="margin-top:0">Needs Review</div>
+    <div id="ir-needs-review">${needsReview.length === 0 ? `<div class="card" style="text-align:center; color:var(--text-secondary);">Nothing needs review.</div>` : needsReview.map(i => irItemCardHtml(i)).join('')}</div>
+
+    <div class="section-label">Recognized Items</div>
+    <div id="ir-recognized">${recognized.length === 0 ? `<div class="card" style="text-align:center; color:var(--text-secondary);">No recognized items.</div>` : recognized.map(i => irItemCardHtml(i)).join('')}</div>
+
+    <div id="ir-save-status" style="text-align:center; font-size:12px; color:var(--accent); min-height:16px; margin-top:0.5rem;"></div>
+    <div style="display:flex; gap:8px; margin: 0.5rem 0 1.5rem;">
+      <button class="icon-btn" style="flex:1; justify-content:center; padding:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irSaveDraft()">Save Draft</button>
+      <button class="save-btn" style="flex:1;" ${needsReview.length > 0 ? 'disabled' : ''} onclick="irApproveImport()">Approve Import</button>
+    </div>
+  `;
+}
+
+function irStatusBadgeHtml(status) {
+  if (status === 'needs_review') return `<span style="background:var(--warning-bg); color:var(--warning-text); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap;">Needs review</span>`;
+  if (status === 'ignored') return `<span style="background:var(--bg); color:var(--text-secondary); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap; border:0.5px solid var(--border-strong);">Ignored</span>`;
+  return `<span style="background:var(--accent-light); color:var(--accent); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap;">Mapped</span>`;
+}
+
+function irItemCardHtml(item) {
+  const recipe = item.recipeId ? RECIPES.find(r => r.id === item.recipeId) : null;
+  const destinationSummary = item.classification === 'production'
+    ? (recipe ? recipe.label : '(no template selected)')
+    : imClassificationLabel(item.classification);
+  const expanded = irExpandedItems.has(item.id) || item.status === 'needs_review';
+
+  let html = `<div class="card" style="margin-bottom:0.5rem;">
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; cursor:pointer;" onclick="irToggleExpanded('${item.id}')">
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:14px; font-weight:700;">${psEscape(item.rawName)} <span style="font-weight:400; color:var(--text-secondary);">× ${item.rawQty}</span></div>
+        <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">${psEscape(imClassificationLabel(item.classification))} — ${psEscape(destinationSummary)}</div>
+        ${item.reasons.length ? `<div style="font-size:11px; color:var(--warning-text); margin-top:4px;">${item.reasons.map(r => psEscape(r)).join(' ')}</div>` : ''}
+      </div>
+      ${irStatusBadgeHtml(item.status)}
+    </div>`;
+
+  if (expanded) {
+    html += `<div style="margin-top:10px; padding-top:10px; border-top:0.5px solid var(--border);">`;
+    if (item.rawDescription) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;"><b>Original description:</b> ${psEscape(item.rawDescription)}</div>`;
+    if (item.totalPrice != null) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;"><b>Imported price:</b> ${jccFmtMoney(item.totalPrice)}${item.unitPrice != null ? ` (${jccFmtMoney(item.unitPrice)} ea)` : ''}</div>`;
+
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Item name</label><input type="text" value="${invAttr(item.name)}" onchange="irUpdateItemField('${item.id}','name', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Quantity</label><input type="number" min="1" value="${item.qty}" onchange="irUpdateItemField('${item.id}','qty', this.value)"></div>
+    </div>`;
+
+    html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Classification</label><select onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select></div>`;
+
+    if (item.classification === 'production') {
+      html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Production template</label><select onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">— choose one —</option>${psItemOptionsHtml(item.recipeId)}</select></div>`;
+      if (recipe && recipe.customLinear) {
+        html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Actual footage</label><input type="number" step="0.5" min="0" value="${item.customLinear || ''}" placeholder="e.g. 30" onchange="irUpdateItemField('${item.id}','customLinear', this.value)"></div>`;
+      }
+      html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Colors (comma separated)</label><input type="text" value="${invAttr(item.colors.join(', '))}" onchange="irUpdateItemColors('${item.id}', this.value)"></div>`;
+      html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Location (optional)</label><input type="text" value="${invAttr(item.location)}" onchange="irUpdateItemField('${item.id}','location', this.value)"></div>`;
+    }
+
+    html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Description / notes (optional)</label><input type="text" value="${invAttr(item.description)}" onchange="irUpdateItemField('${item.id}','description', this.value)"></div>`;
+
+    html += `<label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:10px;">
+      <input type="checkbox" ${item.rememberMapping ? 'checked' : ''} onchange="irUpdateItemField('${item.id}','rememberMapping', this.checked)">
+      Remember this mapping for future imports
+    </label>`;
+
+    html += `<div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irSplitItem('${item.id}')"><i class="fa-solid fa-scissors"></i> Split into multiple</button>
+      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irCreateTemplateFromItem('${item.id}')"><i class="fa-solid fa-wand-magic-sparkles"></i> Create new template</button>
+      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irMarkIgnored('${item.id}')"><i class="fa-solid fa-ban"></i> Ignore</button>
+    </div>`;
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+// ─── Item edit actions ────────────────────────────────────────────────────────
+
+function irUpdateItemField(id, field, value) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === id);
+  if (!item) return;
+  if (field === 'qty') item.qty = parseFloat(value) || 1;
+  else if (field === 'customLinear') item.customLinear = parseFloat(value) || null;
+  else item[field] = value;
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
+function irUpdateItemColors(id, value) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === id);
+  if (!item) return;
+  item.colors = value.split(',').map(c => c.trim()).filter(Boolean);
+  irRenderShell();
+}
+function irMarkIgnored(id) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === id);
+  if (!item) return;
+  item.classification = 'ignore';
+  item.recipeId = null;
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
+
+// Splits one review item into N, each an independent copy carrying the SAME raw* provenance
+// (rawName/rawDescription/rawQty/prices/details) as the original — so "preserve the original
+// imported text" holds for every resulting row, not just the first.
+function irSplitItem(id) {
+  const idx = IMPORT_REVIEW_DRAFT.reviewItems.findIndex(i => i.id === id);
+  if (idx === -1) return;
+  const original = IMPORT_REVIEW_DRAFT.reviewItems[idx];
+  const countStr = prompt('Split this line into how many items?', '2');
+  if (countStr === null) return;
+  const count = Math.max(2, parseInt(countStr, 10) || 2);
+
+  const baseQty = Math.floor(original.qty / count);
+  const remainder = original.qty - baseQty * count;
+  const splits = [];
+  for (let i = 0; i < count; i++) {
+    const qty = baseQty + (i < remainder ? 1 : 0);
+    const clone = JSON.parse(JSON.stringify(original));
+    clone.id = psNewLineItemId();
+    clone.qty = qty || 1;
+    clone.name = original.name + ' (' + (i + 1) + '/' + count + ')';
+    irRecomputeItemStatus(clone);
+    splits.push(clone);
+  }
+  IMPORT_REVIEW_DRAFT.reviewItems.splice(idx, 1, ...splits);
+  irRenderShell();
+}
+
+// Creates a bounded, immediately-usable production template — display name + category, reusing
+// that category's existing per-foot rates so the balloon math is sensible by default (refining
+// the exact rates afterward is Formulas & Recipes' job, not this screen's). Persists so it
+// survives a reload, and appends live to RECIPES so it's selectable right away in this review.
+function irCreateTemplateFromItem(id) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === id);
+  if (!item) return;
+  const name = prompt('Name for this new production template:', item.name);
+  if (!name || !name.trim()) return;
+  const categoryInput = prompt('Category — Column, Garland, or Arch:', 'Garland');
+  if (categoryInput === null) return;
+  const category = ['Column', 'Garland', 'Arch'].find(c => c.toLowerCase() === categoryInput.trim().toLowerCase()) || 'Garland';
+
+  const newRecipe = {
+    id: 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+    display: name.trim(),
+    category,
+    style: 'Freeform',
+    label: name.trim() + ' (custom)',
+    formula: 'freeform',
+    customLinear: true,
+    rates: FORMULAS.freeformRates[category] || FORMULAS.freeformRates.Garland,
+  };
+  RECIPES = RECIPES.concat([newRecipe]);
+  CUSTOM_PRODUCTION_TEMPLATES = CUSTOM_PRODUCTION_TEMPLATES.concat([newRecipe]);
+  window.fbSaveCustomProductionTemplates({ templates: CUSTOM_PRODUCTION_TEMPLATES }).catch(err => console.error('Custom template save failed:', err));
+
+  item.classification = 'production';
+  item.recipeId = newRecipe.id;
+  irRecomputeItemStatus(item);
+  irRenderShell();
 }
 
 // ─── SHARED JOB CARD HEADER (used by both Production and Staffing) ───
@@ -5297,13 +5728,12 @@ function psStaffingBodyHtml(job) {
   return html;
 }
 
-// ═══════════════════════════════════════ INVOICE IMPORT → creates a Job ═══════════════════════════════════════
+// ═══════════════════════════════════════ INVOICE IMPORT → opens Import Review ═══════════════════════════════════════
 //
-// This function is now pure orchestration — it sequences the four layers in order (Import →
-// Internal Event Model → Mapping → save, which is what makes the mapped event visible to the
-// Production Layer's own render functions) and reports their result to the UI. It contains no
-// extraction, event-construction, or recipe-matching logic itself anymore; that all lives in
-// the layer functions it calls, above.
+// Pure orchestration — sequences the Import Layer and the Internal Event Model, then hands off
+// to the Mapping Layer's psBuildReviewDraft to score every line item and opens the Import
+// Review screen. It never calls psSaveJob itself: no Job is created, and nothing reaches
+// Production or Staffing, until the user reviews the draft and clicks "Approve Import."
 async function psHandleInvoiceUpload(fileInput) {
   const file = fileInput.files[0];
   if (!file) return;
@@ -5317,22 +5747,13 @@ async function psHandleInvoiceUpload(fileInput) {
     document.getElementById('ps-import-debug-text').value = rawImportData.rawText;
     document.getElementById('ps-import-debug-toggle').style.display = 'block';
 
-    const event = psEventModelFromImport(rawImportData);           // Internal Event Model
-    const { matchedCount, counts, unmatched } = psApplyMappingToEvent(event, rawImportData.rawItems); // Mapping Layer
+    IMPORT_REVIEW_DRAFT = psBuildReviewDraft(rawImportData);        // Internal Event Model + Mapping Layer scoring
+    irExpandedItems = new Set();
 
-    psSaveJob(event);                                               // → Production Layer reads this back via Firestore
-
-    let msg = `Created a new job${event.jobName ? ' for ' + psEscape(event.jobName) : ''} — ${matchedCount} decor item${matchedCount === 1 ? '' : 's'} went to Production, event details went to Staffing.`;
-    const extras = [];
-    if (counts.rental) extras.push(`${counts.rental} rental item${counts.rental === 1 ? '' : 's'}`);
-    if (counts.service) extras.push(`${counts.service} service${counts.service === 1 ? '' : 's'}`);
-    if (counts.fee) extras.push(`${counts.fee} fee${counts.fee === 1 ? '' : 's'}`);
-    if (counts.note) extras.push(`${counts.note} note${counts.note === 1 ? '' : 's'}`);
-    if (extras.length) msg += ` Also recorded: ${extras.join(', ')}.`;
-    if (counts.ignore) msg += ` (${counts.ignore} item${counts.ignore === 1 ? '' : 's'} ignored per mapping rules.)`;
-    if (unmatched.length) msg += ` Couldn't auto-match (add manually in Production): ${unmatched.join('; ')}.`;
-    statusEl.textContent = msg;
-    statusEl.className = unmatched.length ? 'warn' : 'ok';
+    statusEl.style.display = 'none';
+    statusEl.textContent = '';
+    showView('importReview');
+    irRenderShell();
   } catch (err) {
     console.error(err);
     statusEl.textContent = "Couldn't read that PDF. Try again, or start a new job manually.";
@@ -5444,6 +5865,7 @@ function bootApp() {
   // nothing later in this function can block it from connecting.
   try { psStartJobsListener(); } catch (e) { console.error('Jobs listener failed to start:', e); }
   try { imInit(); } catch (e) { console.error('imInit failed:', e); }
+  try { irInit(); } catch (e) { console.error('irInit failed:', e); }
   try { loadSettings(); } catch (e) { console.error('loadSettings failed:', e); }
   try { calc(); } catch (e) { console.error('calc failed:', e); }
   try { qcInit(); } catch (e) { console.error('qcInit failed:', e); }
