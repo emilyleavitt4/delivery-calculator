@@ -975,7 +975,7 @@
 
       <div class="tool-tile" onclick="showView('formulas')">
         <div class="tool-tile-icon"><i class="fa-solid fa-flask"></i></div>
-        <div class="tool-tile-title">Formulas &amp; Recipes</div>
+        <div class="tool-tile-title">Custom Recipes</div>
       </div>
 
       <div class="tool-tile" onclick="showView('inventory')">
@@ -1220,8 +1220,7 @@
       </div>
     </div>
     <div id="ir-resume-banner"></div>
-    <div id="im-root"></div>
-    <div class="home-footer-note">Parses the invoice and opens a review screen — nothing is added to Production or Staffing until you approve it there.</div>
+    <div class="home-footer-note">Parses the invoice and opens a review screen — nothing is added to Production or Staffing until you approve it there. Manage matching rules under Settings → Import Mappings.</div>
   </div><!-- end view-import -->
 
   <!-- ═══════════════════════════════════════ IMPORT REVIEW VIEW -->
@@ -1380,10 +1379,10 @@
       <button class="save-btn" onclick="handleSignOutClick()">Sign out</button>
     </div>
 
-    <!-- INVENTORY ADMIN LOCK -->
-    <div class="section-label">Inventory admin lock</div>
+    <!-- ADMIN PASSCODE -->
+    <div class="section-label">Admin passcode</div>
     <div class="card">
-      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Shared team passcode required to edit price, balloons per bag, and par in Inventory — keeps those "set and forget" numbers from getting bumped by accident during routine backstock updates.</div>
+      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Shared team passcode that unlocks every business-configuration section below (Import Mappings, Color Library, Material Catalog, Production Templates) plus price/balloons-per-bag/par in Inventory — keeps those "set and forget" numbers from getting bumped by accident during routine day-to-day use.</div>
       <div class="settings-field" style="margin-bottom:0">
         <label>Passcode</label>
         <input type="text" id="set-admin-passcode" placeholder="e.g. 1886">
@@ -1391,6 +1390,17 @@
       <button class="save-btn" onclick="saveAdminPasscode()">Save passcode</button>
       <div class="saved-msg" id="admin-passcode-saved-msg"></div>
     </div>
+
+    <!-- BUSINESS CONFIGURATION — each of these sections renders its own collapsible header,
+         so no outer section-label wrapper is needed here (matches the pattern already used by
+         Production Templates below). -->
+    <div id="im-root"></div>
+    <div id="cl-settings-root"></div>
+    <div id="jcc-catalog-settings-root"></div>
+    <div id="pt-root"></div>
+
+    <div class="section-label">Calculator Defaults — Balloon math</div>
+    <div id="fr-formulas-root"></div>
 
     <!-- BASIC SETTINGS -->
     <div class="section-label">Vehicle & fuel</div>
@@ -1743,7 +1753,7 @@ const TOOL_META = {
   production: { title: 'Production Sheets',            icon: 'fa-solid fa-clipboard-list',     showBack: true,  showGear: false },
   staffing:   { title: 'Event Schedule & Staffing',    icon: 'fa-solid fa-calendar-days',      showBack: true,  showGear: false },
   quantity:   { title: 'Quantity Calculator',           icon: 'fa-solid fa-ruler',               showBack: true,  showGear: false },
-  formulas:   { title: 'Formulas & Recipes',            icon: 'fa-solid fa-flask',               showBack: true,  showGear: false },
+  formulas:   { title: 'Custom Recipes',                icon: 'fa-solid fa-flask',               showBack: true,  showGear: false },
   inventory:  { title: 'Inventory',                     icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: false },
   'inventory-latex': { title: 'Latex Inventory',        icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: false },
   letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: false },
@@ -2547,14 +2557,14 @@ function imUnlockAdmin() {
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) {
     invAdminUnlocked = true;
-    imRenderShell();
+    settingsRefreshAdminSections();
   } else {
     alert('Incorrect passcode.');
   }
 }
 function imLockAdmin() {
   invAdminUnlocked = false;
-  imRenderShell();
+  settingsRefreshAdminSections();
 }
 
 // ═══════════════════════════════════════ IMPORT REVIEW (quality-control checkpoint) ═══════════════════════════════════════
@@ -3952,17 +3962,18 @@ function qcAddToJob() {
 let CUSTOM_RECIPES = [];
 let frEditingRecipeId = null; // id of the recipe open for editing, '__new__' for a fresh one, or null
 
+// fr-formulas-root and pt-root are now static containers in Settings (Calculator Defaults /
+// Production Templates) instead of being built here — frRenderFormulas()/ptRenderShell() still
+// populate them from wherever they live, unchanged, since both just target a getElementById.
 function frInit() {
   const root = document.getElementById('fr-root');
   root.innerHTML = `
-    <div class="section-label" style="margin-top:0">Balloon math</div>
-    <div id="fr-formulas-root"></div>
-    <div id="pt-root"></div>
-    <div class="section-label">Custom recipes</div>
+    <div class="section-label" style="margin-top:0">Custom recipes</div>
     <div class="card" style="text-align:center; color:var(--text-secondary); font-size:12px; margin-bottom:0.5rem;">
       For reference only — seasonal or one-off items you won't add to Production. These never affect the Quantity Calculator or Production math.
     </div>
     <div id="fr-recipes-root"></div>
+    <div class="home-footer-note">Balloon math and Production Templates now live under Settings.</div>
   `;
   frRenderFormulas();
   frRenderRecipes();
@@ -4054,14 +4065,14 @@ function ptUnlockAdmin() {
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) {
     invAdminUnlocked = true;
-    ptRenderShell();
+    settingsRefreshAdminSections();
   } else {
     alert('Incorrect passcode.');
   }
 }
 function ptLockAdmin() {
   invAdminUnlocked = false;
-  ptRenderShell();
+  settingsRefreshAdminSections();
 }
 
 function ptRenderList() {
@@ -4372,6 +4383,18 @@ let invSizeSortSize = '11"'; // which size to rank by when invGroupBy === 'size'
 let ADMIN_PASSCODE = '1886';
 let invAdminUnlocked = false;
 
+// Every admin-gated section (Import Mappings, Color Library, Material Catalog, Production
+// Templates, plus Inventory's own price/par fields) reads the same shared invAdminUnlocked flag,
+// and now that they all live together on the Settings page, unlocking from any one of them
+// should visibly unlock the rest too, rather than requiring a separate unlock click per section.
+function settingsRefreshAdminSections() {
+  imRenderShell();
+  clRenderSettingsSection();
+  jccRenderCatalogSettingsSection();
+  ptRenderShell();
+  invRenderColorsList();
+}
+
 function invLoadAdminLock() {
   const fieldEl = document.getElementById('set-admin-passcode');
   if (fieldEl) fieldEl.value = ADMIN_PASSCODE;
@@ -4397,6 +4420,7 @@ function invUnlockAdmin() {
   if (entered === ADMIN_PASSCODE) {
     invAdminUnlocked = true;
     invRenderLatex(); // rebuilds the shell too, so the lock indicator itself updates
+    settingsRefreshAdminSections(); // and every other admin-gated section on Settings, since they share this one flag
   } else {
     alert('Incorrect passcode.');
   }
@@ -4404,6 +4428,7 @@ function invUnlockAdmin() {
 function invLockAdmin() {
   invAdminUnlocked = false;
   invRenderLatex();
+  settingsRefreshAdminSections();
 }
 let invCollapsedGroups = new Set(); // group keys currently collapsed
 let invPendingCollapsed = false;
@@ -4422,7 +4447,7 @@ function invTogglePendingCollapsed() {
 }
 function invToggleImportCollapsed() {
   invImportCollapsed = !invImportCollapsed;
-  invRenderLatex();
+  clRenderSettingsSection();
 }
 
 function invStartListeners() {
@@ -4497,11 +4522,17 @@ const CL_SUPPORTED_MANUFACTURERS = ['Sempertex', 'Tuftex', 'Decomex'];
 function psNewColorId() { return 'color_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 
 function clInit() {
+  // Renders the Settings section's shell immediately (matches invStartListeners' own comment
+  // on this pattern elsewhere) — clRenderSettingsSection isn't reachable via Inventory's own
+  // listener the way it used to be when it lived inside invRenderLatex, so it needs its own
+  // unconditional first paint rather than only rendering once the Firestore read resolves.
+  clRenderSettingsSection();
   window.fbLoadColorLibrary().then(snap => {
     if (snap.exists() && Array.isArray(snap.data().colors)) COLOR_LIBRARY = snap.data().colors;
     clLoaded = true;
     clMigrateFromInventory();
     invRenderLatex();
+    clRenderSettingsSection();
   }).catch(err => console.error('Color Library load failed:', err));
 }
 function clSaveLibrary() {
@@ -5120,27 +5151,9 @@ function invRenderLatex() {
     }
   }
 
-  // Add colors from a manufacturer — search that brand's catalog and add only the colors you
-  // actually want, rather than importing its whole lineup at once.
-  html += `<div class="inv-group-header" onclick="invToggleImportCollapsed()">
-    <span>Add colors from a manufacturer</span>
-    <i class="fa-solid fa-chevron-${invImportCollapsed ? 'down' : 'up'}"></i>
-  </div>`;
-  if (!invImportCollapsed) {
-    html += `<div class="card">
-      <div class="trip-toggle" style="margin:0 0 0.6rem;">
-        ${CL_SUPPORTED_MANUFACTURERS.map(b => `<button class="trip-btn ${clPickerBrand === b ? 'active' : ''}" onclick="clSetPickerBrand('${b}')">${b}</button>`).join('')}
-      </div>
-      <div class="settings-field" style="margin-bottom:0.6rem;">
-        <input type="text" id="cl-picker-search" placeholder="Search ${psEscape(clPickerBrand)} colors..." value="${psEscape(clPickerQuery)}" oninput="clSetPickerQuery(this.value)">
-      </div>
-      <div id="cl-picker-results"></div>
-    </div>`;
-  }
-
   html += `<div class="section-label">Colors</div>`;
   if (INVENTORY_ITEMS.length === 0) {
-    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — import a brand above or add one below.</div>`;
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — add one below, or add colors from a manufacturer under Settings → Color Library.</div>`;
   } else {
     html += `<div class="card">
       <div class="settings-field" style="margin-bottom:0.6rem;">
@@ -5185,7 +5198,40 @@ function invRenderLatex() {
 
   root.innerHTML = html;
   invRenderColorsList();
+}
+
+// ═══ Color Library management (Settings) — deciding which colors this business offers at all,
+// as opposed to Inventory's stock levels for them. Self-contained, like Import Mapping Rules and
+// Production Templates: its own collapsible header, rendered into a static Settings container. ═══
+function clRenderSettingsSection() {
+  const root = document.getElementById('cl-settings-root');
+  if (!root) return;
+  let html = `<div class="inv-group-header" onclick="invToggleImportCollapsed()">
+    <span>Add colors from a manufacturer</span>
+    <i class="fa-solid fa-chevron-${invImportCollapsed ? 'down' : 'up'}"></i>
+  </div>`;
+  if (!invImportCollapsed) {
+    html += `<div class="card">
+      <div class="trip-toggle" style="margin:0 0 0.6rem;">
+        ${CL_SUPPORTED_MANUFACTURERS.map(b => `<button class="trip-btn ${clPickerBrand === b ? 'active' : ''}" onclick="clSetPickerBrand('${b}')">${b}</button>`).join('')}
+      </div>
+      <div class="settings-field" style="margin-bottom:0.6rem;">
+        <input type="text" id="cl-picker-search" placeholder="Search ${psEscape(clPickerBrand)} colors..." value="${psEscape(clPickerQuery)}" oninput="clSetPickerQuery(this.value)">
+      </div>
+      <div id="cl-picker-results"></div>
+    </div>`;
+  }
+  html += invLibraryOnlyHtml();
+  root.innerHTML = html;
   clRenderPicker();
+}
+// Re-renders whichever of the two places a Color Library alias/archive edit could be visible —
+// Inventory's per-item cards (stocked colors) and Settings' "Color Library only" list
+// (non-stocked colors) both use the same invAliasEditorHtml, so an edit from either needs both
+// refreshed. Both re-render functions no-op harmlessly if their container isn't the active view.
+function clRefreshAliasViews() {
+  invRenderColorsList();
+  clRenderSettingsSection();
 }
 
 function clSetPickerBrand(brand) {
@@ -5246,7 +5292,7 @@ function invRenderColorsList() {
   const container = document.getElementById('inv-colors-results');
   if (!container) return;
   if (INVENTORY_ITEMS.length === 0) {
-    container.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — import by brand or add one below.</div>`;
+    container.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — add one below, or add colors from a manufacturer under Settings → Color Library.</div>`;
     return;
   }
 
@@ -5278,7 +5324,6 @@ function invRenderColorsList() {
     INV_SIZES.forEach(size => { totalValue += (item.sizes[size].backstock || 0) * (item.sizes[size].price || 0); });
   });
   html += `<div class="ps-pack-note">Estimated backstock value: $${totalValue.toFixed(2)}</div>`;
-  html += invLibraryOnlyHtml();
 
   container.innerHTML = html;
 }
@@ -5293,7 +5338,7 @@ function invAliasEditorHtml(colorId) {
   return `<div style="margin:0.75rem 0;">
     <div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Aliases <span style="font-weight:400;">(other names this color is found by)</span></div>
     <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px;">
-      ${aliases.map(a => `<span style="font-size:12px; background:var(--bg); border:0.5px solid var(--border-strong); border-radius:999px; padding:2px 8px;">${psEscape(a)} <i class="fa-solid fa-xmark" style="cursor:pointer;" onclick="clRemoveAlias('${entry.id}','${a.replace(/'/g, "\\'")}'); invRenderColorsList();"></i></span>`).join('')}
+      ${aliases.map(a => `<span style="font-size:12px; background:var(--bg); border:0.5px solid var(--border-strong); border-radius:999px; padding:2px 8px;">${psEscape(a)} <i class="fa-solid fa-xmark" style="cursor:pointer;" onclick="clRemoveAlias('${entry.id}','${a.replace(/'/g, "\\'")}'); clRefreshAliasViews();"></i></span>`).join('')}
     </div>
     <div style="display:flex; gap:6px;">
       <input type="text" id="inv-alias-input-${entry.id}" placeholder="e.g. Sage" style="flex:1;">
@@ -5305,7 +5350,7 @@ function invAddAliasFromField(colorId) {
   const input = document.getElementById('inv-alias-input-' + colorId);
   if (!input || !input.value.trim()) return;
   clAddAlias(colorId, input.value);
-  invRenderColorsList();
+  clRefreshAliasViews();
 }
 
 // Colors that exist in the Library but have no Inventory stock row at all — a general/
@@ -5324,7 +5369,7 @@ function invLibraryOnlyHtml() {
           <div style="font-size:13px; font-weight:600;">${psEscape(e.colorName)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px;">INACTIVE</span>'}</div>
           <div style="font-size:11px; color:var(--text-secondary);">${psEscape(e.brand || 'No brand')}${e.aliases && e.aliases.length ? ' · aka ' + e.aliases.map(psEscape).join(', ') : ''}</div>
         </div>
-        <button class="icon-btn" style="padding:4px;" onclick="${isActive ? `clArchive('${e.id}')` : `clRestore('${e.id}')`}; invRenderColorsList();" aria-label="${isActive ? 'Deactivate' : 'Reactivate'} color"><i class="fa-solid fa-${isActive ? 'eye-slash' : 'eye'}"></i></button>
+        <button class="icon-btn" style="padding:4px;" onclick="${isActive ? `clArchive('${e.id}')` : `clRestore('${e.id}')`}; clRefreshAliasViews();" aria-label="${isActive ? 'Deactivate' : 'Reactivate'} color"><i class="fa-solid fa-${isActive ? 'eye-slash' : 'eye'}"></i></button>
       </div>
       ${invAliasEditorHtml(e.id)}
     </div>`;
@@ -5734,6 +5779,7 @@ function jccInit() {
   jccState.rows.push({ id: 'jccrow_' + (++jccRowSeq), name: '', catalogId: null, qty: 1, unitCost: 0 });
   jccState.rows.push({ id: 'jccrow_' + (++jccRowSeq), name: '', catalogId: null, qty: 1, unitCost: 0 });
   jccRenderShell();
+  jccRenderCatalogSettingsSection(); // #jcc-catalog-settings-root lives in Settings now, not inside #jcc-root
 
   window.fbLoadJccCatalog().then(snap => {
     if (snap.exists() && Array.isArray(snap.data().items)) {
@@ -5811,13 +5857,27 @@ function jccRenderShell() {
       <div id="jcc-quickadd"></div>
     </div>`}
 
-    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="jccToggleCatalogSection()">
-      <span>Material Cost Reference <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— Raw Costs</span></span>
+    <div class="home-footer-note">Per-unit vendor costs live under Settings → Material Catalog.</div>
+  `;
+  jccRenderRows();
+  jccRenderCatalog(); // targets #jcc-catalog, now a static container in Settings — see jccRenderCatalogSettingsSection
+  jccRenderQuickAdd();
+}
+
+// ═══ Material Catalog (Settings) — reusable per-unit vendor pricing, as opposed to a specific
+// job's cost build above. Self-contained, matching Import Mapping Rules/Color Library/Production
+// Templates: its own collapsible header, rendered into a static Settings container. ═══
+function jccRenderCatalogSettingsSection() {
+  const root = document.getElementById('jcc-catalog-settings-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center; margin-top:0;" onclick="jccToggleCatalogSection()">
+      <span>Material Catalog <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— Raw Costs</span></span>
       <i class="fa-solid fa-chevron-${jccCatalogSectionCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
     </div>
     ${jccCatalogSectionCollapsed ? '' : `
     <div class="card" style="margin-bottom:0.75rem;">
-      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Two vendor prices per item, averaged — picking an item above auto-fills its cost from here.</div>
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Two vendor prices per item, averaged — picking an item in the Job Cost Calculator auto-fills its cost from here.</div>
       <div style="display:flex; align-items:center; justify-content:space-between;">
         <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Catalog costs unlocked' : 'Catalog costs locked'}</div>
         ${invAdminUnlocked
@@ -5827,9 +5887,7 @@ function jccRenderShell() {
     </div>
     <div id="jcc-catalog"></div>`}
   `;
-  jccRenderRows();
   jccRenderCatalog();
-  jccRenderQuickAdd();
 }
 
 // ─── Custom items (materials) ───────────────────────────────────────────────
@@ -6126,7 +6184,7 @@ function jccToggleQuickAddSection() {
 }
 function jccToggleCatalogSection() {
   jccCatalogSectionCollapsed = !jccCatalogSectionCollapsed;
-  jccRenderShell();
+  jccRenderCatalogSettingsSection();
 }
 
 function jccUpdateCatalogField(itemId, field, value) {
@@ -6143,14 +6201,14 @@ function jccUnlockAdmin() {
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) {
     invAdminUnlocked = true;
-    jccRenderShell();
+    settingsRefreshAdminSections();
   } else {
     alert('Incorrect passcode.');
   }
 }
 function jccLockAdmin() {
   invAdminUnlocked = false;
-  jccRenderShell();
+  settingsRefreshAdminSections();
 }
 
 // ═══════════════════════════════════════ HELIUM COST CALCULATOR VIEW ═══════════════════════════════════════
