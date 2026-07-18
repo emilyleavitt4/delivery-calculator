@@ -1746,27 +1746,30 @@ document.querySelectorAll('[id$="-onsite-staff"]').forEach(el => {
 // Metadata for each screen's top bar: what title/icon to show, and whether
 // the back arrow / gear icon should appear. "showBack: false" on home means
 // there's nowhere further back to go.
+// showGear: true on every screen except Settings itself (already there) and Review Import (a
+// transient mid-flow step, not a place to jump out of into configuration).
 const TOOL_META = {
-  home:       { title: 'Balloon Business Toolkit',    icon: 'fa-solid fa-toolbox',            showBack: false, showGear: false },
+  home:       { title: 'Balloon Business Toolkit',    icon: 'fa-solid fa-toolbox',            showBack: false, showGear: true  },
   calc:       { title: 'Delivery Calculator',          icon: 'fa-solid fa-location-dot',       showBack: true,  showGear: true  },
-  import:     { title: 'Import Job',                   icon: 'fa-solid fa-file-arrow-up',      showBack: true,  showGear: false },
-  production: { title: 'Production Sheets',            icon: 'fa-solid fa-clipboard-list',     showBack: true,  showGear: false },
-  staffing:   { title: 'Event Schedule & Staffing',    icon: 'fa-solid fa-calendar-days',      showBack: true,  showGear: false },
-  quantity:   { title: 'Quantity Calculator',           icon: 'fa-solid fa-ruler',               showBack: true,  showGear: false },
-  formulas:   { title: 'Custom Recipes',                icon: 'fa-solid fa-flask',               showBack: true,  showGear: false },
-  inventory:  { title: 'Inventory',                     icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: false },
-  'inventory-latex': { title: 'Latex Inventory',        icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: false },
-  letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: false },
-  jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: false },
-  helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: false },
-  timetracker:{ title: 'Time Tracker',                  icon: 'fa-solid fa-clock',               showBack: true,  showGear: false },
+  import:     { title: 'Import Job',                   icon: 'fa-solid fa-file-arrow-up',      showBack: true,  showGear: true  },
+  production: { title: 'Production Sheets',            icon: 'fa-solid fa-clipboard-list',     showBack: true,  showGear: true  },
+  staffing:   { title: 'Event Schedule & Staffing',    icon: 'fa-solid fa-calendar-days',      showBack: true,  showGear: true  },
+  quantity:   { title: 'Quantity Calculator',           icon: 'fa-solid fa-ruler',               showBack: true,  showGear: true  },
+  formulas:   { title: 'Custom Recipes',                icon: 'fa-solid fa-flask',               showBack: true,  showGear: true  },
+  inventory:  { title: 'Inventory',                     icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
+  'inventory-latex': { title: 'Latex Inventory',        icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
+  letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: true  },
+  jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: true  },
+  helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: true  },
+  timetracker:{ title: 'Time Tracker',                  icon: 'fa-solid fa-clock',               showBack: true,  showGear: true  },
   importReview:{ title: 'Review Import',                icon: 'fa-solid fa-clipboard-check',     showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
 };
 
-// Remembers the last tool screen (not settings) so Settings' back button
-// returns to whichever tool opened it, instead of always going to Delivery Calculator.
-let lastToolView = 'calc';
+// Remembers the last tool screen (not settings) so Settings' back button returns to whichever
+// screen opened it. Defaults to 'home' since the Home view is active from a fresh page load
+// without ever going through showView() itself (it starts with the "active" class in the HTML).
+let lastToolView = 'home';
 
 // ═══════════════════════════════════════ EDITABLE FORMULAS ═══════════════════════════════════════
 //
