@@ -787,64 +787,88 @@
   };
   window.fbDeleteJobAttachmentFile = (storagePath) => deleteObject(ref(storage, storagePath));
 
+  // Generic settings-doc helper — every business-wide configuration doc lives at
+  // businesses/{id}/settings/{name}. Every fbLoadX/fbSaveX below is a thin named wrapper over
+  // this (rather than its own doc()/getDoc/setDoc block) so a new config domain is one two-line
+  // addition instead of a new ref + two functions; the named wrappers stay because call sites
+  // throughout the app already read as window.fbLoadFormulas() etc., and a named function catches
+  // a typo'd doc name at a call site that a bare string literal wouldn't.
+  function settingsDocRef(name) { return doc(db, 'businesses', BUSINESS_ID, 'settings', name); }
+  window.fbLoadSettingsDoc = (name) => getDoc(settingsDocRef(name));
+  window.fbSaveSettingsDoc = (name, data) => setDoc(settingsDocRef(name), data);
+
   // Balloon-math rates are business-specific (everyone builds to their own ratios), so they're
   // stored per business instead of hardcoded — one shared doc, editable from the Formulas &
   // Recipes screen.
-  const formulasDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'formulas');
-  window.fbLoadFormulas = () => getDoc(formulasDocRef);
-  window.fbSaveFormulas = (data) => setDoc(formulasDocRef, data);
+  window.fbLoadFormulas = () => window.fbLoadSettingsDoc('formulas');
+  window.fbSaveFormulas = (data) => window.fbSaveSettingsDoc('formulas', data);
 
   // Shared passcode gating the "admin" inventory fields (price/balloons-per-bag/par) that
   // shouldn't change during routine backstock updates — one shared doc so the whole team
   // uses the same passcode.
-  const adminLockDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'adminLock');
-  window.fbLoadAdminLock = () => getDoc(adminLockDocRef);
-  window.fbSaveAdminLock = (data) => setDoc(adminLockDocRef, data);
+  window.fbLoadAdminLock = () => window.fbLoadSettingsDoc('adminLock');
+  window.fbSaveAdminLock = (data) => window.fbSaveSettingsDoc('adminLock', data);
 
   // Job Cost Calculator's reference catalog (per-item cost at two vendors, averaged) —
   // one shared doc like Formulas, since these are business-wide reference prices, not
   // per-job data.
-  const jccCatalogDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'jccCatalog');
-  window.fbLoadJccCatalog = () => getDoc(jccCatalogDocRef);
-  window.fbSaveJccCatalog = (data) => setDoc(jccCatalogDocRef, data);
+  window.fbLoadJccCatalog = () => window.fbLoadSettingsDoc('jccCatalog');
+  window.fbSaveJccCatalog = (data) => window.fbSaveSettingsDoc('jccCatalog', data);
 
   // Quick Add Reference — assembled products (e.g. "one hifloated balloon") the user builds
   // once in the Material Cost Calculator and saves, so pricing a batch of them later is one
   // line item instead of re-listing every raw material each time.
-  const jccQuickAddDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'jccQuickAdd');
-  window.fbLoadJccQuickAdd = () => getDoc(jccQuickAddDocRef);
-  window.fbSaveJccQuickAdd = (data) => setDoc(jccQuickAddDocRef, data);
+  window.fbLoadJccQuickAdd = () => window.fbLoadSettingsDoc('jccQuickAdd');
+  window.fbSaveJccQuickAdd = (data) => window.fbSaveSettingsDoc('jccQuickAdd', data);
 
   // Helium Cost Calculator — tank economics + per-size/shape helium costs, business-wide
   // reference data like Formulas, and read by the Job Cost Calculator's item type-ahead.
-  const heliumDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'heliumCalc');
-  window.fbLoadHeliumCalc = () => getDoc(heliumDocRef);
-  window.fbSaveHeliumCalc = (data) => setDoc(heliumDocRef, data);
+  window.fbLoadHeliumCalc = () => window.fbLoadSettingsDoc('heliumCalc');
+  window.fbSaveHeliumCalc = (data) => window.fbSaveSettingsDoc('heliumCalc', data);
 
   // Import Mapping Rules — the Mapping Layer's editable rule table (raw invoice item name →
   // production template), seeded from RECIPES.display so existing invoices keep matching
   // exactly as before this became editable. Business-wide reference data, like Formulas.
-  const importMappingDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'importMappingRules');
-  window.fbLoadImportMappingRules = () => getDoc(importMappingDocRef);
-  window.fbSaveImportMappingRules = (data) => setDoc(importMappingDocRef, data);
+  window.fbLoadImportMappingRules = () => window.fbLoadSettingsDoc('importMappingRules');
+  window.fbSaveImportMappingRules = (data) => window.fbSaveSettingsDoc('importMappingRules', data);
 
   // Import Review — "Save Draft" persists the in-progress review here so it survives a reload
-  // or a trip to another screen; cleared (set to null) once "Approve Import" runs.
-  const importReviewDraftDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'importReviewDraft');
-  window.fbLoadImportReviewDraft = () => getDoc(importReviewDraftDocRef);
-  window.fbSaveImportReviewDraft = (data) => setDoc(importReviewDraftDocRef, data);
+  // or a trip to another screen; cleared (set to null) once "Approve Import" runs. Not really
+  // configuration (it's a transient operational draft), just parked in the settings/ bucket
+  // for convenience since it's a single shared doc like everything else here.
+  window.fbLoadImportReviewDraft = () => window.fbLoadSettingsDoc('importReviewDraft');
+  window.fbSaveImportReviewDraft = (data) => window.fbSaveSettingsDoc('importReviewDraft', data);
 
   // Custom production templates created from the Import Review screen ("Create new template")
   // — appended to RECIPES at runtime; persisted here so they survive a reload.
-  const customTemplatesDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'customProductionTemplates');
-  window.fbLoadCustomProductionTemplates = () => getDoc(customTemplatesDocRef);
-  window.fbSaveCustomProductionTemplates = (data) => setDoc(customTemplatesDocRef, data);
+  window.fbLoadCustomProductionTemplates = () => window.fbLoadSettingsDoc('customProductionTemplates');
+  window.fbSaveCustomProductionTemplates = (data) => window.fbSaveSettingsDoc('customProductionTemplates', data);
 
   // Color Library — the single source of truth for "colors this business actually uses",
   // referenced by Inventory (stock levels) and searched by every color autocomplete in the app.
-  const colorLibraryDocRef = doc(db, 'businesses', BUSINESS_ID, 'settings', 'colorLibrary');
-  window.fbLoadColorLibrary = () => getDoc(colorLibraryDocRef);
-  window.fbSaveColorLibrary = (data) => setDoc(colorLibraryDocRef, data);
+  window.fbLoadColorLibrary = () => window.fbLoadSettingsDoc('colorLibrary');
+  window.fbSaveColorLibrary = (data) => window.fbSaveSettingsDoc('colorLibrary', data);
+
+  // Delivery Calculator's pricing defaults (mpg, gas, rate, profit, multipliers) — previously
+  // localStorage-only (per-device); now a shared doc like every other business default.
+  window.fbLoadDeliveryDefaults = () => window.fbLoadSettingsDoc('deliveryDefaults');
+  window.fbSaveDeliveryDefaults = (data) => window.fbSaveSettingsDoc('deliveryDefaults', data);
+
+  // Letter Styling Calculator's pricing (price per ft, price per foil letter) — previously had
+  // no persistence at all and reset to hardcoded defaults on every page load.
+  window.fbLoadLetterStyling = () => window.fbLoadSettingsDoc('letterStyling');
+  window.fbSaveLetterStyling = (data) => window.fbSaveSettingsDoc('letterStyling', data);
+
+  // Team members allowed to sign in — previously a hardcoded array in this script block itself;
+  // now editable business data, though the allowlist check at sign-in still reads it as loaded
+  // here (see handleAuthStateChanged).
+  window.fbLoadTeamMembers = () => window.fbLoadSettingsDoc('teamMembers');
+  window.fbSaveTeamMembers = (data) => window.fbSaveSettingsDoc('teamMembers', data);
+
+  // Job Attachments' category list — previously in-memory only despite being declared `let` in
+  // anticipation of editability.
+  window.fbLoadAttachmentCategories = () => window.fbLoadSettingsDoc('attachmentCategories');
+  window.fbSaveAttachmentCategories = (data) => window.fbSaveSettingsDoc('attachmentCategories', data);
 
   // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
   // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
@@ -923,7 +947,7 @@
       <h1 id="topbar-title">Balloon Business Toolkit</h1>
       <span class="app-mode-badge">Admin</span>
     </div>
-    <button class="icon-btn" id="topbar-gear" onclick="showView('settings')" aria-label="Settings" style="display:none">
+    <button class="icon-btn" id="topbar-gear" onclick="settingsShowHome(); showView('settings')" aria-label="Settings" style="display:none">
       <i class="fa-solid fa-gear"></i>
     </button>
   </div>
@@ -1366,148 +1390,158 @@
   <div class="view" id="view-settings">
 
     <div class="settings-back">
-      <button class="icon-btn" onclick="goBack()" aria-label="Back">
+      <button class="icon-btn" onclick="settingsBack()" aria-label="Back">
         <i class="fa-solid fa-arrow-left"></i>
       </button>
-      <span>Settings</span>
+      <span id="settings-header-title">Settings</span>
+    </div>
+
+    <!-- SETTINGS HOME — one tile per group (SETTINGS_GROUPS), populated by settingsRenderSections().
+         Tapping a tile calls settingsShowGroup() to reveal just that group's panel below. -->
+    <div id="settings-home-grid">
+      <div class="tool-grid" id="settings-home-grid-inner"></div>
     </div>
 
     <!-- ACCOUNT -->
-    <div class="section-label" style="margin-top:0">Account</div>
-    <div class="card">
-      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Signed in as <span id="settings-account-email" style="font-weight:600; color:var(--text);"></span></div>
-      <button class="save-btn" onclick="handleSignOutClick()">Sign out</button>
-    </div>
-
-    <!-- ADMIN PASSCODE -->
-    <div class="section-label">Admin passcode</div>
-    <div class="card">
-      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Shared team passcode that unlocks every business-configuration section below (Import Mappings, Color Library, Material Catalog, Production Templates) plus price/balloons-per-bag/par in Inventory — keeps those "set and forget" numbers from getting bumped by accident during routine day-to-day use.</div>
-      <div class="settings-field" style="margin-bottom:0">
-        <label>Passcode</label>
-        <input type="text" id="set-admin-passcode" placeholder="e.g. 1886">
-      </div>
-      <button class="save-btn" onclick="saveAdminPasscode()">Save passcode</button>
-      <div class="saved-msg" id="admin-passcode-saved-msg"></div>
-    </div>
-
-    <!-- BUSINESS CONFIGURATION — each of these sections renders its own collapsible header,
-         so no outer section-label wrapper is needed here (matches the pattern already used by
-         Production Templates below). -->
-    <div id="im-root"></div>
-    <div id="cl-settings-root"></div>
-    <div id="jcc-catalog-settings-root"></div>
-    <div id="pt-root"></div>
-
-    <div class="section-label">Calculator Defaults — Balloon math</div>
-    <div id="fr-formulas-root"></div>
-
-    <!-- BASIC SETTINGS -->
-    <div class="section-label">Vehicle & fuel</div>
-    <div class="card">
-      <div class="settings-field">
-        <label>Fuel efficiency (MPG)</label>
-        <input type="number" id="set-mpg" placeholder="14" inputmode="decimal">
-      </div>
-      <div class="settings-field">
-        <label>Gas price per gallon ($)</label>
-        <input type="number" id="set-gas" placeholder="4.25" step="0.01" inputmode="decimal">
-      </div>
-      <div class="settings-field">
-        <label>Vehicle cost per mile ($)</label>
-        <input type="number" id="set-cpm" placeholder="0.20" step="0.01" inputmode="decimal">
-        <div class="hint">Wear and depreciation only — fuel is calculated separately above</div>
+    <div class="settings-group-panel" data-settings-group="account" style="display:none">
+      <div class="section-label" style="margin-top:0">Account</div>
+      <div class="card">
+        <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Signed in as <span id="settings-account-email" style="font-weight:600; color:var(--text);"></span></div>
+        <button class="save-btn" onclick="handleSignOutClick()">Sign out</button>
       </div>
     </div>
 
-    <div class="section-label">Labor</div>
-    <div class="card">
-      <div class="settings-field">
-        <label>Staff hourly rate ($)</label>
-        <input type="number" id="set-rate" placeholder="35.00" step="0.01" inputmode="decimal">
-      </div>
-      <div class="settings-field">
-        <label>Profit margin (%)</label>
-        <input type="number" id="set-profit" placeholder="20" inputmode="decimal">
-        <div class="hint">Applied to all costs. Override travel and on-site rates separately in Advanced settings.</div>
+    <!-- PEOPLE & ACCESS — Admin passcode (static) + Team Members (injected by settingsRenderSections) -->
+    <div class="settings-group-panel" data-settings-group="people" style="display:none">
+      <div class="section-label" style="margin-top:0">Admin passcode</div>
+      <div class="card">
+        <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Shared team passcode that unlocks every business-configuration section (Import Mappings, Color Library, Material Catalog, Production Templates) plus price/balloons-per-bag/par in Inventory — keeps those "set and forget" numbers from getting bumped by accident during routine day-to-day use.</div>
+        <div class="settings-field" style="margin-bottom:0">
+          <label>Passcode</label>
+          <input type="text" id="set-admin-passcode" placeholder="e.g. 1886">
+        </div>
+        <button class="save-btn" onclick="saveAdminPasscode()">Save passcode</button>
+        <div class="saved-msg" id="admin-passcode-saved-msg"></div>
       </div>
     </div>
 
-    <!-- ADVANCED SETTINGS -->
-    <button class="adv-toggle" id="adv-toggle-btn" onclick="toggleAdvanced()">
-      <span><i class="fa-solid fa-sliders" style="margin-right:9px"></i>Advanced settings</span>
-      <i class="fa-solid fa-chevron-down chevron"></i>
-    </button>
+    <!-- Fully registry-driven group panels — settingsRenderSections() injects each
+         SETTINGS_SECTIONS entry's container into the matching panel below. -->
+    <div class="settings-group-panel" data-settings-group="catalogs" style="display:none"></div>
+    <div class="settings-group-panel" data-settings-group="templatesFormulas" style="display:none"></div>
+    <div class="settings-group-panel" data-settings-group="importMapping" style="display:none"></div>
+    <div class="settings-group-panel" data-settings-group="attachments" style="display:none"></div>
 
-    <div class="adv-panel" id="adv-panel">
-
-      <div class="section-label">Separate profit margins</div>
+    <!-- PRICING & CALCULATORS — Delivery Calculator's defaults (static, unchanged from before
+         the grouped-navigation redesign). Letter Styling's own pricing stays edited from that
+         calculator screen directly, same as Job Cost Calculator's Quick Add Reference. -->
+    <div class="settings-group-panel" data-settings-group="pricing" style="display:none">
+      <div class="section-label" style="margin-top:0">Vehicle & fuel</div>
       <div class="card">
         <div class="settings-field">
-          <label>Travel profit margin (%)</label>
-          <input type="number" id="set-travel-profit" placeholder="Leave blank to use general margin" step="1" inputmode="decimal">
-          <div class="hint">Overrides general margin for gas, wear, and drive time.</div>
+          <label>Fuel efficiency (MPG)</label>
+          <input type="number" id="set-mpg" placeholder="14" inputmode="decimal">
         </div>
         <div class="settings-field">
-          <label>On-site labor profit margin (%)</label>
-          <input type="number" id="set-onsite-profit" placeholder="Leave blank to use general margin" step="1" inputmode="decimal">
-          <div class="hint">Overrides general margin for on-site installation and strike time.</div>
+          <label>Gas price per gallon ($)</label>
+          <input type="number" id="set-gas" placeholder="4.25" step="0.01" inputmode="decimal">
+        </div>
+        <div class="settings-field">
+          <label>Vehicle cost per mile ($)</label>
+          <input type="number" id="set-cpm" placeholder="0.20" step="0.01" inputmode="decimal">
+          <div class="hint">Wear and depreciation only — fuel is calculated separately above</div>
         </div>
       </div>
 
-      <div class="section-label">Price modifiers</div>
+      <div class="section-label">Labor</div>
       <div class="card">
         <div class="settings-field">
-          <label>Rush hour multiplier</label>
-          <input type="number" id="set-rush" placeholder="1.25" step="0.05" inputmode="decimal">
+          <label>Staff hourly rate ($)</label>
+          <input type="number" id="set-rate" placeholder="35.00" step="0.01" inputmode="decimal">
         </div>
         <div class="settings-field">
-          <label>Outside standard hours multiplier</label>
-          <input type="number" id="set-osh" placeholder="1.60" step="0.05" inputmode="decimal">
-        </div>
-        <div class="settings-field">
-          <label>Holiday multiplier</label>
-          <input type="number" id="set-hol" placeholder="2.00" step="0.05" inputmode="decimal">
+          <label>Profit margin (%)</label>
+          <input type="number" id="set-profit" placeholder="20" inputmode="decimal">
+          <div class="hint">Applied to all costs. Override travel and on-site rates separately in Advanced settings.</div>
         </div>
       </div>
 
-      <div class="section-label">Vehicle cost per mile calculator</div>
-      <div class="card">
-        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:0.875rem;line-height:1.5">
-          Not sure what to put for vehicle cost per mile? Enter your vehicle details and we'll calculate it.
-        </p>
-        <div class="settings-field">
-          <label>Vehicle purchase price ($)</label>
-          <input type="number" id="cpm-purchase" placeholder="28000" inputmode="decimal" oninput="calcCPM()">
-        </div>
-        <div class="settings-field">
-          <label>Estimated resale value ($)</label>
-          <input type="number" id="cpm-resale" placeholder="0" inputmode="decimal" oninput="calcCPM()">
-        </div>
-        <div class="settings-field">
-          <label>Expected lifetime miles</label>
-          <input type="number" id="cpm-miles" placeholder="250000" inputmode="decimal" oninput="calcCPM()">
-        </div>
-        <div class="settings-field">
-          <label>Estimated lifetime repairs ($)</label>
-          <input type="number" id="cpm-repairs" placeholder="22000" inputmode="decimal" oninput="calcCPM()">
-        </div>
-        <div class="cpm-result-box" id="cpm-result-area" style="display:none">
-          <div class="cpm-result-title">Your estimated cost per mile</div>
-          <div class="cpm-result-main">
-            <span class="cpm-result-val" id="cpm-result-val">—</span>
-            <button class="apply-btn" onclick="applyCPM()">Apply to settings</button>
+      <!-- ADVANCED SETTINGS -->
+      <button class="adv-toggle" id="adv-toggle-btn" onclick="toggleAdvanced()">
+        <span><i class="fa-solid fa-sliders" style="margin-right:9px"></i>Advanced settings</span>
+        <i class="fa-solid fa-chevron-down chevron"></i>
+      </button>
+
+      <div class="adv-panel" id="adv-panel">
+
+        <div class="section-label">Separate profit margins</div>
+        <div class="card">
+          <div class="settings-field">
+            <label>Travel profit margin (%)</label>
+            <input type="number" id="set-travel-profit" placeholder="Leave blank to use general margin" step="1" inputmode="decimal">
+            <div class="hint">Overrides general margin for gas, wear, and drive time.</div>
           </div>
-          <div class="cpm-formula">(purchase − resale + repairs) ÷ lifetime miles</div>
+          <div class="settings-field">
+            <label>On-site labor profit margin (%)</label>
+            <input type="number" id="set-onsite-profit" placeholder="Leave blank to use general margin" step="1" inputmode="decimal">
+            <div class="hint">Overrides general margin for on-site installation and strike time.</div>
+          </div>
         </div>
-      </div>
 
-    </div><!-- end adv-panel -->
+        <div class="section-label">Price modifiers</div>
+        <div class="card">
+          <div class="settings-field">
+            <label>Rush hour multiplier</label>
+            <input type="number" id="set-rush" placeholder="1.25" step="0.05" inputmode="decimal">
+          </div>
+          <div class="settings-field">
+            <label>Outside standard hours multiplier</label>
+            <input type="number" id="set-osh" placeholder="1.60" step="0.05" inputmode="decimal">
+          </div>
+          <div class="settings-field">
+            <label>Holiday multiplier</label>
+            <input type="number" id="set-hol" placeholder="2.00" step="0.05" inputmode="decimal">
+          </div>
+        </div>
 
-    <button class="save-btn" onclick="saveSettings()">
-      <i class="fa-solid fa-floppy-disk" style="margin-right:7px"></i>Save defaults
-    </button>
-    <div class="saved-msg" id="saved-msg"></div>
+        <div class="section-label">Vehicle cost per mile calculator</div>
+        <div class="card">
+          <p style="font-size:13px;color:var(--text-secondary);margin-bottom:0.875rem;line-height:1.5">
+            Not sure what to put for vehicle cost per mile? Enter your vehicle details and we'll calculate it.
+          </p>
+          <div class="settings-field">
+            <label>Vehicle purchase price ($)</label>
+            <input type="number" id="cpm-purchase" placeholder="28000" inputmode="decimal" oninput="calcCPM()">
+          </div>
+          <div class="settings-field">
+            <label>Estimated resale value ($)</label>
+            <input type="number" id="cpm-resale" placeholder="0" inputmode="decimal" oninput="calcCPM()">
+          </div>
+          <div class="settings-field">
+            <label>Expected lifetime miles</label>
+            <input type="number" id="cpm-miles" placeholder="250000" inputmode="decimal" oninput="calcCPM()">
+          </div>
+          <div class="settings-field">
+            <label>Estimated lifetime repairs ($)</label>
+            <input type="number" id="cpm-repairs" placeholder="22000" inputmode="decimal" oninput="calcCPM()">
+          </div>
+          <div class="cpm-result-box" id="cpm-result-area" style="display:none">
+            <div class="cpm-result-title">Your estimated cost per mile</div>
+            <div class="cpm-result-main">
+              <span class="cpm-result-val" id="cpm-result-val">—</span>
+              <button class="apply-btn" onclick="applyCPM()">Apply to settings</button>
+            </div>
+            <div class="cpm-formula">(purchase − resale + repairs) ÷ lifetime miles</div>
+          </div>
+        </div>
+
+      </div><!-- end adv-panel -->
+
+      <button class="save-btn" onclick="saveSettings()">
+        <i class="fa-solid fa-floppy-disk" style="margin-right:7px"></i>Save defaults
+      </button>
+      <div class="saved-msg" id="saved-msg"></div>
+    </div>
 
   </div><!-- end view-settings -->
 
@@ -1522,9 +1556,9 @@ const DEFAULTS = {
 };
 let S = {};
 
-function loadSettings() {
-  try { S = JSON.parse(localStorage.getItem('bdc_v3_settings') || '{}'); } catch(e) { S = {}; }
-  S = Object.assign({}, DEFAULTS, S);
+// Pushes S into the form fields — split out so both the immediate (DEFAULTS-only) first paint
+// and the async Firestore refresh below can reuse it instead of duplicating the 9 field writes.
+function applySettingsToForm() {
   document.getElementById('set-mpg').value = S.mpg;
   document.getElementById('set-gas').value = S.gas;
   document.getElementById('set-cpm').value = S.cpm;
@@ -1536,6 +1570,23 @@ function loadSettings() {
   document.getElementById('set-osh').value = S.osh;
   document.getElementById('set-hol').value = S.hol;
   updateMultLabels();
+}
+
+// Renders immediately from DEFAULTS (Firestore reads are async, same pattern used everywhere
+// else in the app) then refreshes once the shared business doc actually arrives. Previously
+// read from localStorage — per-device, not shared — which was the one part of "Settings" that
+// didn't actually behave like shared business configuration.
+function loadSettings() {
+  S = Object.assign({}, DEFAULTS);
+  applySettingsToForm();
+
+  window.fbLoadDeliveryDefaults().then(snap => {
+    if (snap.exists()) {
+      S = Object.assign({}, DEFAULTS, snap.data());
+      applySettingsToForm();
+      calc(); // in case Delivery Calculator was already showing stale defaults
+    }
+  }).catch(err => console.error('Delivery defaults load failed:', err));
 }
 
 function saveSettings() {
@@ -1551,12 +1602,16 @@ function saveSettings() {
   const op = document.getElementById('set-onsite-profit').value;
   S.travelProfit = tp !== '' ? parseFloat(tp) : null;
   S.onsiteProfit = op !== '' ? parseFloat(op) : null;
-  try { localStorage.setItem('bdc_v3_settings', JSON.stringify(S)); } catch(e) {}
   updateMultLabels();
   calc();
   const msg = document.getElementById('saved-msg');
-  msg.textContent = '✓ Defaults saved to this device';
-  setTimeout(() => msg.textContent = '', 2500);
+  window.fbSaveDeliveryDefaults(S).then(() => {
+    msg.textContent = '✓ Saved — shared with the whole team';
+    setTimeout(() => msg.textContent = '', 2500);
+  }).catch(err => {
+    console.error('Delivery defaults save failed:', err);
+    msg.textContent = "Couldn't save — check your connection and try again.";
+  });
 }
 
 function effectiveMargin(type) {
@@ -1765,6 +1820,84 @@ const TOOL_META = {
   importReview:{ title: 'Review Import',                icon: 'fa-solid fa-clipboard-check',     showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
 };
+
+// Every business-configuration section that lives in Settings, registered once instead of
+// hand-maintained as HTML — adding a new section going forward means adding an entry here, not
+// editing view-settings' markup. `group` drives the grouped Settings navigation below (each
+// group is a tile on the Settings home grid; picking one drills into just that group's panel).
+// Deliberately NOT responsible for each domain's actual data init (imInit, clInit, ptInit,
+// frInit, jccInit) — those stay called from bootApp() exactly as before, since RECIPES,
+// COLOR_LIBRARY, FORMULAS etc. are read by operational screens too, not just by Settings.
+const SETTINGS_SECTIONS = [
+  { id: 'teamMembers', label: 'Team Members', group: 'people', containerId: 'tm-settings-root' },
+  { id: 'importMappings', label: 'Import Mapping Rules', group: 'importMapping', containerId: 'im-root' },
+  { id: 'colorLibrary', label: 'Color Library', group: 'catalogs', containerId: 'cl-settings-root' },
+  { id: 'materialCatalog', label: 'Material Catalog', group: 'catalogs', containerId: 'jcc-catalog-settings-root' },
+  { id: 'heliumReference', label: 'Helium Cost Reference', group: 'catalogs', containerId: 'he-settings-root' },
+  { id: 'productionTemplates', label: 'Production Templates', group: 'templatesFormulas', containerId: 'pt-root' },
+  { id: 'balloonMath', label: 'Calculator Defaults — Balloon math', group: 'templatesFormulas', containerId: 'fr-formulas-root', standaloneLabel: true },
+  { id: 'attachmentCategories', label: 'Attachment Categories', group: 'attachments', containerId: 'ac-settings-root' },
+];
+
+// Every group shown as its own tile on the Settings home grid — 'account' and 'pricing' hold
+// content that's still static HTML (not registry-driven, see settings-group-panel markup),
+// the rest are populated purely from SETTINGS_SECTIONS above.
+const SETTINGS_GROUPS = [
+  { id: 'account', label: 'Account', icon: 'fa-solid fa-user' },
+  { id: 'people', label: 'People & Access', icon: 'fa-solid fa-users' },
+  { id: 'catalogs', label: 'Catalogs & Libraries', icon: 'fa-solid fa-swatchbook' },
+  { id: 'templatesFormulas', label: 'Templates & Formulas', icon: 'fa-solid fa-shapes' },
+  { id: 'importMapping', label: 'Import & Mapping', icon: 'fa-solid fa-file-import' },
+  { id: 'pricing', label: 'Pricing & Calculators', icon: 'fa-solid fa-calculator' },
+  { id: 'attachments', label: 'Attachments', icon: 'fa-solid fa-paperclip' },
+];
+
+// Builds the Settings home grid (one tile per group) and slots each registered section's
+// container into its group's panel — must run before any section's own render call (first line
+// of bootApp()) since those look up their container by getElementById rather than creating it.
+function settingsRenderSections() {
+  const grid = document.getElementById('settings-home-grid-inner');
+  if (grid) {
+    grid.innerHTML = SETTINGS_GROUPS.map(g => `
+      <div class="tool-tile" onclick="settingsShowGroup('${g.id}')">
+        <div class="tool-tile-icon"><i class="${g.icon}"></i></div>
+        <div class="tool-tile-title">${psEscape(g.label)}</div>
+      </div>`).join('');
+  }
+  SETTINGS_SECTIONS.forEach(s => {
+    const panel = document.querySelector(`[data-settings-group="${s.group}"]`);
+    if (!panel) return;
+    panel.insertAdjacentHTML('beforeend',
+      (s.standaloneLabel ? `<div class="section-label">${psEscape(s.label)}</div>` : '') +
+      `<div id="${s.containerId}"></div>`);
+  });
+}
+
+// Settings is one view internally split into a home grid and per-group panels — drilling into
+// a group and backing out of it is a local show/hide, not real view routing, so the rest of the
+// app (lastToolView, goBack()) doesn't need to know Settings has sub-screens at all.
+let settingsCurrentGroup = null;
+function settingsShowGroup(groupId) {
+  settingsCurrentGroup = groupId;
+  document.getElementById('settings-home-grid').style.display = 'none';
+  document.querySelectorAll('.settings-group-panel').forEach(el => el.style.display = 'none');
+  const panel = document.querySelector(`[data-settings-group="${groupId}"]`);
+  if (panel) panel.style.display = 'block';
+  const group = SETTINGS_GROUPS.find(g => g.id === groupId);
+  document.getElementById('settings-header-title').textContent = group ? group.label : 'Settings';
+}
+function settingsShowHome() {
+  settingsCurrentGroup = null;
+  document.getElementById('settings-home-grid').style.display = '';
+  document.querySelectorAll('.settings-group-panel').forEach(el => el.style.display = 'none');
+  document.getElementById('settings-header-title').textContent = 'Settings';
+}
+// The back arrow backs out of a group into Settings' own home grid first, and only leaves
+// Settings entirely (via the existing goBack()) once already at that home grid.
+function settingsBack() {
+  if (settingsCurrentGroup) { settingsShowHome(); return; }
+  goBack();
+}
 
 // Remembers the last tool screen (not settings) so Settings' back button returns to whichever
 // screen opened it. Defaults to 'home' since the Home view is active from a fresh page load
@@ -2163,7 +2296,87 @@ function psNewLineItemId() {
 // `let` (not const) so the category list can grow later without a data-model change; a plain
 // object per attachment means future fields (comments, versions, approvals) are just new keys,
 // not a schema migration.
-let ATTACHMENT_CATEGORIES = ['Color Palette', 'Inspiration Photo', 'Mockup', 'Venue / Install Reference', 'Floor Plan', 'Other'];
+const ATTACHMENT_CATEGORIES_DEFAULTS = ['Color Palette', 'Inspiration Photo', 'Mockup', 'Venue / Install Reference', 'Floor Plan', 'Other'];
+let ATTACHMENT_CATEGORIES = [...ATTACHMENT_CATEGORIES_DEFAULTS];
+
+// Now genuinely business-editable (Settings → Attachments) instead of just declared `let` in
+// anticipation of it — same load-then-render, admin-gated pattern as every other catalog here.
+function acInit() {
+  acRenderShell();
+  window.fbLoadAttachmentCategories().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().categories) && snap.data().categories.length > 0) {
+      ATTACHMENT_CATEGORIES = snap.data().categories;
+      acRenderShell();
+    }
+  }).catch(err => console.error('Attachment categories load failed:', err));
+}
+function acSave() {
+  window.fbSaveAttachmentCategories({ categories: ATTACHMENT_CATEGORIES }).catch(err => console.error('Attachment categories save failed:', err));
+}
+let acCollapsed = true;
+function acToggleCollapsed() {
+  acCollapsed = !acCollapsed;
+  acRenderShell();
+}
+function acRenderShell() {
+  const root = document.getElementById('ac-settings-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="acToggleCollapsed()">
+      <span>Attachment Categories</span>
+      <i class="fa-solid fa-chevron-${acCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
+    </div>
+    ${acCollapsed ? '' : `
+    <div class="card" style="margin-bottom:0.75rem;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Categories unlocked' : 'Categories locked'}</div>
+        ${invAdminUnlocked
+          ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="acLockAdmin()">Lock</button>`
+          : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="acUnlockAdmin()">Unlock</button>`}
+      </div>
+      <div id="ac-list"></div>
+      ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="acAddCategory()"><i class="fa-solid fa-plus"></i> Add category</button>` : ''}
+    </div>`}
+  `;
+  acRenderList();
+}
+function acUnlockAdmin() {
+  const entered = prompt('Enter the admin passcode to edit attachment categories:');
+  if (entered === null) return;
+  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; settingsRefreshAdminSections(); }
+  else alert('Incorrect passcode.');
+}
+function acLockAdmin() {
+  invAdminUnlocked = false;
+  settingsRefreshAdminSections();
+}
+function acRenderList() {
+  const container = document.getElementById('ac-list');
+  if (!container) return;
+  container.innerHTML = ATTACHMENT_CATEGORIES.map((c, idx) => `
+    <div style="display:flex; gap:6px; margin-bottom:0.5rem;">
+      <input type="text" style="flex:1;" value="${invAttr(c)}" ${invAdminUnlocked ? '' : 'disabled'} onchange="acUpdateCategory(${idx}, this.value)">
+      ${invAdminUnlocked ? `<button class="icon-btn" style="padding:4px;" onclick="acRemoveCategory(${idx})" aria-label="Remove category"><i class="fa-solid fa-trash"></i></button>` : ''}
+    </div>
+  `).join('');
+}
+function acUpdateCategory(idx, value) {
+  if (!value.trim()) return;
+  ATTACHMENT_CATEGORIES[idx] = value.trim();
+  acSave();
+}
+function acAddCategory() {
+  ATTACHMENT_CATEGORIES.push('New category');
+  acRenderList();
+  acSave();
+}
+function acRemoveCategory(idx) {
+  if (ATTACHMENT_CATEGORIES.length <= 1) { alert('Keep at least one category.'); return; }
+  if (!confirm('Remove this category? Attachments already using it keep the name as plain text.')) return;
+  ATTACHMENT_CATEGORIES.splice(idx, 1);
+  acRenderList();
+  acSave();
+}
 
 function psNewAttachmentId() {
   return 'att_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -4395,7 +4608,111 @@ function settingsRefreshAdminSections() {
   clRenderSettingsSection();
   jccRenderCatalogSettingsSection();
   ptRenderShell();
+  tmRenderShell();
+  acRenderShell();
+  heRenderSettingsSection();
+  heRenderShell();
   invRenderColorsList();
+}
+
+// ═══════════════════════════════════════ TEAM MEMBERS (People & Access) ═══════════════════════════════════════
+//
+// The business's own roster — who's on the team, used anywhere a person needs picking (Time
+// Tracker's "Your name" today; future features can read this the same way instead of keeping
+// their own free-text/parallel list). Deliberately NOT the sign-in allowlist: ALLOWED_EMAILS in
+// the Firebase-init script above still controls who can actually sign in, unchanged — editing
+// this roster doesn't grant or revoke app access, since that also requires a matching change to
+// Firestore's security rules (in the Firebase console, outside what this codebase can reach).
+// Seeded from today's real sign-in list so the starting roster isn't empty; names are inferred
+// from the email addresses and worth double-checking/editing here.
+const TEAM_MEMBERS_DEFAULTS = [
+  { name: 'Emily', email: 'emily@utahballooncreations.com' },
+  { name: 'Matthew', email: 'matthew@utahballooncreations.com' },
+  { name: 'Emily', email: 'emilyleavitt4@gmail.com' },
+  { name: 'Matthew', email: 'mbleavitt@gmail.com' },
+];
+let TEAM_MEMBERS = JSON.parse(JSON.stringify(TEAM_MEMBERS_DEFAULTS));
+
+function tmInit() {
+  tmRenderShell();
+  window.fbLoadTeamMembers().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().members)) {
+      TEAM_MEMBERS = snap.data().members;
+      tmRenderShell();
+      ttRenderTeamOptions(); // Time Tracker's name suggestions, if that screen is already up
+    }
+  }).catch(err => console.error('Team members load failed:', err));
+}
+function tmSave() {
+  window.fbSaveTeamMembers({ members: TEAM_MEMBERS }).catch(err => console.error('Team members save failed:', err));
+}
+
+let tmCollapsed = true;
+function tmToggleCollapsed() {
+  tmCollapsed = !tmCollapsed;
+  tmRenderShell();
+}
+function tmRenderShell() {
+  const root = document.getElementById('tm-settings-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="tmToggleCollapsed()">
+      <span>Team Members <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— the roster other features can pick from</span></span>
+      <i class="fa-solid fa-chevron-${tmCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
+    </div>
+    ${tmCollapsed ? '' : `
+    <div class="card" style="margin-bottom:0.75rem;">
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Doesn't control who can sign in to the app — that's a separate, developer-managed list.</div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Roster unlocked' : 'Roster locked'}</div>
+        ${invAdminUnlocked
+          ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="tmLockAdmin()">Lock</button>`
+          : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="tmUnlockAdmin()">Unlock</button>`}
+      </div>
+      <div id="tm-list"></div>
+      ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="tmAddMember()"><i class="fa-solid fa-plus"></i> Add team member</button>` : ''}
+    </div>`}
+  `;
+  tmRenderList();
+}
+function tmUnlockAdmin() {
+  const entered = prompt('Enter the admin passcode to edit team members:');
+  if (entered === null) return;
+  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; settingsRefreshAdminSections(); }
+  else alert('Incorrect passcode.');
+}
+function tmLockAdmin() {
+  invAdminUnlocked = false;
+  settingsRefreshAdminSections();
+}
+function tmRenderList() {
+  const container = document.getElementById('tm-list');
+  if (!container) return;
+  container.innerHTML = TEAM_MEMBERS.map((m, idx) => `
+    <div class="row" style="margin-bottom:0.6rem;">
+      <div class="settings-field" style="margin-bottom:0"><label>Name</label><input type="text" value="${invAttr(m.name)}" ${invAdminUnlocked ? '' : 'disabled'} onchange="tmUpdateMember(${idx},'name',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Email</label><input type="text" value="${invAttr(m.email)}" ${invAdminUnlocked ? '' : 'disabled'} onchange="tmUpdateMember(${idx},'email',this.value)"></div>
+    </div>
+    ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; margin:-0.4rem 0 0.6rem;" onclick="tmRemoveMember(${idx})"><i class="fa-solid fa-trash"></i> Remove</button>` : ''}
+  `).join('');
+}
+function tmUpdateMember(idx, field, value) {
+  if (!TEAM_MEMBERS[idx]) return;
+  TEAM_MEMBERS[idx][field] = value;
+  tmSave();
+  ttRenderTeamOptions();
+}
+function tmAddMember() {
+  TEAM_MEMBERS.push({ name: '', email: '' });
+  tmRenderList();
+  tmSave();
+}
+function tmRemoveMember(idx) {
+  if (!confirm('Remove this team member from the roster?')) return;
+  TEAM_MEMBERS.splice(idx, 1);
+  tmRenderList();
+  tmSave();
+  ttRenderTeamOptions();
 }
 
 function invLoadAdminLock() {
@@ -5501,13 +5818,33 @@ function invColorCardHtml(item, upcomingMap) {
 
 let letState = null;
 
+// Only pricePerFt/pricePerFoil are reusable business configuration — everything else in
+// letState (height, width, letter/digit counts, spaces) is a per-calculation input for
+// whatever job is currently being sized, the same way Delivery Calculator's own trip fields
+// (miles, hours) are live working state rather than part of its persisted S/DEFAULTS. Those
+// stay as plain in-memory defaults; only the two price fields get loaded from and saved to
+// Firestore, on blur (onchange) rather than every keystroke (oninput).
+const LETTER_PRICE_DEFAULTS = { pricePerFt: 29, pricePerFoil: 5 };
+
 function letInit() {
-  letState = {
-    height: 3, width: 2, pricePerFt: 29, pricePerFoil: 5,
+  letState = Object.assign({
+    height: 3, width: 2,
     singleCount: 3, singleSpaces: 0,
     doubleBottom: 9, doubleTop: 10, doubleSpaces: 0
-  };
+  }, LETTER_PRICE_DEFAULTS);
   letRenderShell();
+
+  window.fbLoadLetterStyling().then(snap => {
+    if (snap.exists()) {
+      Object.assign(letState, snap.data());
+      letRenderShell();
+    }
+  }).catch(err => console.error('Letter Styling pricing load failed:', err));
+}
+
+function letSavePricing() {
+  window.fbSaveLetterStyling({ pricePerFt: letState.pricePerFt, pricePerFoil: letState.pricePerFoil })
+    .catch(err => console.error('Letter Styling pricing save failed:', err));
 }
 
 // Shared per-style math: given the style's own framing/filler/raw-foil-count, works out
@@ -5589,8 +5926,8 @@ function letRenderShell() {
       </div>
       <div class="hint" style="margin:-0.5rem 0 0.75rem;">Letters and numbers are often different heights (e.g. 3 ft letters vs. 4 ft numbers) — just type in whatever applies to this job.</div>
       <div class="row">
-        <div class="settings-field" style="margin-bottom:0"><label>Price charged per foot ($)</label><input type="number" step="0.01" min="0" value="${s.pricePerFt}" oninput="letSetField('pricePerFt', this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0"><label>Price charged per foil ($)</label><input type="number" step="0.01" min="0" value="${s.pricePerFoil}" oninput="letSetField('pricePerFoil', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Price charged per foot ($)</label><input type="number" step="0.01" min="0" value="${s.pricePerFt}" oninput="letSetField('pricePerFt', this.value)" onchange="letSavePricing()"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Price charged per foil ($)</label><input type="number" step="0.01" min="0" value="${s.pricePerFoil}" oninput="letSetField('pricePerFoil', this.value)" onchange="letSavePricing()"></div>
       </div>
     </div>
 
@@ -6270,6 +6607,7 @@ function heAllItems() {
 function heInit() {
   HE_STATE = { tankCuFt: 292, tankCost: 359.99, rentalPerMonth: 45.00, deliveryFee: 16.99, hazmatFee: 7.99, taxPct: 7.45 };
   heRenderShell();
+  heRenderSettingsSection();
 
   window.fbLoadHeliumCalc().then(snap => {
     if (snap.exists()) {
@@ -6277,6 +6615,7 @@ function heInit() {
       if (d.tank) Object.assign(HE_STATE, d.tank);
       if (Array.isArray(d.sizes) && d.sizes.length > 0) HE_SIZES = d.sizes;
       heRenderShell();
+      heRenderSettingsSection();
     }
   }).catch(err => console.error('Helium calculator load failed:', err));
 }
@@ -6294,12 +6633,54 @@ function heTankInputRow(label, field, step, prefix, suffix) {
   return `<div class="jcc-summary-row"><span>${label}</span><b>${prefix}${val}${suffix}</b></div>`;
 }
 
+// The operational Helium Cost Calculator screen — unlike Job Cost Calculator (its own per-job
+// builder sits above the reusable Material Catalog), Helium has no separate per-job inputs at
+// all; the whole thing IS the tank/size reference. So instead of leaving an empty screen behind
+// when the editable half moves to Settings, this becomes a read-only quick-lookup (today's
+// cost per cu ft and per balloon/shape) — the daily-operations half of the same split Color
+// Library and Material Catalog already went through, just with a from-scratch read-only view
+// instead of an existing operational sub-section to keep unchanged.
 function heRenderShell() {
   const root = document.getElementById('he-root');
   if (!root) return;
   const t = heComputeTotals();
+  const readOnlyList = (category) => {
+    const items = HE_SIZES.filter(i => i.category === category);
+    if (items.length === 0) return `<div style="text-align:center; color:var(--text-secondary); padding:6px 0;">None yet.</div>`;
+    return items.map(item => `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:0.5px solid var(--border);">
+      <div style="flex:1; font-size:13px;">${psEscape(item.name)}</div>
+      <div style="font-size:12px; color:var(--text-secondary); flex-shrink:0;">${item.capacity} cu ft</div>
+      <div style="width:56px; text-align:right; font-size:13px; font-weight:600; flex-shrink:0;">${jccFmtMoney(heSizeCost(item))}</div>
+    </div>`).join('');
+  };
   root.innerHTML = `
-    <div class="section-label" style="margin-top:0">Tank Economics</div>
+    <div class="section-label" style="margin-top:0">Cost per cubic foot</div>
+    <div class="card">
+      <div class="jcc-summary-row" style="font-size:15px;"><span>Current rate</span><b style="color:var(--accent);">${jccFmtMoney(t.costPerCuFt)}</b></div>
+    </div>
+
+    <div class="section-label">Latex Balloon Sizes</div>
+    <div class="card" style="margin-bottom:0.75rem;">${readOnlyList('latex')}</div>
+
+    <div class="section-label">Specialty Shapes</div>
+    <div class="card" style="margin-bottom:0.75rem;">${readOnlyList('specialty')}</div>
+
+    <div class="home-footer-note">Edit tank economics and sizes under Settings → Helium Cost Reference.</div>
+  `;
+}
+
+// ═══ Helium Cost Reference (Settings) — tank economics + size/shape capacities, the config
+// half of the split described above. Self-contained, matching every other Settings section. ═══
+function heRenderSettingsSection() {
+  const root = document.getElementById('he-settings-root');
+  if (!root) return;
+  const t = heComputeTotals();
+  root.innerHTML = `
+    <div class="section-label" style="margin-top:0; cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="heToggleCollapsed()">
+      <span>Helium Cost Reference <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— tank economics &amp; sizes</span></span>
+      <i class="fa-solid fa-chevron-${heCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
+    </div>
+    ${heCollapsed ? '' : `
     <div class="card">
       ${heTankInputRow('Tank capacity', 'tankCuFt', 1, '', ' cu ft')}
       ${heTankInputRow('Tank cost', 'tankCost', 0.01, '$', '')}
@@ -6330,7 +6711,7 @@ function heRenderShell() {
     <div class="card" style="margin-bottom:0.75rem;">
       ${heSizeListHtml('specialty')}
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="heAddSize('specialty')"><i class="fa-solid fa-plus"></i> Add shape</button>
-    </div>
+    </div>`}
   `;
 }
 
@@ -6357,8 +6738,16 @@ function heSizeRowHtml(item) {
   </div>`;
 }
 
+// Every edit below refreshes both halves — heRenderShell (the read-only operational lookup)
+// shows the same computed costs, so it needs to reflect a config change immediately too.
+let heCollapsed = true;
+function heToggleCollapsed() {
+  heCollapsed = !heCollapsed;
+  heRenderSettingsSection();
+}
 function heUpdateTankField(field, value) {
   HE_STATE[field] = parseFloat(value) || 0;
+  heRenderSettingsSection();
   heRenderShell();
   heSaveToFirestore();
 }
@@ -6366,16 +6755,19 @@ function heUpdateSizeField(id, field, value) {
   const item = HE_SIZES.find(i => i.id === id);
   if (!item) return;
   item[field] = field === 'name' ? (value.trim() || 'Untitled') : (parseFloat(value) || 0);
+  heRenderSettingsSection();
   heRenderShell();
   heSaveToFirestore();
 }
 function heAddSize(category) {
   HE_SIZES.push({ id: 'he-custom-' + (++heRowSeq), category, name: category === 'latex' ? 'New size' : 'New shape', capacity: 1 });
+  heRenderSettingsSection();
   heRenderShell();
   heSaveToFirestore();
 }
 function heRemoveSize(id) {
   HE_SIZES = HE_SIZES.filter(i => i.id !== id);
+  heRenderSettingsSection();
   heRenderShell();
   heSaveToFirestore();
 }
@@ -6384,14 +6776,14 @@ function heUnlockAdmin() {
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) {
     invAdminUnlocked = true;
-    heRenderShell();
+    settingsRefreshAdminSections();
   } else {
     alert('Incorrect passcode.');
   }
 }
 function heLockAdmin() {
   invAdminUnlocked = false;
-  heRenderShell();
+  settingsRefreshAdminSections();
 }
 
 // ═══════════════════════════════════════ TIME TRACKER VIEW ═══════════════════════════════════════
@@ -6460,6 +6852,11 @@ function ttToggleHideClockSection() {
   localStorage.setItem('tt_hideClock', ttHideClockSection ? '1' : '0');
   ttRenderShell();
 }
+// Called whenever Team Members changes (Settings) so the "Your name" datalist stays current —
+// no-ops if Time Tracker isn't the active screen, same as every other cross-screen refresh here.
+function ttRenderTeamOptions() {
+  ttRenderClockSection();
+}
 
 // ─── Clock In / Clock Out ────────────────────────────────────────────────────
 
@@ -6481,7 +6878,8 @@ function ttRenderClockSection() {
     <div class="card">
       <div class="settings-field" style="margin-bottom:${name ? '0.75rem' : '0'};">
         <label>Your name</label>
-        <input type="text" value="${invAttr(ttName)}" placeholder="Type your name" onchange="ttUpdateName(this.value)">
+        <input type="text" value="${invAttr(ttName)}" placeholder="Type your name" list="tt-team-names" onchange="ttUpdateName(this.value)">
+        <datalist id="tt-team-names">${[...new Set(TEAM_MEMBERS.map(m => m.name).filter(Boolean))].map(n => `<option value="${invAttr(n)}">`).join('')}</datalist>
       </div>
       ${!name ? '' : openEntry ? `
         <div style="text-align:center; font-size:13px; color:var(--text-secondary); margin-bottom:10px;">Clocked in since ${ttFormatTime(openEntry.clockInAt)}</div>
@@ -6848,6 +7246,8 @@ window.handleAuthStateChanged = handleAuthStateChanged;
 
 // Everything that used to run immediately on page load now waits until sign-in succeeds.
 function bootApp() {
+  // Builds Settings' section containers before anything below tries to render into one.
+  try { settingsRenderSections(); } catch (e) { console.error('settingsRenderSections failed:', e); }
   // Jobs is the most important shared feature, so it starts first and on its own —
   // nothing later in this function can block it from connecting.
   try { psStartJobsListener(); } catch (e) { console.error('Jobs listener failed to start:', e); }
@@ -6857,6 +7257,8 @@ function bootApp() {
   try { calc(); } catch (e) { console.error('calc failed:', e); }
   try { qcInit(); } catch (e) { console.error('qcInit failed:', e); }
   try { ptInit(); } catch (e) { console.error('ptInit failed:', e); }
+  try { tmInit(); } catch (e) { console.error('tmInit failed:', e); }
+  try { acInit(); } catch (e) { console.error('acInit failed:', e); }
   try { frInit(); } catch (e) { console.error('frInit failed:', e); }
   try { letInit(); } catch (e) { console.error('letInit failed:', e); }
   try { heInit(); } catch (e) { console.error('heInit failed:', e); }
