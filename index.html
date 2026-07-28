@@ -5038,6 +5038,7 @@ let clPickerBrand = 'Sempertex';
 let clPickerQuery = '';
 let clPickerSelected = new Set();
 let clCsvImportCollapsed = true;
+let clPickerExpandedId = null; // which "already have it" row's inline editor is open, if any
 
 function invTogglePendingCollapsed() {
   invPendingCollapsed = !invPendingCollapsed;
@@ -6156,6 +6157,33 @@ function clTogglePickerColor(color) {
   if (clPickerSelected.has(color)) clPickerSelected.delete(color); else clPickerSelected.add(color);
   clRenderPicker();
 }
+function clTogglePickerExpanded(id) {
+  clPickerExpandedId = (clPickerExpandedId === id) ? null : id;
+  clRenderPicker();
+}
+// Permanently removes one color from the Library and deletes its Inventory row, if any — the
+// "undo a wrong pick" counterpart to clClearLibraryAndInventory's wipe-everything. A single
+// item is much less catastrophic than the whole Library, so this uses a plain confirm() rather
+// than the type-DELETE prompt, but still requires the admin passcode like other catalog edits.
+function clRemoveColorFromLibrary(id) {
+  const entry = COLOR_LIBRARY.find(e => e.id === id);
+  if (!entry) return;
+  if (!invAdminUnlocked) {
+    const entered = prompt('Enter the admin passcode to remove a color:');
+    if (entered === null) return;
+    if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode — nothing removed.'); return; }
+  }
+  const stockedItems = INVENTORY_ITEMS.filter(i => i.colorId === id);
+  const label = `${entry.brand ? entry.brand + ' ' : ''}${entry.colorName}`;
+  const warning = stockedItems.length > 0 ? ` This also deletes its Inventory row and any stock recorded for it.` : '';
+  if (!confirm(`Remove "${label}" from your Color Library?${warning} This can't be undone.`)) return;
+
+  COLOR_LIBRARY = COLOR_LIBRARY.filter(e => e.id !== id);
+  clSaveLibrary();
+  stockedItems.forEach(item => window.fbDeleteInventoryItem(item.id).catch(err => console.error('Remove color: inventory delete failed', err)));
+  if (clPickerExpandedId === id) clPickerExpandedId = null;
+  clRenderSettingsSection();
+}
 // Selects (or clears) every currently-filtered, not-already-owned color at once — the "bulk"
 // half of bulk setup, since checking dozens of boxes one at a time defeats the point on desktop.
 function clSelectAllFiltered() {
@@ -6193,10 +6221,32 @@ function clRenderPicker() {
   matches.forEach(color => {
     const have = alreadyHave.has(color.toLowerCase());
     const checked = clPickerSelected.has(color);
-    html += `<label style="display:flex; align-items:center; gap:8px; padding:6px 2px; font-size:13px; ${have ? 'color:var(--text-tertiary);' : ''}">
-      <input type="checkbox" ${checked ? 'checked' : ''} ${have ? 'disabled' : ''} onchange="clTogglePickerColor('${color.replace(/'/g, "\\'")}')">
-      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${psEscape(color)}">${psEscape(color)}${have ? ' <span style="font-size:11px;">— have it</span>' : ''}</span>
-    </label>`;
+    if (have) {
+      // Already added — not a dead end: clicking it opens an inline editor (alias/archive,
+      // same controls as elsewhere in the Library) with a way to actually remove it, since
+      // "clear all" is too blunt for undoing one wrong pick.
+      const entry = clFindEntry(clPickerBrand, color);
+      const expanded = entry && clPickerExpandedId === entry.id;
+      html += `<div style="grid-column:${expanded ? '1 / -1' : 'auto'};">
+        <div style="display:flex; align-items:center; gap:8px; padding:6px 2px; font-size:13px; color:var(--text-tertiary); cursor:pointer;" onclick="${entry ? `clTogglePickerExpanded('${entry.id}')` : ''}">
+          <i class="fa-solid fa-check" style="width:14px; font-size:11px;"></i>
+          <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;" title="${psEscape(color)}">${psEscape(color)} <span style="font-size:11px;">— have it</span></span>
+          ${entry ? `<i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'}" style="font-size:10px;"></i>` : ''}
+        </div>
+        ${expanded ? `<div style="padding:0 2px 10px; border-bottom:0.5px solid var(--border); margin-bottom:6px;">
+          ${invAliasEditorHtml(entry.id)}
+          <div style="display:flex; gap:8px; margin-top:0.4rem;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="${entry.active === false ? `clRestore('${entry.id}')` : `clArchive('${entry.id}')`}; clRefreshAliasViews();"><i class="fa-solid fa-${entry.active === false ? 'eye' : 'eye-slash'}"></i> ${entry.active === false ? 'Reactivate' : 'Deactivate'}</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px; color:var(--warning-text);" onclick="clRemoveColorFromLibrary('${entry.id}')"><i class="fa-solid fa-trash"></i> Remove from Library</button>
+          </div>
+        </div>` : ''}
+      </div>`;
+    } else {
+      html += `<label style="display:flex; align-items:center; gap:8px; padding:6px 2px; font-size:13px;">
+        <input type="checkbox" ${checked ? 'checked' : ''} onchange="clTogglePickerColor('${color.replace(/'/g, "\\'")}')">
+        <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${psEscape(color)}">${psEscape(color)}</span>
+      </label>`;
+    }
   });
   if (matches.length === 0) html += `<div style="font-size:12px; color:var(--text-secondary);">No matching colors.</div>`;
   html += `</div>`;
