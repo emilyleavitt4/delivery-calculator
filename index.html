@@ -636,6 +636,7 @@
   .ps-status-in_progress { background: var(--accent-light); color: var(--accent); }
   .ps-status-waiting { background: var(--warning-bg); color: var(--warning-text); }
   .ps-status-completed { background: var(--accent); color: #fff; }
+  .ps-status-optional { background: transparent; color: var(--text-tertiary); border: 0.5px solid var(--border-strong); }
   .ps-staffstatus-open { background: var(--warning-bg); color: var(--warning-text); }
   .ps-staffstatus-scheduled { background: var(--accent); color: #fff; }
 
@@ -954,6 +955,17 @@
 
   <!-- ═══════════════════════════════════════ HOME VIEW -->
   <div class="view active" id="view-home">
+    <!-- Shown only while required setup is incomplete — see bsUpdateHomeBanner(). -->
+    <div class="card" id="bs-home-banner" style="display:none; margin-bottom:1rem; cursor:pointer;" onclick="showView('businessSetup')">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+        <div>
+          <div style="font-size:14px; font-weight:700;"><i class="fa-solid fa-list-check" style="color:var(--accent); margin-right:6px;"></i>Finish setting up your business</div>
+          <div id="bs-home-banner-detail" style="font-size:12px; color:var(--text-secondary); margin-top:2px;"></div>
+        </div>
+        <i class="fa-solid fa-chevron-right" style="color:var(--text-tertiary);"></i>
+      </div>
+    </div>
+
     <div class="section-label" style="margin-top:0">Your tools</div>
 
     <div class="tool-grid">
@@ -1386,6 +1398,11 @@
     <div id="tt-root"></div>
   </div><!-- end view-timetracker -->
 
+  <!-- ═══════════════════════════════════════ BUSINESS SETUP VIEW -->
+  <div class="view" id="view-businessSetup">
+    <div id="bs-root"></div>
+  </div><!-- end view-businessSetup -->
+
   <!-- ═══════════════════════════════════════ SETTINGS VIEW -->
   <div class="view" id="view-settings">
 
@@ -1399,6 +1416,13 @@
     <!-- SETTINGS HOME — one tile per group (SETTINGS_GROUPS), populated by settingsRenderSections().
          Tapping a tile calls settingsShowGroup() to reveal just that group's panel below. -->
     <div id="settings-home-grid">
+      <div class="card" style="cursor:pointer; margin-bottom:1rem;" onclick="showView('businessSetup')">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+          <div style="font-size:14px; font-weight:700;"><i class="fa-solid fa-list-check" style="color:var(--accent); margin-right:6px;"></i>Business Setup</div>
+          <i class="fa-solid fa-chevron-right" style="color:var(--text-tertiary);"></i>
+        </div>
+        <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">A guided walkthrough of the sections below — see what's configured and what's left.</div>
+      </div>
       <div class="tool-grid" id="settings-home-grid-inner"></div>
     </div>
 
@@ -1555,6 +1579,10 @@ const DEFAULTS = {
   rush: 1.25, osh: 1.6, hol: 2.0
 };
 let S = {};
+// True once settings/deliveryDefaults has actually been saved (loaded with real data, or saved
+// this session) — distinct from S just holding DEFAULTS because nothing's been saved yet. Read
+// by Business Setup's completion check; nowhere else.
+let deliveryDefaultsSaved = false;
 
 // Pushes S into the form fields — split out so both the immediate (DEFAULTS-only) first paint
 // and the async Firestore refresh below can reuse it instead of duplicating the 9 field writes.
@@ -1583,6 +1611,7 @@ function loadSettings() {
   window.fbLoadDeliveryDefaults().then(snap => {
     if (snap.exists()) {
       S = Object.assign({}, DEFAULTS, snap.data());
+      deliveryDefaultsSaved = true;
       applySettingsToForm();
       calc(); // in case Delivery Calculator was already showing stale defaults
     }
@@ -1606,6 +1635,7 @@ function saveSettings() {
   calc();
   const msg = document.getElementById('saved-msg');
   window.fbSaveDeliveryDefaults(S).then(() => {
+    deliveryDefaultsSaved = true;
     msg.textContent = '✓ Saved — shared with the whole team';
     setTimeout(() => msg.textContent = '', 2500);
   }).catch(err => {
@@ -1818,6 +1848,7 @@ const TOOL_META = {
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: true  },
   timetracker:{ title: 'Time Tracker',                  icon: 'fa-solid fa-clock',               showBack: true,  showGear: true  },
   importReview:{ title: 'Review Import',                icon: 'fa-solid fa-clipboard-check',     showBack: true,  showGear: false },
+  businessSetup:{ title: 'Business Setup',              icon: 'fa-solid fa-list-check',          showBack: true,  showGear: true  },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
 };
 
@@ -1903,6 +1934,233 @@ function settingsBack() {
 // screen opened it. Defaults to 'home' since the Home view is active from a fresh page load
 // without ever going through showView() itself (it starts with the "active" class in the HTML).
 let lastToolView = 'home';
+
+// ═══════════════════════════════════════ BUSINESS SETUP ═══════════════════════════════════════
+//
+// A guided layer OVER Settings, not a parallel system: every item here just points at an
+// existing Settings destination (or, for Letter Styling, the calculator screen that edits it
+// directly) and reads whatever the real business data already says. Nothing here is persisted —
+// status() always recomputes live from COLOR_LIBRARY/RECIPES/TEAM_MEMBERS/etc., so it can never
+// drift out of sync with Settings the way a separately-stored "setup progress" record could.
+//
+// destinationType is 'settingsGroup' (drills into that Settings group) or 'view' (Letter Styling
+// Pricing only — it has no Settings page of its own; it's edited on its calculator screen, same
+// as Job Cost Calculator's Quick Add Reference). comingLater items have neither and never count
+// toward progress — Business Information doesn't exist as a feature yet.
+const BUSINESS_SETUP_ITEMS = [
+  {
+    id: 'businessInfo', order: 0, comingLater: true, required: false,
+    label: 'Business Information',
+    description: 'Business name, contact details, and branding.',
+  },
+  {
+    id: 'teamMembers', order: 1, required: true,
+    label: 'Team Members',
+    description: "Who's on the team — used by Time Tracker today, and by future assignment features.",
+    destinationType: 'settingsGroup', destination: 'people',
+    status: () => {
+      const valid = TEAM_MEMBERS.filter(m => m.name && m.name.trim() && m.email && m.email.trim());
+      if (valid.length > 0) return { state: 'complete', count: valid.length };
+      if (TEAM_MEMBERS.length > 0) return { state: 'in_progress' }; // rows started but none filled in yet
+      return { state: 'not_started' };
+    },
+    countLabel: n => `${n} team member${n === 1 ? '' : 's'}`,
+  },
+  {
+    id: 'productionTemplates', order: 2, required: true,
+    label: 'Production Templates',
+    description: 'Build instructions, equipment, and pack lists for the items you build.',
+    destinationType: 'settingsGroup', destination: 'templatesFormulas',
+    status: () => {
+      // RECIPES always has 22 built-in entries, so "the list isn't empty" would always be true —
+      // completion instead means at least one has real build guidance beyond the bare balloon-
+      // count math every starter template ships with.
+      const customized = RECIPES.filter(t => t.buildInstructions || (t.equipmentList && t.equipmentList.length) || (t.packList && t.packList.length) || t.staffingRecommendation);
+      return customized.length > 0 ? { state: 'complete', count: customized.length } : { state: 'not_started' };
+    },
+    countLabel: n => `${n} customized template${n === 1 ? '' : 's'}`,
+  },
+  {
+    id: 'colorLibrary', order: 3, required: true,
+    label: 'Color Library',
+    description: 'The colors this business actually stocks.',
+    destinationType: 'settingsGroup', destination: 'catalogs',
+    status: () => {
+      if (INVENTORY_ITEMS.length === 0) return { state: 'not_started' };
+      const active = INVENTORY_ITEMS.filter(i => i.active !== false);
+      if (active.length === 0) return { state: 'needs_attention', count: 0 }; // stocked colors exist, all archived
+      return { state: 'complete', count: active.length };
+    },
+    countLabel: n => `${n} stocked color${n === 1 ? '' : 's'}`,
+  },
+  {
+    id: 'materialCatalog', order: 4, required: true,
+    label: 'Material Catalog',
+    description: 'Per-unit vendor costs for raw materials.',
+    destinationType: 'settingsGroup', destination: 'catalogs',
+    status: () => {
+      const priced = JCC_CATALOG.filter(i => i.costA != null || i.costB != null);
+      return priced.length > 0 ? { state: 'complete', count: priced.length } : { state: 'not_started' };
+    },
+    countLabel: n => `${n} priced material${n === 1 ? '' : 's'}`,
+  },
+  {
+    id: 'importMappings', order: 5, required: false,
+    label: 'Import Mapping Rules',
+    description: 'Matches invoice line items to production templates automatically.',
+    destinationType: 'settingsGroup', destination: 'importMapping',
+    status: () => ({ state: 'optional', count: IMPORT_MAPPING_RULES.length }), // auto-seeded from every template, so it already works before anyone touches it
+    countLabel: n => `${n} rule${n === 1 ? '' : 's'}`,
+  },
+  {
+    id: 'attachmentCategories', order: 6, required: false,
+    label: 'Attachment Categories',
+    description: 'Labels for job reference files like color palettes and floor plans.',
+    destinationType: 'settingsGroup', destination: 'attachments',
+    status: () => ({ state: 'optional', count: ATTACHMENT_CATEGORIES.length }), // ships with a usable default list
+    countLabel: n => `${n} categor${n === 1 ? 'y' : 'ies'}`,
+  },
+  {
+    id: 'deliveryDefaults', order: 7, required: true,
+    label: 'Delivery Defaults',
+    description: 'Fuel, vehicle cost, labor rate, and profit margin for the Delivery Calculator.',
+    destinationType: 'settingsGroup', destination: 'pricing',
+    status: () => ({ state: deliveryDefaultsSaved ? 'complete' : 'not_started' }),
+  },
+  {
+    id: 'letterStylingPricing', order: 8, required: false,
+    label: 'Letter Styling Pricing',
+    description: 'Price per foot and per foil letter.',
+    destinationType: 'view', destination: 'letters',
+    status: () => ({ state: letterStylingSaved ? 'complete' : 'optional' }),
+  },
+  {
+    id: 'heliumReference', order: 9, required: false,
+    label: 'Helium Cost Reference',
+    description: 'Tank economics and per-size helium costs.',
+    destinationType: 'settingsGroup', destination: 'catalogs',
+    status: () => ({ state: heliumCalcSaved ? 'complete' : 'optional' }),
+  },
+];
+
+const BUSINESS_SETUP_STATUS_LABELS = {
+  not_started: 'Not Started', in_progress: 'In Progress', complete: 'Complete',
+  optional: 'Optional', needs_attention: 'Needs Attention',
+};
+// Reuses the same status-pill classes Production/Staffing already use, plus one new "optional"
+// variant — see .ps-status-optional in the stylesheet.
+const BUSINESS_SETUP_STATUS_CLASSES = {
+  not_started: 'ps-status-not_started', in_progress: 'ps-status-in_progress', complete: 'ps-status-completed',
+  optional: 'ps-status-optional', needs_attention: 'ps-status-waiting',
+};
+
+function bsResolvedItems() {
+  return BUSINESS_SETUP_ITEMS.slice().sort((a, b) => a.order - b.order).map(item => {
+    if (item.comingLater) return Object.assign({}, item, { resolvedState: 'coming_later', count: null });
+    const s = item.status();
+    return Object.assign({}, item, { resolvedState: s.state, count: s.count != null ? s.count : null });
+  });
+}
+// "Complete" and "optional" both count toward progress being satisfied — optional items are
+// never what stands between a business and 100%, matching "do not require every optional
+// setting" — only the required set drives the percentage at all.
+function bsProgress() {
+  const items = bsResolvedItems().filter(i => !i.comingLater && i.required);
+  const done = items.filter(i => i.resolvedState === 'complete').length;
+  return { done, total: items.length, pct: items.length ? Math.round((done / items.length) * 100) : 0 };
+}
+
+function bsButtonLabel(item) {
+  switch (item.resolvedState) {
+    case 'in_progress': return 'Continue';
+    case 'needs_attention': return 'Review';
+    case 'complete': return 'Edit';
+    case 'optional': return item.count != null ? 'Edit' : 'Set Up';
+    default: return 'Set Up';
+  }
+}
+function bsCardHtml(item) {
+  const disabled = !!item.comingLater;
+  let html = `<div class="card" style="margin-bottom:0.6rem; ${disabled ? 'opacity:0.55;' : ''}">
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+      <div style="flex:1; min-width:0;">
+        <div style="font-size:14px; font-weight:700;">${psEscape(item.label)}</div>
+        <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">${psEscape(item.description)}</div>
+        ${!disabled && item.count != null && item.countLabel ? `<div style="font-size:11px; color:var(--text-tertiary); margin-top:4px;">${psEscape(item.countLabel(item.count))}</div>` : ''}
+      </div>
+      ${disabled
+        ? `<span class="ps-status-btn ps-status-optional">Coming later</span>`
+        : `<span class="ps-status-btn ${BUSINESS_SETUP_STATUS_CLASSES[item.resolvedState]}">${BUSINESS_SETUP_STATUS_LABELS[item.resolvedState]}</span>`}
+    </div>
+    ${disabled ? '' : `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:10px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="bsGoTo('${item.id}')">${bsButtonLabel(item)}</button>`}
+  </div>`;
+  return html;
+}
+
+function bsRenderShell() {
+  const root = document.getElementById('bs-root');
+  if (!root) return;
+  const items = bsResolvedItems();
+  const required = items.filter(i => !i.comingLater && i.required);
+  const optional = items.filter(i => !i.comingLater && !i.required);
+  const later = items.filter(i => i.comingLater);
+  const progress = bsProgress();
+
+  let html = `<div class="section-label" style="margin-top:0">Setup progress</div>
+  <div class="card">
+    <div style="font-size:22px; font-weight:700;">${progress.done} of ${progress.total} required areas complete</div>
+    <div style="height:8px; border-radius:999px; background:var(--bg); overflow:hidden; margin:10px 0 4px; border:0.5px solid var(--border);">
+      <div style="height:100%; width:${progress.pct}%; background:var(--accent); border-radius:999px;"></div>
+    </div>
+    <div style="font-size:12px; color:var(--text-secondary);">${progress.pct}% of required setup — optional areas below don't count against this.</div>
+  </div>`;
+
+  html += `<div class="section-label">Required</div>`;
+  html += required.map(bsCardHtml).join('');
+
+  html += `<div class="section-label">Optional</div>`;
+  html += optional.map(bsCardHtml).join('');
+
+  if (later.length) {
+    html += `<div class="section-label">Coming later</div>`;
+    html += later.map(bsCardHtml).join('');
+  }
+
+  root.innerHTML = html;
+  bsUpdateHomeBanner(progress);
+}
+
+// Home screen banner — visible only while required setup is incomplete, per "may also appear on
+// the main dashboard while setup is incomplete." Never blocks anything below it; it's purely a
+// pointer. Kept live from every place setup data could plausibly change: on boot, whenever
+// Business Setup itself renders, and after any admin-gated Settings save (the vast majority of
+// what these items track) via settingsRefreshAdminSections().
+function bsUpdateHomeBanner(progress) {
+  const banner = document.getElementById('bs-home-banner');
+  if (!banner) return;
+  const p = progress || bsProgress();
+  if (p.done >= p.total) { banner.style.display = 'none'; return; }
+  banner.style.display = 'block';
+  document.getElementById('bs-home-banner-detail').textContent = `${p.done} of ${p.total} required areas complete — tap to finish`;
+}
+
+// Only Letter Styling Pricing (destinationType 'view') needs this — every Settings destination
+// already returns correctly via settingsBack()/lastToolView, but a plain tool screen like
+// Letter Styling Calculator has no "remembered origin" of its own (its back button always goes
+// straight to Home). This mirrors the existing Latex-Inventory special case in goBack() below.
+let bsCameFromSetup = false;
+
+function bsGoTo(id) {
+  const item = BUSINESS_SETUP_ITEMS.find(i => i.id === id);
+  if (!item || item.comingLater) return;
+  if (item.destinationType === 'settingsGroup') {
+    settingsShowGroup(item.destination);
+    showView('settings');
+  } else if (item.destinationType === 'view') {
+    bsCameFromSetup = true;
+    showView(item.destination);
+  }
+}
 
 // ═══════════════════════════════════════ EDITABLE FORMULAS ═══════════════════════════════════════
 //
@@ -4613,6 +4871,7 @@ function settingsRefreshAdminSections() {
   heRenderSettingsSection();
   heRenderShell();
   invRenderColorsList();
+  bsUpdateHomeBanner();
 }
 
 // ═══════════════════════════════════════ TEAM MEMBERS (People & Access) ═══════════════════════════════════════
@@ -5825,6 +6084,8 @@ let letState = null;
 // stay as plain in-memory defaults; only the two price fields get loaded from and saved to
 // Firestore, on blur (onchange) rather than every keystroke (oninput).
 const LETTER_PRICE_DEFAULTS = { pricePerFt: 29, pricePerFoil: 5 };
+// True once settings/letterStyling has actually been saved — read by Business Setup only.
+let letterStylingSaved = false;
 
 function letInit() {
   letState = Object.assign({
@@ -5837,6 +6098,7 @@ function letInit() {
   window.fbLoadLetterStyling().then(snap => {
     if (snap.exists()) {
       Object.assign(letState, snap.data());
+      letterStylingSaved = true;
       letRenderShell();
     }
   }).catch(err => console.error('Letter Styling pricing load failed:', err));
@@ -5844,6 +6106,7 @@ function letInit() {
 
 function letSavePricing() {
   window.fbSaveLetterStyling({ pricePerFt: letState.pricePerFt, pricePerFoil: letState.pricePerFoil })
+    .then(() => { letterStylingSaved = true; })
     .catch(err => console.error('Letter Styling pricing save failed:', err));
 }
 
@@ -6577,6 +6840,8 @@ const HE_SIZES_DEFAULTS = [
 let HE_SIZES = JSON.parse(JSON.stringify(HE_SIZES_DEFAULTS));
 let heRowSeq = 0;
 let HE_STATE = null;
+// True once settings/heliumCalc has actually been saved — read by Business Setup only.
+let heliumCalcSaved = false;
 
 function heComputeTotals() {
   const s = HE_STATE;
@@ -6614,6 +6879,7 @@ function heInit() {
       const d = snap.data();
       if (d.tank) Object.assign(HE_STATE, d.tank);
       if (Array.isArray(d.sizes) && d.sizes.length > 0) HE_SIZES = d.sizes;
+      heliumCalcSaved = true;
       heRenderShell();
       heRenderSettingsSection();
     }
@@ -6621,7 +6887,9 @@ function heInit() {
 }
 
 function heSaveToFirestore() {
-  window.fbSaveHeliumCalc({ tank: HE_STATE, sizes: HE_SIZES }).catch(err => console.error('Helium calculator save failed:', err));
+  window.fbSaveHeliumCalc({ tank: HE_STATE, sizes: HE_SIZES })
+    .then(() => { heliumCalcSaved = true; })
+    .catch(err => console.error('Helium calculator save failed:', err));
 }
 
 function heTankInputRow(label, field, step, prefix, suffix) {
@@ -7152,6 +7420,9 @@ function showView(v) {
   document.getElementById('view-' + v).classList.add('active');
   window.scrollTo(0, 0);
   if (v !== 'settings') lastToolView = v;
+  // Re-renders every time Business Setup becomes active (including via the back button, not
+  // just a fresh click into it) so status cards always reflect whatever changed in Settings.
+  if (v === 'businessSetup') bsRenderShell();
   setTopBar(v);
 }
 
@@ -7168,7 +7439,13 @@ function goBack() {
   if (inSettings) { showView(lastToolView); return; }
   // Latex is a level below the Inventory category picker, not directly off home.
   const inLatexInventory = document.getElementById('view-inventory-latex').classList.contains('active');
-  showView(inLatexInventory ? 'inventory' : 'home');
+  if (inLatexInventory) { showView('inventory'); return; }
+  // Letter Styling Calculator has no "remembered origin" of its own — this is the one path
+  // Business Setup sends someone to that isn't a Settings group (see bsGoTo), so it needs its
+  // own one-off return path back to Business Setup instead of falling through to Home.
+  const inLettersFromSetup = bsCameFromSetup && document.getElementById('view-letters').classList.contains('active');
+  if (inLettersFromSetup) { bsCameFromSetup = false; showView('businessSetup'); return; }
+  showView('home');
 }
 
 function showTrip(t, btn) {
@@ -7267,6 +7544,7 @@ function bootApp() {
   try { clInit(); } catch (e) { console.error('clInit failed:', e); }
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
+  try { bsUpdateHomeBanner(); } catch (e) { console.error('bsUpdateHomeBanner failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
 }
 </script>
