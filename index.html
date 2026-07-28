@@ -6125,8 +6125,8 @@ function clRenderSettingsSection() {
     <div id="imp-root"></div>`;
   }
   html += invLibraryOnlyHtml();
-  html += `<div style="text-align:right; margin-top:0.5rem;">
-    <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; color:var(--text-tertiary);" onclick="clClearLibraryAndInventory()">Clear all colors &amp; inventory</button>
+  html += `<div style="margin-top:1rem; padding-top:0.75rem; border-top:0.5px solid var(--border);">
+    <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--warning-bg); color:var(--warning-text); border:0.5px solid var(--warning-text);" onclick="clClearLibraryAndInventory()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all colors &amp; inventory</button>
   </div>`;
   root.innerHTML = html;
   clRenderPicker();
@@ -6856,8 +6856,8 @@ function jccRenderCatalogSettingsSection() {
     ${jccCsvImportCollapsed ? '' : `<div id="imp-root"></div>`}
     ` : ''}
     <div id="jcc-catalog"></div>
-    <div style="text-align:right; margin-top:0.5rem;">
-      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; color:var(--text-tertiary);" onclick="jccClearAllCosts()">Clear all costs</button>
+    <div style="margin-top:1rem; padding-top:0.75rem; border-top:0.5px solid var(--border);">
+      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--warning-bg); color:var(--warning-text); border:0.5px solid var(--warning-text);" onclick="jccClearAllCosts()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all costs</button>
     </div>`}
   `;
   jccRenderCatalog();
