@@ -898,6 +898,11 @@
     items.forEach(item => batch.set(doc(inventoryItemsRef, item.id), item));
     return batch.commit();
   };
+  window.fbBatchDeleteInventoryItems = (ids) => {
+    const batch = writeBatch(db);
+    ids.forEach(id => batch.delete(doc(inventoryItemsRef, id)));
+    return batch.commit();
+  };
 
   const inventoryOrdersRef = collection(db, 'businesses', BUSINESS_ID, 'inventoryOrders');
   window.fbOnSnapshotInventoryOrders = (onNext, onError) => onSnapshot(inventoryOrdersRef, onNext, onError);
@@ -5164,6 +5169,31 @@ function clSaveLibrary() {
   window.fbSaveColorLibrary({ colors: COLOR_LIBRARY }).catch(err => console.error('Color Library save failed:', err));
 }
 
+// Permanently empties the Color Library and deletes every Inventory row — meant for wiping
+// seed/sample data before entering a business's real colors from scratch, not a routine action.
+// Same admin-passcode + type-DELETE pattern as invClearGroup, since this is irreversible.
+// Inventory's own onSnapshot listener will reflect the deletes once they land; the Library
+// isn't listener-backed (a one-time load), so it's updated locally right away.
+function clClearLibraryAndInventory() {
+  if (!invAdminUnlocked) {
+    const entered = prompt('Enter the admin passcode to clear the Color Library:');
+    if (entered === null) return;
+    if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode — nothing deleted.'); return; }
+  }
+  if (COLOR_LIBRARY.length === 0 && INVENTORY_ITEMS.length === 0) { alert('Already empty.'); return; }
+  const typed = prompt(`This permanently deletes all ${COLOR_LIBRARY.length} color(s) in your Color Library and all ${INVENTORY_ITEMS.length} Inventory row(s). This can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not cleared — you must type DELETE exactly.'); return; }
+
+  const ids = INVENTORY_ITEMS.map(i => i.id);
+  if (ids.length > 0) window.fbBatchDeleteInventoryItems(ids).catch(err => console.error('Clear Color Library: inventory delete failed', err));
+
+  COLOR_LIBRARY = [];
+  clSaveLibrary();
+  clRenderSettingsSection();
+  alert('Color Library and Inventory cleared.');
+}
+
 // One-time (and self-healing — safe to call repeatedly) migration: every Inventory color that
 // doesn't yet point at a Library entry gets one, found-or-created from its own (brand, color).
 // This is what makes "nothing changes from the user's perspective" true on day one — today's
@@ -6095,6 +6125,9 @@ function clRenderSettingsSection() {
     <div id="imp-root"></div>`;
   }
   html += invLibraryOnlyHtml();
+  html += `<div style="text-align:right; margin-top:0.5rem;">
+    <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; color:var(--text-tertiary);" onclick="clClearLibraryAndInventory()">Clear all colors &amp; inventory</button>
+  </div>`;
   root.innerHTML = html;
   clRenderPicker();
   if (!clCsvImportCollapsed && impState) impRender();
@@ -6822,7 +6855,10 @@ function jccRenderCatalogSettingsSection() {
     </div>
     ${jccCsvImportCollapsed ? '' : `<div id="imp-root"></div>`}
     ` : ''}
-    <div id="jcc-catalog"></div>`}
+    <div id="jcc-catalog"></div>
+    <div style="text-align:right; margin-top:0.5rem;">
+      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; color:var(--text-tertiary);" onclick="jccClearAllCosts()">Clear all costs</button>
+    </div>`}
   `;
   jccRenderCatalog();
   if (invAdminUnlocked && !jccCsvImportCollapsed && impState) impRender();
@@ -7199,6 +7235,28 @@ function jccFindItem(category, name) {
 }
 function jccSaveCatalog() {
   window.fbSaveJccCatalog({ items: JCC_CATALOG }).catch(err => console.error('Job cost catalog save failed:', err));
+}
+
+// Blanks Cost A/Cost B on every material back to unset — meant for clearing the sample vendor
+// costs the catalog ships with before entering a business's real numbers. Keeps the item list
+// itself (names/categories/units) since only the $ values are sample data. Same admin-passcode
+// + type-DELETE pattern as invClearGroup/clClearLibraryAndInventory, since it's irreversible.
+function jccClearAllCosts() {
+  if (!invAdminUnlocked) {
+    const entered = prompt('Enter the admin passcode to clear catalog costs:');
+    if (entered === null) return;
+    if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode — nothing cleared.'); return; }
+  }
+  const priced = JCC_CATALOG.filter(i => i.costA != null || i.costB != null);
+  if (priced.length === 0) { alert('No costs are set.'); return; }
+  const typed = prompt(`This clears Cost A and Cost B for all ${priced.length} priced material(s) back to blank. Item names/categories stay. This can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not cleared — you must type DELETE exactly.'); return; }
+
+  JCC_CATALOG.forEach(i => { i.costA = null; i.costB = null; });
+  jccSaveCatalog();
+  jccRenderCatalog();
+  alert('Material Catalog costs cleared.');
 }
 // Single creation path shared by the manual "Add material" form and bulk import — every
 // created item goes through here so both produce the exact same Firestore shape.
