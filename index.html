@@ -61,6 +61,13 @@
     padding-bottom: 3rem;
     min-height: 100vh;
   }
+  /* Settings holds the bulk-data-entry screens (Color Library, Material Catalog) that are
+     genuinely faster with more horizontal room — multi-column pickers, wide preview tables.
+     Only widens while Settings is the active view, and only above phone/tablet widths, so
+     every other screen keeps its normal phone-shell layout. */
+  @media (min-width: 900px) {
+    .app.app-wide { max-width: 1080px; }
+  }
 
   /* TOP BAR */
   .topbar {
@@ -734,7 +741,7 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
-  import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+  import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot, writeBatch } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
   import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
 
   const firebaseConfig = {
@@ -885,6 +892,14 @@
   window.fbOnSnapshotInventoryItems = (onNext, onError) => onSnapshot(inventoryItemsRef, onNext, onError);
   window.fbSaveInventoryItem = (item) => setDoc(doc(inventoryItemsRef, item.id), item);
   window.fbDeleteInventoryItem = (id) => deleteDoc(doc(inventoryItemsRef, id));
+  // Bulk color-add creates many Inventory rows at once (one per new color) — a single batch
+  // commit instead of N independent setDoc calls, so a mid-import failure can't leave some
+  // colors stock-tracked and others not.
+  window.fbBatchSaveInventoryItems = (items) => {
+    const batch = writeBatch(db);
+    items.forEach(item => batch.set(doc(inventoryItemsRef, item.id), item));
+    return batch.commit();
+  };
 
   const inventoryOrdersRef = collection(db, 'businesses', BUSINESS_ID, 'inventoryOrders');
   window.fbOnSnapshotInventoryOrders = (onNext, onError) => onSnapshot(inventoryOrdersRef, onNext, onError);
@@ -916,7 +931,7 @@
 </script>
 </head>
 <body>
-<div class="app">
+<div class="app" id="app-shell">
 
   <!-- AUTH GATE — a full-screen overlay that blocks the app until sign-in succeeds -->
   <div id="auth-gate" style="position:fixed; inset:0; z-index:9999; background:var(--bg); display:flex; align-items:center; justify-content:center; flex-direction:column; padding:2rem; text-align:center;">
@@ -5019,6 +5034,7 @@ let invImportCollapsed = false;
 let clPickerBrand = 'Sempertex';
 let clPickerQuery = '';
 let clPickerSelected = new Set();
+let clCsvImportCollapsed = true;
 
 function invTogglePendingCollapsed() {
   invPendingCollapsed = !invPendingCollapsed;
@@ -5027,6 +5043,38 @@ function invTogglePendingCollapsed() {
 function invToggleImportCollapsed() {
   invImportCollapsed = !invImportCollapsed;
   clRenderSettingsSection();
+}
+function clToggleCsvImport() {
+  clCsvImportCollapsed = !clCsvImportCollapsed;
+  if (!clCsvImportCollapsed) { impOpen(clCsvImportSpec()); jccCsvImportCollapsed = true; }
+  else impClose();
+  clRenderSettingsSection();
+  jccRenderCatalogSettingsSection();
+}
+// Row shape: brand (optional, free text), colorName (required). Dedupes exactly like the
+// manufacturer picker and manual add — same (brand, colorName) case-insensitive match — so a
+// CSV row for a color that's already in the Library (however it got there) never creates a
+// second entry.
+function clCsvImportSpec() {
+  return {
+    key: 'colorLibrary',
+    title: 'Import custom colors',
+    updatable: false, // brand+colorName are the whole record and the whole match key — a
+                       // "duplicate" row has nothing left to update, so only skip makes sense
+    fields: [
+      { key: 'brand', label: 'Brand', required: false },
+      { key: 'colorName', label: 'Color name', required: true }
+    ],
+    validateRow: (v) => (!v.colorName ? 'Missing color name' : null),
+    matchExisting: (v) => clFindEntry(v.brand, v.colorName) || null,
+    describeExisting: (existing) => `${existing.brand || 'no brand'} / ${existing.colorName}`,
+    commitRows: (rows) => {
+      const toCreate = rows.filter(r => r.action !== 'skip');
+      const skipped = rows.length - toCreate.length;
+      return clAddColorsBulk(toCreate.map(r => ({ brand: r.values.brand, colorName: r.values.colorName })), { trackStock: true })
+        .then(summary => ({ created: summary.added, updated: 0, skipped: skipped + summary.alreadyHad, failed: 0 }));
+    }
+  };
 }
 
 function invStartListeners() {
@@ -5229,20 +5277,36 @@ function clRemoveAlias(id, alias) {
   clSaveLibrary();
 }
 
-// Adds one manufacturer color to the Library and — unless the caller opts out — also creates a
-// stock-tracked Inventory row for it, preserving real historical stock from INV_SEED_DATA when
-// known (same behavior invImportByBrand used to give a whole brand at once, now per-color).
-function clAddColor(brand, colorName, { trackStock = true } = {}) {
-  const entry = clFindOrCreate(brand, colorName);
-  clSaveLibrary();
-  if (trackStock && !INVENTORY_ITEMS.some(i => i.colorId === entry.id)) {
-    const seed = INV_SEED_DATA.find(s => s.brand === brand && s.color.trim().toLowerCase() === colorName.trim().toLowerCase());
-    const sizes = seed ? JSON.parse(JSON.stringify(seed.sizes)) : invBlankSizeData();
-    INV_SIZES.forEach(s => { if (!sizes[s]) sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100 }; if (!sizes[s].perBag) sizes[s].perBag = 100; });
-    const item = { id: psNewInventoryItemId(), color: entry.colorName, brand: entry.brand, tier: 'main', active: true, colorId: entry.id, sizes };
-    window.fbSaveInventoryItem(item).catch(err => console.error('Add color failed for', colorName, err));
+// Adds manufacturer colors to the Library and — unless the caller opts out — also creates a
+// stock-tracked Inventory row for each, preserving real historical stock from INV_SEED_DATA when
+// known. Used by the manufacturer picker's multi-select and by CSV import: finds-or-creates
+// every entry first, saves the Library once (not once per color), then commits every new
+// Inventory row in a single batch (not one write per color). Returns a summary so callers can
+// report what actually happened without re-deriving it.
+function clAddColorsBulk(colorSpecs, { trackStock = true } = {}) {
+  const addedEntries = [];
+  const alreadyHadEntries = [];
+  colorSpecs.forEach(({ brand, colorName }) => {
+    const before = COLOR_LIBRARY.length;
+    const entry = clFindOrCreate(brand, colorName);
+    if (COLOR_LIBRARY.length !== before) addedEntries.push(entry); else alreadyHadEntries.push(entry);
+  });
+  if (addedEntries.length > 0) clSaveLibrary();
+
+  const newItems = [];
+  if (trackStock) {
+    [...addedEntries, ...alreadyHadEntries].forEach(entry => {
+      if (INVENTORY_ITEMS.some(i => i.colorId === entry.id)) return;
+      const seed = INV_SEED_DATA.find(s => s.brand === entry.brand && s.color.trim().toLowerCase() === entry.colorName.trim().toLowerCase());
+      const sizes = seed ? JSON.parse(JSON.stringify(seed.sizes)) : invBlankSizeData();
+      INV_SIZES.forEach(s => { if (!sizes[s]) sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100 }; if (!sizes[s].perBag) sizes[s].perBag = 100; });
+      newItems.push({ id: psNewInventoryItemId(), color: entry.colorName, brand: entry.brand, tier: 'main', active: true, colorId: entry.id, sizes });
+    });
   }
-  return entry;
+  const commitPromise = newItems.length > 0
+    ? window.fbBatchSaveInventoryItems(newItems).catch(err => console.error('Bulk color add: inventory batch failed', err))
+    : Promise.resolve();
+  return commitPromise.then(() => ({ added: addedEntries.length, alreadyHad: alreadyHadEntries.length, itemsCreated: newItems.length }));
 }
 // A Library-only color has no Inventory row at all (a general/production-note color that isn't
 // stock-tracked) — used by the "library only" list in the Inventory screen.
@@ -5251,6 +5315,230 @@ function clLibraryOnlyEntries() {
   return COLOR_LIBRARY.filter(e => !stockedIds.has(e.id));
 }
 
+// ═══════════════════════════════════ SHARED BULK IMPORT WIZARD ═══════════════════════════════════
+//
+// Reused by Color Library (custom colors not in a manufacturer catalog) and Material Catalog —
+// paste-from-spreadsheet or upload a CSV, map columns to target fields, preview + resolve
+// duplicates row by row, commit. Deliberately not a generalized import engine: each feature
+// supplies a small `spec` describing its own fields/validation/dedupe/commit, this just runs the
+// same paste → map → preview → commit flow around whatever spec it's given.
+//
+// spec = {
+//   key: string (unique, used for DOM ids),
+//   title: string,
+//   fields: [{ key, label, required }],           // target fields, in display order
+//   validateRow(values) -> string|null             // values = {fieldKey: rawString}; null = valid
+//   matchExisting(values) -> any|null               // existing record this row duplicates, or null
+//   describeExisting(existing) -> string            // short label shown next to a duplicate row
+//   commitRows(rows) -> Promise<{created, updated, skipped, failed}>
+//     // rows = [{ values, action: 'create'|'update'|'skip', existing }] — already filtered to
+//     // valid rows only; 'skip' rows are included so commitRows can count them consistently.
+// }
+let impState = null;
+
+function impOpen(spec) {
+  impState = { spec, step: 'input', rawText: '', headers: [], parsedRows: [], mapping: {}, rows: [], results: null };
+  impRender();
+}
+function impClose() {
+  impState = null;
+  const root = document.getElementById('imp-root');
+  if (root) root.innerHTML = '';
+}
+function impDetectDelimiter(text) {
+  const firstLine = (text.split(/\r?\n/).find(l => l.trim()) || '');
+  return (firstLine.match(/\t/g) || []).length >= (firstLine.match(/,/g) || []).length ? '\t' : ',';
+}
+// Minimal hand-rolled delimited parser (no library available in this single-file app) — handles
+// quoted fields containing the delimiter, commas, or embedded newlines, and "" as an escaped quote.
+function impParseDelimited(text, delimiter) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else field += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === delimiter) {
+      row.push(field); field = '';
+    } else if (c === '\n') {
+      row.push(field); rows.push(row); row = []; field = '';
+    } else if (c === '\r') {
+      // skip — paired \n (if any) handles the row break
+    } else {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(f => f.trim() !== ''));
+}
+function impSetRawText(value) {
+  if (!impState) return;
+  impState.rawText = value;
+}
+function impHandleFileUpload(input) {
+  const file = input.files && input.files[0];
+  if (!file || !impState) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    impState.rawText = String(reader.result || '');
+    const textarea = document.getElementById('imp-paste-area');
+    if (textarea) textarea.value = impState.rawText;
+  };
+  reader.readAsText(file);
+}
+function impProceedToMapping() {
+  if (!impState) return;
+  const text = impState.rawText.trim();
+  if (!text) { alert('Paste some rows or upload a CSV first.'); return; }
+  const delimiter = impDetectDelimiter(text);
+  const table = impParseDelimited(text, delimiter);
+  if (table.length < 2) { alert('Need a header row plus at least one data row.'); return; }
+  impState.headers = table[0].map(h => h.trim());
+  impState.parsedRows = table.slice(1);
+  // Auto-guess each target field's column by matching header text against the field's key/label.
+  impState.mapping = {};
+  impState.spec.fields.forEach(f => {
+    const idx = impState.headers.findIndex(h => {
+      const hl = h.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return hl === f.key.toLowerCase() || hl === f.label.toLowerCase().replace(/[^a-z0-9]/g, '');
+    });
+    impState.mapping[f.key] = idx >= 0 ? idx : -1;
+  });
+  impState.step = 'mapping';
+  impRender();
+}
+function impSetMapping(fieldKey, headerIndex) {
+  if (!impState) return;
+  impState.mapping[fieldKey] = Number(headerIndex);
+}
+function impProceedToPreview() {
+  if (!impState) return;
+  const missingRequired = impState.spec.fields.filter(f => f.required && impState.mapping[f.key] === -1);
+  if (missingRequired.length > 0) { alert(`Map a column for: ${missingRequired.map(f => f.label).join(', ')}`); return; }
+  // Two duplicate sources: a row matching a record that already exists (spec.matchExisting),
+  // and a row matching an earlier row in this same paste/file (tracked here) — a CSV with the
+  // same color listed twice would otherwise show both as "New" even though only the first
+  // should actually create anything.
+  const seenInBatch = new Set();
+  impState.rows = impState.parsedRows.map(rawRow => {
+    const values = {};
+    impState.spec.fields.forEach(f => { values[f.key] = impState.mapping[f.key] >= 0 ? (rawRow[impState.mapping[f.key]] || '').trim() : ''; });
+    const reason = impState.spec.validateRow(values);
+    if (reason) return { values, valid: false, reason, existing: null, dupeInBatch: false, action: 'skip' };
+    const existing = impState.spec.matchExisting(values);
+    const batchKey = JSON.stringify(impState.spec.fields.map(f => (values[f.key] || '').toLowerCase()));
+    const dupeInBatch = !existing && seenInBatch.has(batchKey);
+    seenInBatch.add(batchKey);
+    return { values, valid: true, reason: null, existing, dupeInBatch, action: (existing || dupeInBatch) ? 'skip' : 'create' };
+  });
+  impState.step = 'preview';
+  impRender();
+}
+function impSetRowAction(index, action) {
+  if (!impState || !impState.rows[index]) return;
+  impState.rows[index].action = action;
+  impRender();
+}
+function impCommit() {
+  if (!impState) return;
+  const btn = document.getElementById('imp-commit-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing...'; }
+  const rows = impState.rows.filter(r => r.valid);
+  impState.spec.commitRows(rows).then(results => {
+    impState.results = results;
+    impState.step = 'results';
+    impRender();
+  });
+}
+function impRender() {
+  const root = document.getElementById('imp-root');
+  if (!root || !impState) return;
+  const s = impState;
+  let html = `<div class="card" style="border:1px solid var(--border-strong);">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">${psEscape(s.spec.title)}</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="impClose()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>`;
+
+  if (s.step === 'input') {
+    html += `<div class="settings-field" style="margin-bottom:0.6rem;">
+        <label>Upload a CSV file</label>
+        <input type="file" accept=".csv,text/csv,text/plain" onchange="impHandleFileUpload(this)">
+      </div>
+      <div style="font-size:11px; color:var(--text-secondary); margin:0.3rem 0;">— or paste rows copied from a spreadsheet (first row must be headers) —</div>
+      <textarea id="imp-paste-area" rows="8" placeholder="Paste spreadsheet rows here..." style="width:100%; font-family:monospace; font-size:12px; padding:8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--bg); color:var(--text);" oninput="impSetRawText(this.value)"></textarea>
+      <button class="save-btn" style="margin-top:0.6rem;" onclick="impProceedToMapping()">Next: map columns</button>`;
+  } else if (s.step === 'mapping') {
+    html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">Found ${s.parsedRows.length} row${s.parsedRows.length === 1 ? '' : 's'} and ${s.headers.length} column${s.headers.length === 1 ? '' : 's'}. Match each field to a column:</div>`;
+    s.spec.fields.forEach(f => {
+      html += `<div class="row" style="align-items:center; margin-bottom:0.4rem;">
+        <div style="flex:1; font-size:13px;">${psEscape(f.label)}${f.required ? ' <span style="color:#c0392b;">*</span>' : ''}</div>
+        <select style="flex:1;" onchange="impSetMapping('${f.key}', this.value)">
+          <option value="-1" ${s.mapping[f.key] === -1 ? 'selected' : ''}>— not mapped —</option>
+          ${s.headers.map((h, i) => `<option value="${i}" ${s.mapping[f.key] === i ? 'selected' : ''}>${psEscape(h)}</option>`).join('')}
+        </select>
+      </div>`;
+    });
+    html += `<div style="display:flex; gap:8px; margin-top:0.6rem;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="impState.step='input'; impRender();"><i class="fa-solid fa-arrow-left"></i> Back</button>
+      <button class="save-btn" style="flex:1;" onclick="impProceedToPreview()">Next: preview</button>
+    </div>`;
+  } else if (s.step === 'preview') {
+    const validCount = s.rows.filter(r => r.valid).length;
+    const invalidCount = s.rows.length - validCount;
+    const willCreate = s.rows.filter(r => r.valid && r.action === 'create').length;
+    const willUpdate = s.rows.filter(r => r.valid && r.action === 'update').length;
+    const willSkip = s.rows.filter(r => r.valid && r.action === 'skip').length;
+    html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">${willCreate} new, ${willUpdate} to update, ${willSkip} to skip${invalidCount ? `, ${invalidCount} invalid (won't be imported)` : ''}.</div>`;
+    html += `<div style="max-height:360px; overflow:auto; border:0.5px solid var(--border); border-radius:var(--radius-sm);">
+      <table style="width:100%; border-collapse:collapse; font-size:12px;">
+        <thead><tr style="position:sticky; top:0; background:var(--bg);">
+          ${s.spec.fields.map(f => `<th style="text-align:left; padding:6px 8px; white-space:nowrap;">${psEscape(f.label)}</th>`).join('')}
+          <th style="text-align:left; padding:6px 8px;">Status</th>
+        </tr></thead><tbody>`;
+    s.rows.forEach((r, i) => {
+      const cells = s.spec.fields.map(f => `<td style="padding:5px 8px; white-space:nowrap;">${psEscape(r.values[f.key] || '')}</td>`).join('');
+      let statusCell;
+      if (!r.valid) {
+        statusCell = `<td style="padding:5px 8px; color:#c0392b; white-space:nowrap;">${psEscape(r.reason)}</td>`;
+      } else if (r.dupeInBatch) {
+        statusCell = `<td style="padding:5px 8px; white-space:nowrap;"><span style="font-size:11px; color:var(--text-tertiary);">duplicate of an earlier row in this import — will skip</span></td>`;
+      } else if (r.existing) {
+        statusCell = `<td style="padding:5px 8px; white-space:nowrap;">
+          <span style="font-size:11px; color:var(--text-secondary);">matches ${psEscape(s.spec.describeExisting(r.existing))}</span>
+          ${s.spec.updatable === false ? `<span style="margin-left:6px; font-size:11px; color:var(--text-tertiary);">— duplicate, will skip</span>` : `
+          <select style="margin-left:6px; font-size:11px;" onchange="impSetRowAction(${i}, this.value)">
+            <option value="skip" ${r.action === 'skip' ? 'selected' : ''}>Skip</option>
+            <option value="update" ${r.action === 'update' ? 'selected' : ''}>Update existing</option>
+          </select>`}
+        </td>`;
+      } else {
+        statusCell = `<td style="padding:5px 8px; color:var(--accent); white-space:nowrap;">New</td>`;
+      }
+      html += `<tr style="border-top:0.5px solid var(--border);">${cells}${statusCell}</tr>`;
+    });
+    html += `</tbody></table></div>`;
+    html += `<div style="display:flex; gap:8px; margin-top:0.6rem;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="impState.step='mapping'; impRender();"><i class="fa-solid fa-arrow-left"></i> Back</button>
+      <button class="save-btn" id="imp-commit-btn" style="flex:1;" ${willCreate + willUpdate === 0 ? 'disabled' : ''} onclick="impCommit()">Import ${willCreate + willUpdate} row${willCreate + willUpdate === 1 ? '' : 's'}</button>
+    </div>`;
+  } else if (s.step === 'results') {
+    const r = s.results;
+    html += `<div style="font-size:13px; line-height:1.8;">
+      <div><i class="fa-solid fa-circle-check" style="color:var(--accent);"></i> ${r.created} created</div>
+      ${r.updated ? `<div><i class="fa-solid fa-pen" style="color:var(--accent);"></i> ${r.updated} updated</div>` : ''}
+      ${r.skipped ? `<div><i class="fa-solid fa-forward" style="color:var(--text-secondary);"></i> ${r.skipped} skipped</div>` : ''}
+      ${r.failed ? `<div><i class="fa-solid fa-triangle-exclamation" style="color:#c0392b;"></i> ${r.failed} failed</div>` : ''}
+    </div>
+    <button class="save-btn" style="margin-top:0.8rem;" onclick="impClose()">Done</button>`;
+  }
+  html += `</div>`;
+  root.innerHTML = html;
+}
 
 // perBag defaults to 100 (a common count for standard round latex) — it varies by brand and
 // size in reality, so it's editable per size just like price; existing seed data doesn't have
@@ -5800,9 +6088,18 @@ function clRenderSettingsSection() {
       <div id="cl-picker-results"></div>
     </div>`;
   }
+  html += `<div class="inv-group-header" onclick="clToggleCsvImport()" style="margin-top:0.6rem;">
+    <span>Add custom colors (CSV import)</span>
+    <i class="fa-solid fa-chevron-${clCsvImportCollapsed ? 'down' : 'up'}"></i>
+  </div>`;
+  if (!clCsvImportCollapsed) {
+    html += `<div style="font-size:11px; color:var(--text-secondary); margin:-0.2rem 0 0.4rem;">For colors that aren't in a manufacturer's catalog above — a house blend, a discontinued color, anything custom.</div>
+    <div id="imp-root"></div>`;
+  }
   html += invLibraryOnlyHtml();
   root.innerHTML = html;
   clRenderPicker();
+  if (!clCsvImportCollapsed && impState) impRender();
 }
 // Re-renders whichever of the two places a Color Library alias/archive edit could be visible —
 // Inventory's per-item cards (stocked colors) and Settings' "Color Library only" list
@@ -5828,8 +6125,22 @@ function clTogglePickerColor(color) {
   if (clPickerSelected.has(color)) clPickerSelected.delete(color); else clPickerSelected.add(color);
   clRenderPicker();
 }
+// Selects (or clears) every currently-filtered, not-already-owned color at once — the "bulk"
+// half of bulk setup, since checking dozens of boxes one at a time defeats the point on desktop.
+function clSelectAllFiltered() {
+  const catalogColors = BRAND_COLOR_CATALOG[clPickerBrand] || [];
+  const q = clPickerQuery.trim().toLowerCase();
+  const alreadyHave = new Set(COLOR_LIBRARY.filter(e => (e.brand || '').toLowerCase() === clPickerBrand.toLowerCase()).map(e => e.colorName.toLowerCase()));
+  const matches = catalogColors.filter(c => (!q || c.toLowerCase().includes(q)) && !alreadyHave.has(c.toLowerCase()));
+  const allSelected = matches.length > 0 && matches.every(c => clPickerSelected.has(c));
+  if (allSelected) matches.forEach(c => clPickerSelected.delete(c));
+  else matches.forEach(c => clPickerSelected.add(c));
+  clRenderPicker();
+}
 // Populates just the manufacturer color checklist — called on brand switch, search keystrokes,
 // and checkbox toggles, without rebuilding the search input itself (keeps focus while typing).
+// Laid out as a responsive multi-column grid (not a single-column list) so a laptop-width
+// window can show far more colors at once — narrower/mobile widths collapse to one column.
 function clRenderPicker() {
   const container = document.getElementById('cl-picker-results');
   if (!container) return;
@@ -5841,13 +6152,19 @@ function clRenderPicker() {
   const q = clPickerQuery.trim().toLowerCase();
   const matches = catalogColors.filter(c => !q || c.toLowerCase().includes(q)).sort((a, b) => a.localeCompare(b));
   const alreadyHave = new Set(COLOR_LIBRARY.filter(e => (e.brand || '').toLowerCase() === clPickerBrand.toLowerCase()).map(e => e.colorName.toLowerCase()));
-  let html = `<div style="max-height:260px; overflow-y:auto; margin-bottom:0.6rem;">`;
+  const selectableCount = matches.filter(c => !alreadyHave.has(c.toLowerCase())).length;
+  const allSelected = selectableCount > 0 && matches.every(c => alreadyHave.has(c.toLowerCase()) || clPickerSelected.has(c));
+  let html = `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem;">
+    <span style="font-size:11px; color:var(--text-secondary);">${matches.length} color${matches.length === 1 ? '' : 's'}${q ? ' matching' : ''}</span>
+    <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" ${selectableCount === 0 ? 'disabled' : ''} onclick="clSelectAllFiltered()">${allSelected ? 'Clear selection' : `Select all ${selectableCount}`}</button>
+  </div>`;
+  html += `<div style="max-height:320px; overflow-y:auto; margin-bottom:0.6rem; display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:2px 12px;">`;
   matches.forEach(color => {
     const have = alreadyHave.has(color.toLowerCase());
     const checked = clPickerSelected.has(color);
     html += `<label style="display:flex; align-items:center; gap:8px; padding:6px 2px; font-size:13px; ${have ? 'color:var(--text-tertiary);' : ''}">
       <input type="checkbox" ${checked ? 'checked' : ''} ${have ? 'disabled' : ''} onchange="clTogglePickerColor('${color.replace(/'/g, "\\'")}')">
-      ${psEscape(color)} ${have ? '<span style="font-size:11px;">— already in your Color Library</span>' : ''}
+      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${psEscape(color)}">${psEscape(color)}${have ? ' <span style="font-size:11px;">— have it</span>' : ''}</span>
     </label>`;
   });
   if (matches.length === 0) html += `<div style="font-size:12px; color:var(--text-secondary);">No matching colors.</div>`;
@@ -5858,10 +6175,14 @@ function clRenderPicker() {
 function clAddSelectedColors() {
   if (clPickerSelected.size === 0) return;
   const colors = [...clPickerSelected];
-  colors.forEach(color => clAddColor(clPickerBrand, color, { trackStock: true }));
-  clPickerSelected = new Set();
-  alert(`Added ${colors.length} ${clPickerBrand} color${colors.length === 1 ? '' : 's'} to your Color Library.`);
-  clRenderPicker();
+  const brand = clPickerBrand;
+  const btn = document.querySelector('#cl-picker-results .save-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Adding...'; }
+  clAddColorsBulk(colors.map(colorName => ({ brand, colorName })), { trackStock: true }).then(summary => {
+    clPickerSelected = new Set();
+    alert(`Added ${summary.added} ${brand} color${summary.added === 1 ? '' : 's'} to your Color Library${summary.alreadyHad ? ` (${summary.alreadyHad} were already there)` : ''}.`);
+    clRenderPicker();
+  });
 }
 
 // Populates just the color list (search results, grouped/sorted, collapsible) — called on
@@ -6329,6 +6650,8 @@ let jccState = null;
 let jccRowSeq = 0;
 let JCC_QUICK_ADD = []; // user-saved assembled products: { id, name, cost }
 let jccQuickAddSeq = 0;
+let jccAddFormOpen = false;
+let jccCsvImportCollapsed = true;
 
 // A small (i) next to a field label that toggles a short explanation on tap — for anything
 // that needs a sentence of context but would clutter the screen if always shown (e.g.
@@ -6388,7 +6711,12 @@ function jccInit() {
     if (snap.exists() && Array.isArray(snap.data().items)) {
       snap.data().items.forEach(saved => {
         const item = JCC_CATALOG.find(i => i.id === saved.id);
+        // A saved id that matches a hardcoded default only carries its cost edits forward —
+        // name/category/unit/count for defaults stay code-owned so JCC_CATALOG_DEFAULTS can
+        // keep evolving. A saved id with no default match is a manually-added or imported
+        // item that exists ONLY in Firestore, so the whole record has to come from here.
         if (item) { item.costA = saved.costA; item.costB = saved.costB; }
+        else JCC_CATALOG.push(saved);
       });
       jccRenderCatalog();
     }
@@ -6488,9 +6816,73 @@ function jccRenderCatalogSettingsSection() {
           : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="jccUnlockAdmin()">Unlock</button>`}
       </div>
     </div>
+    ${invAdminUnlocked ? jccAddFormHtml() : ''}
+    ${invAdminUnlocked ? `
+    <div class="inv-group-header" onclick="jccToggleCsvImportSection()">
+      <span>Bulk import materials (CSV)</span>
+      <i class="fa-solid fa-chevron-${jccCsvImportCollapsed ? 'down' : 'up'}"></i>
+    </div>
+    ${jccCsvImportCollapsed ? '' : `<div id="imp-root"></div>`}
+    ` : ''}
     <div id="jcc-catalog"></div>`}
   `;
   jccRenderCatalog();
+  if (invAdminUnlocked && !jccCsvImportCollapsed && impState) impRender();
+}
+
+function jccAddFormHtml() {
+  if (!jccAddFormOpen) {
+    return `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px; margin-bottom:0.75rem;" onclick="jccToggleAddForm()"><i class="fa-solid fa-plus"></i> Add material</button>`;
+  }
+  return `<div class="card" style="margin-bottom:0.75rem;">
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Name</label><input type="text" id="jcc-add-name" placeholder="e.g. Glue Dots (500 ct)"></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Category</label>
+        <select id="jcc-add-category">${JCC_CATEGORIES.map(c => `<option value="${c.key}">${psEscape(c.label)}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Cost A</label><input type="number" step="0.01" min="0" id="jcc-add-costA"></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Cost B</label><input type="number" step="0.01" min="0" id="jcc-add-costB"></div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Count (per the cost above)</label><input type="number" step="1" min="1" id="jcc-add-count" value="1"></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Unit</label><input type="text" id="jcc-add-unit" placeholder="e.g. balloon"></div>
+    </div>
+    <div style="display:flex; gap:8px;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="jccToggleAddForm()">Cancel</button>
+      <button class="save-btn" style="flex:1;" onclick="jccSubmitAddForm()">Add material</button>
+    </div>
+  </div>`;
+}
+function jccToggleAddForm() {
+  jccAddFormOpen = !jccAddFormOpen;
+  jccRenderCatalogSettingsSection();
+}
+function jccSubmitAddForm() {
+  const name = document.getElementById('jcc-add-name').value.trim();
+  const category = document.getElementById('jcc-add-category').value;
+  if (!name) { alert('Enter a material name.'); return; }
+  if (jccFindItem(category, name)) { alert('A material with that name already exists in that category.'); return; }
+  jccCreateItem({
+    category, name,
+    unit: document.getElementById('jcc-add-unit').value,
+    costA: document.getElementById('jcc-add-costA').value,
+    costB: document.getElementById('jcc-add-costB').value,
+    count: parseFloat(document.getElementById('jcc-add-count').value) || 1
+  });
+  jccSaveCatalog();
+  jccAddFormOpen = false;
+  jccCollapsedCategories.delete(category);
+  jccRenderCatalogSettingsSection();
+}
+
+function jccToggleCsvImportSection() {
+  jccCsvImportCollapsed = !jccCsvImportCollapsed;
+  if (!jccCsvImportCollapsed) { impOpen(jccCsvImportSpec()); clCsvImportCollapsed = true; }
+  else impClose();
+  jccRenderCatalogSettingsSection();
+  clRenderSettingsSection();
 }
 
 // ─── Custom items (materials) ───────────────────────────────────────────────
@@ -6797,6 +7189,92 @@ function jccUpdateCatalogField(itemId, field, value) {
   item[field] = v === '' ? null : (parseFloat(v) || 0);
   jccRenderCatalog();
   window.fbSaveJccCatalog({ items: JCC_CATALOG }).catch(err => console.error('Job cost catalog save failed:', err));
+}
+
+function jccNewCatalogItemId() { return 'jccitem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+// category+name is the identity for a catalog item — name alone isn't unique across categories
+// (e.g. a "Stand" could be Hardware or Supplies), matching how JCC_CATEGORIES are display groups.
+function jccFindItem(category, name) {
+  const c = (category || '').trim().toLowerCase();
+  const n = (name || '').trim().toLowerCase();
+  return JCC_CATALOG.find(i => i.category.toLowerCase() === c && i.name.trim().toLowerCase() === n);
+}
+function jccSaveCatalog() {
+  window.fbSaveJccCatalog({ items: JCC_CATALOG }).catch(err => console.error('Job cost catalog save failed:', err));
+}
+// Single creation path shared by the manual "Add material" form and bulk import — every
+// created item goes through here so both produce the exact same Firestore shape.
+function jccCreateItem({ category, name, unit, costA, costB, count }) {
+  const item = {
+    id: jccNewCatalogItemId(),
+    category: (category || '').trim().toLowerCase(),
+    name: (name || '').trim(),
+    unit: (unit || '').trim() || 'each',
+    costA: (costA === '' || costA == null) ? null : parseFloat(costA),
+    costB: (costB === '' || costB == null) ? null : parseFloat(costB),
+    count: (count > 0) ? count : 1
+  };
+  JCC_CATALOG.push(item);
+  return item;
+}
+// Bulk version — creates every row, then saves the catalog once (it's a single Firestore doc,
+// so unlike Color Library's per-color Inventory rows there's nothing to batch separately).
+function jccCreateItemsBulk(rows) {
+  const created = rows.map(r => jccCreateItem(r));
+  if (created.length > 0) jccSaveCatalog();
+  return created;
+}
+
+// CSV/paste import spec for the shared wizard (impOpen/impRender etc. — see the wizard core
+// near Color Library). Category is validated against the closed JCC_CATEGORIES enum since
+// anything else would save fine but render nowhere (jccCategoryHtml only loops known keys).
+function jccCsvImportSpec() {
+  const categoryKeys = JCC_CATEGORIES.map(c => c.key);
+  return {
+    key: 'materialCatalog',
+    title: 'Import materials',
+    updatable: true, // unlike Color Library, a matched material has real fields worth updating
+    fields: [
+      { key: 'category', label: `Category (${categoryKeys.join('/')})`, required: true },
+      { key: 'name', label: 'Name', required: true },
+      { key: 'unit', label: 'Unit', required: false },
+      { key: 'costA', label: 'Cost A', required: false },
+      { key: 'costB', label: 'Cost B', required: false },
+      { key: 'count', label: 'Count (per the cost)', required: false }
+    ],
+    validateRow: (v) => {
+      if (!v.name) return 'Missing name';
+      if (!categoryKeys.includes((v.category || '').trim().toLowerCase())) return `Category must be one of: ${categoryKeys.join('/')}`;
+      if (v.costA && isNaN(parseFloat(v.costA))) return 'Cost A must be a number';
+      if (v.costB && isNaN(parseFloat(v.costB))) return 'Cost B must be a number';
+      if (v.count && isNaN(parseFloat(v.count))) return 'Count must be a number';
+      return null;
+    },
+    matchExisting: (v) => jccFindItem(v.category, v.name) || null,
+    describeExisting: (existing) => `${existing.category} / ${existing.name}`,
+    commitRows: (rows) => {
+      let updated = 0, skipped = 0;
+      const toCreate = [];
+      rows.forEach(r => {
+        if (r.action === 'skip') { skipped++; return; }
+        const costA = r.values.costA !== '' ? parseFloat(r.values.costA) : null;
+        const costB = r.values.costB !== '' ? parseFloat(r.values.costB) : null;
+        const count = r.values.count !== '' ? parseFloat(r.values.count) : null;
+        if (r.action === 'update' && r.existing) {
+          if (r.values.unit) r.existing.unit = r.values.unit.trim();
+          r.existing.costA = costA;
+          r.existing.costB = costB;
+          if (count > 0) r.existing.count = count;
+          updated++;
+        } else {
+          toCreate.push({ category: r.values.category, name: r.values.name, unit: r.values.unit, costA, costB, count });
+        }
+      });
+      const created = jccCreateItemsBulk(toCreate);
+      if (updated > 0) jccSaveCatalog();
+      return Promise.resolve({ created: created.length, updated, skipped, failed: 0 });
+    }
+  };
 }
 
 function jccUnlockAdmin() {
@@ -7419,6 +7897,7 @@ function showView(v) {
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.getElementById('view-' + v).classList.add('active');
   window.scrollTo(0, 0);
+  document.getElementById('app-shell').classList.toggle('app-wide', v === 'settings');
   if (v !== 'settings') lastToolView = v;
   // Re-renders every time Business Setup becomes active (including via the back button, not
   // just a fresh click into it) so status cards always reflect whatever changed in Settings.
