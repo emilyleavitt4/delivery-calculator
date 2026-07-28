@@ -740,7 +740,7 @@
 </style>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
-  import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
   import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot, writeBatch } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
   import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
 
@@ -769,14 +769,12 @@
   // Firebase module with the classic script the rest of the app already uses.
   window.fbAuth = auth;
   window.fbGoogleProvider = new GoogleAuthProvider();
-  window.fbSignIn = () => signInWithRedirect(auth, window.fbGoogleProvider);
+  // Popup instead of signInWithRedirect: redirect bounces the user out to Google and back,
+  // which depends on cross-site cookies/storage between this domain and the firebaseapp.com
+  // auth domain — Safari (and increasingly Chrome) blocks that by default, which showed up as
+  // sign-in silently bouncing back to the gate with no error. A popup avoids that handoff.
+  window.fbSignIn = () => signInWithPopup(auth, window.fbGoogleProvider);
   window.fbSignOut = () => signOut(auth);
-
-  // After Google redirects back to the app post-sign-in, this catches anything that went
-  // wrong during that handoff (rather than it failing silently).
-  getRedirectResult(auth).catch(err => {
-    console.error('Sign-in redirect error:', err);
-  });
 
   window.fbOnSnapshotJobs = (onNext, onError) => onSnapshot(jobsRef, onNext, onError);
   window.fbSaveJob = (job) => setDoc(doc(jobsRef, job.id), job);
@@ -7951,12 +7949,11 @@ function handleSignOutClick() {
   window.fbSignOut();
 }
 
-// TEMPORARY, LOCAL-DEV-ONLY: Firebase's signInWithRedirect doesn't reliably complete on
-// localhost (third-party storage restrictions between this origin and the firebaseapp.com
-// auth domain), which made it impossible to preview the app while developing. This skips
-// the gate ONLY when running on localhost — the deployed site (GitHub Pages) always goes
-// through the real check below untouched. Firestore/Storage security rules are the actual
-// access control either way, so this only affects the friendly client-side gate.
+// TEMPORARY, LOCAL-DEV-ONLY: skips the sign-in gate when previewing on a local static
+// server, since that origin isn't (and shouldn't need to be) in Firebase's authorized-domains
+// list. Only applies on localhost — the deployed site (GitHub Pages) always goes through the
+// real check below untouched. Firestore/Storage security rules are the actual access control
+// either way, so this only affects the friendly client-side gate.
 // TODO: remove this block once local sign-in isn't needed for previewing anymore.
 const DEV_SKIP_AUTH_GATE = ['localhost', '127.0.0.1'].includes(location.hostname);
 
