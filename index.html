@@ -838,6 +838,11 @@
   window.fbLoadJccQuickAdd = () => window.fbLoadSettingsDoc('jccQuickAdd');
   window.fbSaveJccQuickAdd = (data) => window.fbSaveSettingsDoc('jccQuickAdd', data);
 
+  // Whether the one-time "use the built-in sample materials, or import your own?" choice on
+  // first visiting Material Catalog has been made yet — a plain flag, not the catalog itself.
+  window.fbLoadJccSetupChoice = () => window.fbLoadSettingsDoc('jccSetupChoice');
+  window.fbSaveJccSetupChoice = (data) => window.fbSaveSettingsDoc('jccSetupChoice', data);
+
   // Helium Cost Calculator — tank economics + per-size/shape helium costs, business-wide
   // reference data like Formulas, and read by the Job Cost Calculator's item type-ahead.
   window.fbLoadHeliumCalc = () => window.fbLoadSettingsDoc('heliumCalc');
@@ -1870,8 +1875,8 @@ const TOOL_META = {
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: true  },
   timetracker:{ title: 'Time Tracker',                  icon: 'fa-solid fa-clock',               showBack: true,  showGear: true  },
   importReview:{ title: 'Review Import',                icon: 'fa-solid fa-clipboard-check',     showBack: true,  showGear: false },
-  businessSetup:{ title: 'Business Setup',              icon: 'fa-solid fa-list-check',          showBack: true,  showGear: true  },
-  settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: true,  showGear: false }
+  businessSetup:{ title: 'Business Setup',              icon: 'fa-solid fa-list-check',          showBack: false, showGear: true  },
+  settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: false, showGear: false }
 };
 
 // Every business-configuration section that lives in Settings, registered once instead of
@@ -1884,9 +1889,9 @@ const TOOL_META = {
 const SETTINGS_SECTIONS = [
   { id: 'teamMembers', label: 'Team Members', group: 'people', containerId: 'tm-settings-root' },
   { id: 'importMappings', label: 'Import Mapping Rules', group: 'importMapping', containerId: 'im-root' },
-  { id: 'colorLibrary', label: 'Color Library', group: 'catalogs', containerId: 'cl-settings-root' },
-  { id: 'materialCatalog', label: 'Material Catalog', group: 'catalogs', containerId: 'jcc-catalog-settings-root' },
-  { id: 'heliumReference', label: 'Helium Cost Reference', group: 'catalogs', containerId: 'he-settings-root' },
+  { id: 'colorLibrary', label: 'Color Library', group: 'catalogs', containerId: 'cl-settings-root', icon: 'fa-solid fa-swatchbook' },
+  { id: 'materialCatalog', label: 'Material Catalog', group: 'catalogs', containerId: 'jcc-catalog-settings-root', icon: 'fa-solid fa-boxes-stacked' },
+  { id: 'heliumReference', label: 'Helium Cost Reference', group: 'catalogs', containerId: 'he-settings-root', icon: 'fa-solid fa-wind' },
   { id: 'productionTemplates', label: 'Production Templates', group: 'templatesFormulas', containerId: 'pt-root' },
   { id: 'balloonMath', label: 'Calculator Defaults — Balloon math', group: 'templatesFormulas', containerId: 'fr-formulas-root', standaloneLabel: true },
   { id: 'attachmentCategories', label: 'Attachment Categories', group: 'attachments', containerId: 'ac-settings-root' },
@@ -1898,7 +1903,11 @@ const SETTINGS_SECTIONS = [
 const SETTINGS_GROUPS = [
   { id: 'account', label: 'Account', icon: 'fa-solid fa-user' },
   { id: 'people', label: 'People & Access', icon: 'fa-solid fa-users' },
-  { id: 'catalogs', label: 'Catalogs & Libraries', icon: 'fa-solid fa-swatchbook' },
+  // subChoice: this group's three sections (Color Library, Material Catalog, Helium Cost
+  // Reference) were too much stacked on one scrolling page — instead the group opens to its
+  // own small picker (settingsGroupPickerHtml) and shows exactly one section at a time
+  // (settingsShowGroupSection). Every other group still shows all its sections stacked, as before.
+  { id: 'catalogs', label: 'Library and Catalogs', icon: 'fa-solid fa-swatchbook', subChoice: true },
   { id: 'templatesFormulas', label: 'Templates & Formulas', icon: 'fa-solid fa-shapes' },
   { id: 'importMapping', label: 'Import & Mapping', icon: 'fa-solid fa-file-import' },
   { id: 'pricing', label: 'Pricing & Calculators', icon: 'fa-solid fa-calculator' },
@@ -1917,12 +1926,31 @@ function settingsRenderSections() {
         <div class="tool-tile-title">${psEscape(g.label)}</div>
       </div>`).join('');
   }
+  // subChoice groups (just "catalogs" today) get their own small picker tile grid instead of
+  // every section stacked on one page — built once per group here, ahead of the sections
+  // themselves so it appears first in the panel.
+  SETTINGS_GROUPS.forEach(g => {
+    if (!g.subChoice) return;
+    const panel = document.querySelector(`[data-settings-group="${g.id}"]`);
+    if (!panel) return;
+    const sections = SETTINGS_SECTIONS.filter(s => s.group === g.id);
+    panel.insertAdjacentHTML('beforeend', `<div id="settings-picker-${g.id}" class="tool-grid">
+      ${sections.map(s => `<div class="tool-tile" onclick="settingsShowGroupSection('${g.id}','${s.id}')">
+        <div class="tool-tile-icon"><i class="${s.icon || g.icon}"></i></div>
+        <div class="tool-tile-title">${psEscape(s.label)}</div>
+      </div>`).join('')}
+    </div>`);
+  });
   SETTINGS_SECTIONS.forEach(s => {
     const panel = document.querySelector(`[data-settings-group="${s.group}"]`);
     if (!panel) return;
-    panel.insertAdjacentHTML('beforeend',
-      (s.standaloneLabel ? `<div class="section-label">${psEscape(s.label)}</div>` : '') +
-      `<div id="${s.containerId}"></div>`);
+    const group = SETTINGS_GROUPS.find(g => g.id === s.group);
+    const html = (s.standaloneLabel ? `<div class="section-label">${psEscape(s.label)}</div>` : '') + `<div id="${s.containerId}"></div>`;
+    // A subChoice group's sections start hidden — only the one picked via
+    // settingsShowGroupSection (or reached directly from Business Setup) is ever shown.
+    panel.insertAdjacentHTML('beforeend', (group && group.subChoice)
+      ? `<div class="settings-subsection" data-subsection="${s.id}" style="display:none;">${html}</div>`
+      : html);
   });
 }
 
@@ -1930,14 +1958,21 @@ function settingsRenderSections() {
 // a group and backing out of it is a local show/hide, not real view routing, so the rest of the
 // app (lastToolView, goBack()) doesn't need to know Settings has sub-screens at all.
 let settingsCurrentGroup = null;
-// True only for the group visit currently open, and only when it was entered via a Business
-// Setup card (bsGoTo sets this right after calling settingsShowGroup, which is why the reset
-// lives at the top of this function rather than in bsGoTo — any OTHER call to settingsShowGroup,
-// e.g. tapping a tile on Settings' own home grid, naturally leaves it false).
+// Which section is currently shown within a subChoice group (e.g. "colorLibrary" within
+// "catalogs") — null means that group's own picker screen is showing instead of any one
+// section. Irrelevant for every other (non-subChoice) group, which always shows all its
+// sections stacked and never sets this.
+let settingsCurrentSection = null;
+// True only for the group/section visit currently open, and only when it was entered via a
+// Business Setup card (bsGoTo sets this right after calling settingsShowGroup/
+// settingsShowGroupSection, which is why the reset lives at the top of those functions rather
+// than in bsGoTo — any OTHER call to them, e.g. tapping a tile on Settings' own home grid or
+// picker, naturally leaves it false).
 let bsCameFromSetupGroup = false;
 function settingsShowGroup(groupId) {
   bsCameFromSetupGroup = false;
   settingsCurrentGroup = groupId;
+  settingsCurrentSection = null;
   document.getElementById('settings-home-grid').style.display = 'none';
   document.querySelectorAll('.settings-group-panel').forEach(el => el.style.display = 'none');
   const panel = document.querySelector(`[data-settings-group="${groupId}"]`);
@@ -1947,19 +1982,48 @@ function settingsShowGroup(groupId) {
   if (panel) panel.style.display = 'flex';
   const group = SETTINGS_GROUPS.find(g => g.id === groupId);
   document.getElementById('settings-header-title').textContent = group ? group.label : 'Settings';
+  if (group && group.subChoice) {
+    const picker = document.getElementById('settings-picker-' + groupId);
+    if (picker) picker.style.display = '';
+    if (panel) panel.querySelectorAll('.settings-subsection').forEach(el => el.style.display = 'none');
+  }
+}
+// Jumps straight to one section within a subChoice group, skipping that group's own picker
+// screen — used when Business Setup already knows exactly which one you want, and when picking
+// a tile off the group's own picker screen.
+function settingsShowGroupSection(groupId, sectionId) {
+  settingsShowGroup(groupId);
+  settingsCurrentSection = sectionId;
+  const picker = document.getElementById('settings-picker-' + groupId);
+  if (picker) picker.style.display = 'none';
+  const panel = document.querySelector(`[data-settings-group="${groupId}"]`);
+  if (panel) {
+    panel.querySelectorAll('.settings-subsection').forEach(el => {
+      el.style.display = el.dataset.subsection === sectionId ? '' : 'none';
+    });
+  }
+  const section = SETTINGS_SECTIONS.find(s => s.id === sectionId);
+  document.getElementById('settings-header-title').textContent = section ? section.label : 'Settings';
 }
 function settingsShowHome() {
   settingsCurrentGroup = null;
+  settingsCurrentSection = null;
   document.getElementById('settings-home-grid').style.display = '';
   document.querySelectorAll('.settings-group-panel').forEach(el => el.style.display = 'none');
   document.getElementById('settings-header-title').textContent = 'Settings';
 }
-// The back arrow backs out of a group into Settings' own home grid first, and only leaves
-// Settings entirely (via the existing goBack()) once already at that home grid — except when
-// the group was reached via a Business Setup card, in which case it returns straight there
-// instead, skipping the home grid entirely (the top bar's back arrow is unaffected by this;
+// The back arrow backs out of a section into that group's own picker screen first (subChoice
+// groups only), then out of a group into Settings' own home grid, and only leaves Settings
+// entirely (via the existing goBack()) once already at that home grid — except when the
+// section/group was reached via a Business Setup card, in which case it returns straight there
+// instead, skipping every intermediate screen (the top bar's back arrow is unaffected by this;
 // it always goes to whatever screen was open before Settings, same as before).
 function settingsBack() {
+  if (settingsCurrentSection) {
+    if (bsCameFromSetupGroup) { bsCameFromSetupGroup = false; showView('businessSetup'); return; }
+    settingsShowGroup(settingsCurrentGroup);
+    return;
+  }
   if (settingsCurrentGroup) {
     if (bsCameFromSetupGroup) { bsCameFromSetupGroup = false; showView('businessSetup'); return; }
     settingsShowHome();
@@ -2022,7 +2086,7 @@ const BUSINESS_SETUP_ITEMS = [
     id: 'colorLibrary', order: 3, required: true,
     label: 'Color Library',
     description: 'The colors this business actually stocks.',
-    destinationType: 'settingsGroup', destination: 'catalogs',
+    destinationType: 'settingsGroup', destination: 'catalogs', destinationSection: 'colorLibrary',
     status: () => {
       if (INVENTORY_ITEMS.length === 0) return { state: 'not_started' };
       const active = INVENTORY_ITEMS.filter(i => i.active !== false);
@@ -2035,7 +2099,7 @@ const BUSINESS_SETUP_ITEMS = [
     id: 'materialCatalog', order: 4, required: true,
     label: 'Material Catalog',
     description: 'Per-unit vendor costs for raw materials.',
-    destinationType: 'settingsGroup', destination: 'catalogs',
+    destinationType: 'settingsGroup', destination: 'catalogs', destinationSection: 'materialCatalog',
     status: () => {
       const priced = JCC_CATALOG.filter(i => i.costA != null || i.costB != null);
       return priced.length > 0 ? { state: 'complete', count: priced.length } : { state: 'not_started' };
@@ -2076,7 +2140,7 @@ const BUSINESS_SETUP_ITEMS = [
     id: 'heliumReference', order: 9, required: false,
     label: 'Helium Cost Reference',
     description: 'Tank economics and per-size helium costs.',
-    destinationType: 'settingsGroup', destination: 'catalogs',
+    destinationType: 'settingsGroup', destination: 'catalogs', destinationSection: 'heliumReference',
     status: () => ({ state: heliumCalcSaved ? 'complete' : 'optional' }),
   },
 ];
@@ -2192,7 +2256,11 @@ function bsGoTo(id) {
   const item = BUSINESS_SETUP_ITEMS.find(i => i.id === id);
   if (!item || item.comingLater) return;
   if (item.destinationType === 'settingsGroup') {
-    settingsShowGroup(item.destination);
+    // destinationSection (Color Library / Material Catalog / Helium Cost Reference, the three
+    // sections inside the "catalogs" subChoice group) jumps straight past that group's own
+    // picker screen — Business Setup already knows exactly which one you want.
+    if (item.destinationSection) settingsShowGroupSection(item.destination, item.destinationSection);
+    else settingsShowGroup(item.destination);
     bsCameFromSetupGroup = true;
     showView('settings');
   } else if (item.destinationType === 'view') {
@@ -6375,7 +6443,7 @@ function clRenderSettingsSection() {
   }
   html += invLibraryOnlyHtml();
   html += `<div style="margin-top:1rem; padding-top:0.75rem; border-top:0.5px solid var(--border);">
-    <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--warning-bg); color:var(--warning-text); border:0.5px solid var(--warning-text);" onclick="clClearLibraryAndInventory()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all colors &amp; inventory</button>
+    <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--bg); color:var(--text-secondary); border:0.5px solid var(--border-strong);" onclick="clClearLibraryAndInventory()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all colors &amp; inventory</button>
   </div>`;
   root.innerHTML = html;
   clRenderBrandToggle();
@@ -7025,6 +7093,7 @@ let JCC_QUICK_ADD = []; // user-saved assembled products: { id, name, cost }
 let jccQuickAddSeq = 0;
 let jccAddFormOpen = false;
 let jccCsvImportCollapsed = true;
+let jccSetupChoiceMade = false; // true once the first-visit "use built-in materials or import your own?" prompt has been answered
 
 // A small (i) next to a field label that toggles a short explanation on tap — for anything
 // that needs a sentence of context but would clutter the screen if always shown (e.g.
@@ -7080,6 +7149,13 @@ function jccInit() {
   jccRenderShell();
   jccRenderCatalogSettingsSection(); // #jcc-catalog-settings-root lives in Settings now, not inside #jcc-root
 
+  window.fbLoadJccSetupChoice().then(snap => {
+    if (snap.exists() && snap.data().choiceMade) {
+      jccSetupChoiceMade = true;
+      jccRenderCatalogSettingsSection();
+    }
+  }).catch(err => console.error('Material setup choice load failed:', err));
+
   window.fbLoadJccCatalog().then(snap => {
     if (snap.exists() && Array.isArray(snap.data().items)) {
       snap.data().items.forEach(saved => {
@@ -7091,7 +7167,17 @@ function jccInit() {
         if (item) { item.costA = saved.costA; item.costB = saved.costB; }
         else JCC_CATALOG.push(saved);
       });
+      // A catalog doc already existing means this business was already using Material
+      // Catalog before the first-visit prompt existed — treat that as an implicit "use the
+      // built-in materials" choice already made, rather than retroactively asking about a
+      // decision that's effectively already been acted on, and persist the inference so it
+      // isn't re-derived on every load.
+      if (!jccSetupChoiceMade) {
+        jccSetupChoiceMade = true;
+        window.fbSaveJccSetupChoice({ choiceMade: true, choice: 'defaults-implicit' }).catch(err => console.error('Material setup choice save failed:', err));
+      }
       jccRenderCatalog();
+      jccRenderCatalogSettingsSection();
     }
   }).catch(err => console.error('Job cost catalog load failed:', err));
 
@@ -7179,6 +7265,7 @@ function jccRenderCatalogSettingsSection() {
       <span>Material Catalog <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— Raw Costs</span></span>
       <i class="fa-solid fa-chevron-${jccCatalogSectionCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
     </div>
+    ${jccSetupChoiceMade ? '' : jccSetupChoiceHtml()}
     ${jccCatalogSectionCollapsed ? '' : `
     <div class="card" style="margin-bottom:0.75rem;">
       <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Two vendor prices per item, averaged — picking an item in the Job Cost Calculator auto-fills its cost from here.</div>
@@ -7199,7 +7286,7 @@ function jccRenderCatalogSettingsSection() {
     ` : ''}
     <div id="jcc-catalog"></div>
     <div style="margin-top:1rem; padding-top:0.75rem; border-top:0.5px solid var(--border);">
-      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--warning-bg); color:var(--warning-text); border:0.5px solid var(--warning-text);" onclick="jccClearAllCosts()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all costs</button>
+      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--bg); color:var(--text-secondary); border:0.5px solid var(--border-strong);" onclick="jccClearAllCosts()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all costs</button>
     </div>`}
   `;
   jccRenderCatalog();
@@ -7259,6 +7346,41 @@ function jccToggleCsvImportSection() {
   else impClose();
   jccRenderCatalogSettingsSection();
   clRenderSettingsSection();
+}
+
+// One-time fork shown on first visit (jccSetupChoiceMade false): start from the 55 built-in
+// sample materials, or clear them out and import a real list instead. Shown above the collapsed
+// header itself, not nested inside it, so it's impossible to miss on a first visit.
+function jccSetupChoiceHtml() {
+  return `<div class="card" style="margin-bottom:0.75rem; border:0.5px solid var(--accent-border);">
+    <div style="font-size:13px; font-weight:600; margin-bottom:4px;">Materials: use the built-in list, or your own?</div>
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px;">This catalog starts with 55 common balloon-business materials and sample costs already in it. Use those as a starting point, or clear them out and import your own from a CSV/spreadsheet instead.</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="save-btn" style="flex:1; min-width:160px;" onclick="jccChooseDefaults()">Use the built-in materials</button>
+      <button class="icon-btn" style="flex:1; min-width:160px; border:0.5px solid var(--border-strong);" onclick="jccChooseImportOwn()"><i class="fa-solid fa-file-csv"></i> Import my own instead</button>
+    </div>
+  </div>`;
+}
+function jccChooseDefaults() {
+  jccSetupChoiceMade = true;
+  window.fbSaveJccSetupChoice({ choiceMade: true, choice: 'defaults' }).catch(err => console.error('Material setup choice save failed:', err));
+  jccRenderCatalogSettingsSection();
+}
+function jccChooseImportOwn() {
+  if (!invAdminUnlocked) {
+    const entered = prompt('Enter the admin passcode to clear the built-in materials and import your own:');
+    if (entered === null) return;
+    if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode.'); return; }
+    invAdminUnlocked = true;
+  }
+  if (!confirm(`This removes all ${JCC_CATALOG.length} built-in sample materials so you can import your own instead. This can't be undone.`)) return;
+  JCC_CATALOG = [];
+  jccSaveCatalog();
+  jccSetupChoiceMade = true;
+  window.fbSaveJccSetupChoice({ choiceMade: true, choice: 'custom' }).catch(err => console.error('Material setup choice save failed:', err));
+  jccCatalogSectionCollapsed = false;
+  settingsRefreshAdminSections();
+  if (jccCsvImportCollapsed) jccToggleCsvImportSection(); // opens the CSV wizard right away, since that's the point of this choice
 }
 
 // ─── Custom items (materials) ───────────────────────────────────────────────
