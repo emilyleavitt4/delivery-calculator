@@ -5116,26 +5116,122 @@ const INV_SEED_BRANDS = ['Sempertex', 'Tuftex', 'Decomex', 'Kalisan', 'Qualatex'
 
 // ═══════════════════════════════════════ MASTER MANUFACTURER CATALOG ═══════════════════════════════════════
 //
-// BRAND_COLOR_CATALOG is a manufacturer-level list — which colors each brand makes — entirely
-// separate from INVENTORY_ITEMS (this business's own active catalog, with its own backstock/
-// par/open-bin status per color). Seeded from the same verified spreadsheet data as
-// INV_SEED_DATA, color names only, no stock levels — a manufacturer catalog doesn't know or
-// care what any particular business has on hand. Kalisan has no verified color list yet, so it
-// stays an empty entry rather than fabricated color names. Only Sempertex/Tuftex/Decomex are
-// offered in the manufacturer color picker (CL_SUPPORTED_MANUFACTURERS) for now, though Kalisan/
-// Qualatex still exist here for whatever else in the app already reads this list.
+// BRAND_COLOR_CATALOG is a manufacturer-level list — which colors each brand actually makes —
+// entirely separate from INVENTORY_ITEMS (this business's own active catalog, with its own
+// backstock/par/open-bin status per color) and from INV_SEED_DATA (this business's own purchase
+// history, still used below to pre-fill real historical stock numbers when a color already
+// bought before gets re-added, but no longer used to build this list). Sourced from each
+// manufacturer's own published color line — Tuftex and Decomex from their official sites
+// (tuftexballoons.com/tuftex, decomex.com/pages/decomex-colors). Sempertex's downloadable color
+// chart is image-only (no extractable text), so the bulk of that list is compiled from a
+// wholesale distributor's catalog (balloonsfast.com) — reliable, but secondhand, so treat exact
+// wording there as approximate. The five newest Fashion colors (Sweet Pink, Cosmo Fuchsia, Urban
+// Grey, Cream Blush, Almond White) were cross-checked directly against sempertex.com's own "New
+// Products" page as of 2026-08-28, since a brand-new release wouldn't have reached a distributor
+// catalog yet — Sweet Pink and Cosmo Fuchsia in particular don't appear anywhere else yet.
+// Kalisan has no verified color list, so it stays empty rather than fabricated. Decomex's
+// printed/patterned balloons (Cow Print, Face Balloons, etc.) are excluded — this list is solid
+// colors only, matching what this app's Color Library models.
 //
-// clAddColor (Color Library, below) is the only thing that reads this to populate a business's
-// own Color Library; every color autocomplete/invoice-color-matching (clAllNames) never touches
-// BRAND_COLOR_CATALOG directly.
-const BRAND_COLOR_CATALOG = {};
-INV_SEED_BRANDS.forEach(b => { BRAND_COLOR_CATALOG[b] = []; });
-INV_SEED_DATA.forEach(seed => {
-  if (!BRAND_COLOR_CATALOG[seed.brand]) BRAND_COLOR_CATALOG[seed.brand] = [];
-  if (!BRAND_COLOR_CATALOG[seed.brand].some(c => c.toLowerCase() === seed.color.toLowerCase())) {
-    BRAND_COLOR_CATALOG[seed.brand].push(seed.color);
-  }
-});
+// clAddColorsBulk (Color Library, below) is the only thing that reads this to populate a
+// business's own Color Library; every color autocomplete/invoice-color-matching (clAllNames)
+// never touches BRAND_COLOR_CATALOG directly.
+const BRAND_COLOR_CATALOG = {
+  Sempertex: [
+    // Fashion — Sweet Pink, Cosmo Fuchsia, Urban Grey, Cream Blush, and Almond White
+    // confirmed directly against sempertex.com's own "New Products" listing; Cream Blush and
+    // Almond White were previously miscategorized here as Deluxe based on secondhand retailer
+    // naming — the manufacturer's own site lists all five as Fashion.
+    'Fashion White', 'Fashion Blue', 'Fashion Red', 'Fashion Navy', 'Fashion Royal Blue',
+    'Fashion Robin Egg', 'Fashion Violet', 'Fashion Green', 'Fashion Forest Green',
+    'Fashion Yellow', 'Fashion Orange', 'Fashion Bubblegum Pink', 'Crystal Clear',
+    'Fashion Sweet Pink', 'Fashion Cosmo Fuchsia', 'Fashion Urban Grey', 'Fashion Cream Blush',
+    'Fashion Almond White',
+    // Deluxe
+    'Deluxe Black', 'Deluxe White Sand', 'Deluxe Imperial Red', 'Deluxe Deep Teal',
+    'Deluxe Eucalyptus', 'Deluxe Fuchsia', 'Deluxe Honey Yellow', 'Deluxe Key Lime',
+    'Deluxe Latte', 'Deluxe Merlot', 'Deluxe Mustard', 'Deluxe Peach Blush',
+    'Deluxe Purple Orchid', 'Deluxe Rosewood', 'Deluxe Shamrock Green', 'Deluxe Sunset Orange',
+    'Deluxe Nude', 'Deluxe Tropical Coral', 'Deluxe Lilac', 'Deluxe Rose', 'Deluxe Coffee',
+    'Deluxe Chocolate', 'Deluxe Mocha', 'Deluxe Green Tea',
+    // Reflex (chrome/metallic)
+    'Reflex Gold', 'Reflex Silver', 'Reflex Red', 'Reflex Champagne', 'Reflex Rose Gold',
+    'Reflex Aurora Green', 'Reflex Truffle', 'Reflex Pink', 'Reflex Galaxy Blue', 'Reflex Key Lime',
+    // Silk / Pastel Dusk
+    'Silk Oyster White', 'Silk Cream Pearl', 'Silk Arctic Blue', 'Silk Gold Dust',
+    'Silk Light Amethyst', 'Silk Pink Blossom', 'Silk Midnight Grey', 'Silk Cool Mint',
+    'Pastel Dusk Blue', 'Pastel Dusk Cream', 'Pastel Dusk Laurel Green', 'Pastel Dusk Lavender',
+    // Metallic & Pearl
+    'Pearl White', 'Metallic Black', 'Metallic Silver', 'Metallic Gold',
+    // Pastel Matte
+    'Pastel Matte Blue', 'Pastel Matte Green', 'Pastel Matte Lilac', 'Pastel Matte Pink',
+    'Pastel Matte Yellow', 'Pastel Matte Melon', 'Pastel Matte Malibu Peach',
+    // Neon
+    'Neon Blue', 'Neon Green', 'Neon Magenta', 'Neon Orange', 'Neon Yellow'
+  ],
+  Tuftex: [
+    'Cameo', 'Romey', 'Baby Pink', 'Shimmering Pink', 'Pink', 'Canyon Rose', 'Coral', 'Taffy',
+    'Pixie', 'Hot Pink', 'Metallic Fuchsia', 'Crystal Magenta', 'Crystal Burgundy', 'Sangria',
+    'Scarlett', 'Red', 'Crystal Red', 'Metallic Starfire Red', 'Aloha', 'Metallic Rose Gold',
+    'Burnt Orange', 'Orange', 'Cheeky', 'Lemonade', 'Yellow', 'Goldenrod', 'Mustard',
+    'Metallic Gold', 'Blush', 'Lime Green', 'Fiona', 'Green', 'Metallic Green',
+    'Crystal Emerald Green', 'Metallic Forest Green', 'Evergreen', 'Willow', 'Meadow',
+    'Empowermint', 'Metallic Teal', 'Teal', 'Sea Glass', 'Seafoam', 'Turquoise', 'Monet',
+    'Baby Blue', 'Georgia', 'Blue Slate', 'Blue', 'Metallic Blue', 'Royalty',
+    'Crystal Sapphire Blue', 'Navy', 'Naval', 'Metallic Midnight Blue', 'Blossom', 'Lavender',
+    'Plum Purple', 'Crystal Purple', 'Crystal Clear', 'White', 'Sugar', 'Fog', 'Metallic Silver',
+    'Gray Smoke', 'Black', 'Lace', 'Muse', 'Malted', 'Cocoa', 'Rockstar Effects',
+    'Golden Effects', 'Silvery Effects', 'Shadow Effects'
+  ],
+  Decomex: [
+    // Standard
+    'Standard Assorted', 'Standard White', 'Standard Red', 'Standard Ruby Red', 'Standard Pink',
+    'Standard Orange', 'Standard Yellow', 'Standard Deep Yellow', 'Standard Lavender',
+    'Standard Purple', 'Standard Green', 'Standard Forest Green', 'Standard Medium Blue',
+    'Standard Blue', 'Standard Carolina Blue', 'Standard Aqua Blue', 'Standard Ocean Blue',
+    'Standard Black',
+    // Pastel Deco
+    'Pastel Deco Dusty White', 'Pastel Deco Grey', 'Pastel Deco Sand', 'Pastel Deco Desert Sand',
+    'Pastel Deco Stone', 'Pastel Deco Storm', 'Pastel Sage Green', 'Pastel Coral Grey',
+    'Pastel Pebble Grey', 'Pastel Light Grey', 'Pastel Deco Fuchsia', 'Pastel Deco Magenta',
+    'Pastel Deco Rose', 'Pastel Deco Wild Berry', 'Pastel Deco Dusty Rose', 'Pastel Deco Plum',
+    'Pastel Deco Deep Rose', 'Pastel Deco Sahara Rose', 'Pastel Deco Light Pink',
+    'Pastel Deco Baby Pink', 'Pastel Deco Taffy Pink', 'Pastel Deco Candy Pink',
+    'Pastel Deco Clay Pink', 'Pastel Deco Flamingo Pink', 'Pastel Deco Princess Pink',
+    'Pastel Deco Cider Orange', 'Pastel Deco Peach', 'Pastel Deco Coral', 'Pastel Deco Cameo',
+    'Pastel Deco Ivory', 'Pastel Deco Golden Yellow', 'Pastel Deco Yellowish',
+    'Pastel Deco Amber', 'Pastel Deco Salmon', 'Pastel Deco Floral', 'Pastel Deco Floral Blossom',
+    'Pastel Deco Lilac', 'Pastel Deco Burgundy', 'Pastel Deco Chocolate Brown',
+    'Pastel Deco Rosewood', 'Pastel Deco Pink Blush', 'Pastel Deco Skin Blush',
+    'Pastel Deco Mocha', 'Pastel Deco Blended Brown', 'Pastel Deco Bright Lime',
+    'Pastel Deco Winter Green', 'Pastel Deco Lime Green', 'Matte Mint Green',
+    'Pastel Deco Eucalyptus', 'Pastel Deco Olive', 'Pastel Deco Mustard', 'Pastel Deco Green Tea',
+    'Pastel Deco Pine Green', 'Pastel Deco Periwinkle', 'Pastel Deco Light Blue',
+    'Pastel Deco Pastel Navy Blue', 'Pastel Deco Midnight Blue', 'Pastel Deco Turquoise',
+    'Pastel Deco Baby Blue', 'Pastel Deco Royal Blue', 'Pastel Deco Sky Blue',
+    'Pastel Deco Tiffany Blue', 'Pastel Deco Dusty Blue',
+    // Luster
+    'Luster Silver', 'Luster Gold', 'Luster Rose Gold', 'Luster Blue', 'Luster Green',
+    'Luster Purple',
+    // Pearl / Metallic
+    'Pearl Metallic White', 'Pearl Metallic Silver', 'Pearl Metallic Pearl White',
+    'Pearl Metallic Champagne', 'Pearl Metallic Red', 'Pearl Metallic Fuchsia',
+    'Pearl Metallic Magenta', 'Pearl Metallic Pink', 'Pearl Metallic Light Pink',
+    'Pearl Metallic Hot Pink', 'Pearl Metallic Dark Pink', 'Pearl Metallic Orange',
+    'Pearl Metallic Peach', 'Pearl Metallic Yellow', 'Pearl Metallic Ivory', 'Metallic Gold',
+    'Pearl Metallic Rose Gold', 'Pearl Metallic Copper', 'Pearl Metallic Rose Pink',
+    'Pearl Metallic Lavender', 'Pearl Metallic Purple', 'Pearl Metallic Light Lavender',
+    'Metallic Burgundy', 'Pearl Metallic Green', 'Pearl Metallic Light Green',
+    'Pearl Metallic Emerald Green', 'Pearl Metallic Pale Green', 'Pearl Metallic Mint Green',
+    'Pearl Metallic Blue', 'Pearl Metallic Naval Blue', 'Pearl Metallic Azure',
+    'Pearl Metallic Light Blue', 'Pearl Metallic Periwinkle', 'Pearl Metallic Aqua',
+    'Pearl Metallic Midnight Blue', 'Pearl Metallic Black',
+    // Jewel Crystal
+    'Jewel Crystal Clear', 'Jewel Chilli Red', 'Jewel Orange', 'Jewel Violet',
+    'Jewel Dark Green', 'Jewel Dark Blue'
+  ]
+};
+INV_SEED_BRANDS.forEach(b => { if (!BRAND_COLOR_CATALOG[b]) BRAND_COLOR_CATALOG[b] = []; });
 
 // ═══════════════════════════════════════ COLOR LIBRARY (Step 9) ═══════════════════════════════════════
 //
