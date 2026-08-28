@@ -67,6 +67,12 @@
      every other screen keeps its normal phone-shell layout. */
   @media (min-width: 900px) {
     .app.app-wide { max-width: 1080px; }
+    /* Settings' group tiles (.tool-grid/.tool-tile) are a fixed 3-column grid with a square
+       aspect-ratio and fixed-size icon/text — fine at 430px, but stretched to 1080px with only
+       3 columns those tiles just become huge empty squares around a small icon. Switching to
+       auto-fill keeps each tile close to its original size and adds columns instead. Scoped to
+       .app-wide so Home's identical .tool-grid (which never widens) is untouched. */
+    .app-wide .tool-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
   }
 
   /* TOP BAR */
@@ -171,6 +177,11 @@
   .tool-tile-title { font-size: 12px; font-weight: 600; line-height: 1.25; letter-spacing: -0.1px; }
   .tool-tile.soon { opacity: 0.45; cursor: default; }
   .tool-tile.soon:hover, .tool-tile.soon:active { background: var(--surface); border-color: var(--border); }
+
+  /* Only matters once JS sets display:flex on the active group panel — lets a child opt into a
+     specific position via "order" (People & Access: Team Members before Admin Passcode)
+     regardless of DOM/injection order. No effect while display is still "none". */
+  .settings-group-panel { flex-direction: column; }
   .home-footer-note {
     text-align: center;
     font-size: 12px;
@@ -1453,18 +1464,11 @@
       </div>
     </div>
 
-    <!-- PEOPLE & ACCESS — Admin passcode (static) + Team Members (injected by settingsRenderSections) -->
+    <!-- PEOPLE & ACCESS — Team Members (injected by settingsRenderSections, order:1 by default)
+         + Admin passcode (order:2, always below Team Members regardless of DOM position — see
+         the .settings-group-panel flex/order CSS). -->
     <div class="settings-group-panel" data-settings-group="people" style="display:none">
-      <div class="section-label" style="margin-top:0">Admin passcode</div>
-      <div class="card">
-        <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Shared team passcode that unlocks every business-configuration section (Import Mappings, Color Library, Material Catalog, Production Templates) plus price/balloons-per-bag/par in Inventory — keeps those "set and forget" numbers from getting bumped by accident during routine day-to-day use.</div>
-        <div class="settings-field" style="margin-bottom:0">
-          <label>Passcode</label>
-          <input type="text" id="set-admin-passcode" placeholder="e.g. 1886">
-        </div>
-        <button class="save-btn" onclick="saveAdminPasscode()">Save passcode</button>
-        <div class="saved-msg" id="admin-passcode-saved-msg"></div>
-      </div>
+      <div id="admin-passcode-root" style="order:2;"></div>
     </div>
 
     <!-- Fully registry-driven group panels — settingsRenderSections() injects each
@@ -1926,12 +1930,21 @@ function settingsRenderSections() {
 // a group and backing out of it is a local show/hide, not real view routing, so the rest of the
 // app (lastToolView, goBack()) doesn't need to know Settings has sub-screens at all.
 let settingsCurrentGroup = null;
+// True only for the group visit currently open, and only when it was entered via a Business
+// Setup card (bsGoTo sets this right after calling settingsShowGroup, which is why the reset
+// lives at the top of this function rather than in bsGoTo — any OTHER call to settingsShowGroup,
+// e.g. tapping a tile on Settings' own home grid, naturally leaves it false).
+let bsCameFromSetupGroup = false;
 function settingsShowGroup(groupId) {
+  bsCameFromSetupGroup = false;
   settingsCurrentGroup = groupId;
   document.getElementById('settings-home-grid').style.display = 'none';
   document.querySelectorAll('.settings-group-panel').forEach(el => el.style.display = 'none');
   const panel = document.querySelector(`[data-settings-group="${groupId}"]`);
-  if (panel) panel.style.display = 'block';
+  // flex (not block) so a panel's children can use the CSS "order" property — People & Access
+  // needs Team Members to visually come before the Admin Passcode block regardless of which one
+  // the registry-driven injection actually appends to the DOM last.
+  if (panel) panel.style.display = 'flex';
   const group = SETTINGS_GROUPS.find(g => g.id === groupId);
   document.getElementById('settings-header-title').textContent = group ? group.label : 'Settings';
 }
@@ -1942,9 +1955,16 @@ function settingsShowHome() {
   document.getElementById('settings-header-title').textContent = 'Settings';
 }
 // The back arrow backs out of a group into Settings' own home grid first, and only leaves
-// Settings entirely (via the existing goBack()) once already at that home grid.
+// Settings entirely (via the existing goBack()) once already at that home grid — except when
+// the group was reached via a Business Setup card, in which case it returns straight there
+// instead, skipping the home grid entirely (the top bar's back arrow is unaffected by this;
+// it always goes to whatever screen was open before Settings, same as before).
 function settingsBack() {
-  if (settingsCurrentGroup) { settingsShowHome(); return; }
+  if (settingsCurrentGroup) {
+    if (bsCameFromSetupGroup) { bsCameFromSetupGroup = false; showView('businessSetup'); return; }
+    settingsShowHome();
+    return;
+  }
   goBack();
 }
 
@@ -1977,7 +1997,7 @@ const BUSINESS_SETUP_ITEMS = [
     description: "Who's on the team — used by Time Tracker today, and by future assignment features.",
     destinationType: 'settingsGroup', destination: 'people',
     status: () => {
-      const valid = TEAM_MEMBERS.filter(m => m.name && m.name.trim() && m.email && m.email.trim());
+      const valid = TEAM_MEMBERS.filter(m => m.name && m.name.trim() && m.emails && m.emails.some(e => e && e.trim()));
       if (valid.length > 0) return { state: 'complete', count: valid.length };
       if (TEAM_MEMBERS.length > 0) return { state: 'in_progress' }; // rows started but none filled in yet
       return { state: 'not_started' };
@@ -2173,6 +2193,7 @@ function bsGoTo(id) {
   if (!item || item.comingLater) return;
   if (item.destinationType === 'settingsGroup') {
     settingsShowGroup(item.destination);
+    bsCameFromSetupGroup = true;
     showView('settings');
   } else if (item.destinationType === 'view') {
     bsCameFromSetup = true;
@@ -3516,7 +3537,7 @@ function irAddColorAsNew(itemId, idx) {
   const text = (item.colors[idx] || '').trim();
   if (!text) return;
   clFindOrCreate('', text);
-  clSaveLibrary();
+  clSaveLibrary().catch(() => {});
   irRecomputeItemStatus(item);
   irRenderShell();
 }
@@ -4889,6 +4910,7 @@ function settingsRefreshAdminSections() {
   heRenderSettingsSection();
   heRenderShell();
   invRenderColorsList();
+  renderAdminPasscodeBlock();
   bsUpdateHomeBanner();
 }
 
@@ -4896,17 +4918,23 @@ function settingsRefreshAdminSections() {
 //
 // The business's own roster — who's on the team, used anywhere a person needs picking (Time
 // Tracker's "Your name" today; future features can read this the same way instead of keeping
-// their own free-text/parallel list). Deliberately NOT the sign-in allowlist: ALLOWED_EMAILS in
-// the Firebase-init script above still controls who can actually sign in, unchanged — editing
-// this roster doesn't grant or revoke app access, since that also requires a matching change to
-// Firestore's security rules (in the Firebase console, outside what this codebase can reach).
-// Seeded from today's real sign-in list so the starting roster isn't empty; names are inferred
-// from the email addresses and worth double-checking/editing here.
+// their own free-text/parallel list). One person can hold several emails (a work address and a
+// personal one) instead of needing a separate roster row per email.
+//
+// Still deliberately NOT the sign-in allowlist: ALLOWED_EMAILS in the Firebase-init script above
+// is a SEPARATE hardcoded list, and has to stay that way — the sign-in gate runs the moment
+// Firebase reports an auth state change, before this roster (loaded from Firestore, which
+// generally requires already being signed in to read) has had any chance to load. There's no
+// ordering that lets "who's allowed in" be decided FROM data that itself requires being let in
+// to fetch. So editing this roster still doesn't grant or revoke real access on its own — if you
+// add a new email for someone here, it also needs adding to ALLOWED_EMAILS (and to Firestore's
+// security rules, in the Firebase console, which is outside what this codebase can reach) for
+// them to actually be able to sign in with it. Right now both of Emily's and both of Matthew's
+// emails already appear in ALLOWED_EMAILS, so this is already in sync — just merged here into one
+// roster row per person instead of two.
 const TEAM_MEMBERS_DEFAULTS = [
-  { name: 'Emily', email: 'emily@utahballooncreations.com' },
-  { name: 'Matthew', email: 'matthew@utahballooncreations.com' },
-  { name: 'Emily', email: 'emilyleavitt4@gmail.com' },
-  { name: 'Matthew', email: 'mbleavitt@gmail.com' },
+  { name: 'Emily', emails: ['emily@utahballooncreations.com', 'emilyleavitt4@gmail.com'] },
+  { name: 'Matthew', emails: ['matthew@utahballooncreations.com', 'mbleavitt@gmail.com'] },
 ];
 let TEAM_MEMBERS = JSON.parse(JSON.stringify(TEAM_MEMBERS_DEFAULTS));
 
@@ -4914,7 +4942,10 @@ function tmInit() {
   tmRenderShell();
   window.fbLoadTeamMembers().then(snap => {
     if (snap.exists() && Array.isArray(snap.data().members)) {
-      TEAM_MEMBERS = snap.data().members;
+      // Normalizes any record still saved under the old single-"email" shape (from before
+      // multiple emails per person) into "emails" — otherwise an already-saved old-shape
+      // record would just stop showing its email entirely, looking like data loss.
+      TEAM_MEMBERS = snap.data().members.map(m => (m.emails ? m : { name: m.name, emails: m.email ? [m.email] : [] }));
       tmRenderShell();
       ttRenderTeamOptions(); // Time Tracker's name suggestions, if that screen is already up
     }
@@ -4924,7 +4955,7 @@ function tmSave() {
   window.fbSaveTeamMembers({ members: TEAM_MEMBERS }).catch(err => console.error('Team members save failed:', err));
 }
 
-let tmCollapsed = true;
+let tmCollapsed = false; // starts open — it's the primary content of this group, not a secondary option
 function tmToggleCollapsed() {
   tmCollapsed = !tmCollapsed;
   tmRenderShell();
@@ -4966,21 +4997,43 @@ function tmRenderList() {
   const container = document.getElementById('tm-list');
   if (!container) return;
   container.innerHTML = TEAM_MEMBERS.map((m, idx) => `
-    <div class="row" style="margin-bottom:0.6rem;">
-      <div class="settings-field" style="margin-bottom:0"><label>Name</label><input type="text" value="${invAttr(m.name)}" ${invAdminUnlocked ? '' : 'disabled'} onchange="tmUpdateMember(${idx},'name',this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0"><label>Email</label><input type="text" value="${invAttr(m.email)}" ${invAdminUnlocked ? '' : 'disabled'} onchange="tmUpdateMember(${idx},'email',this.value)"></div>
+    <div style="margin-bottom:0.75rem; padding-bottom:0.75rem; border-bottom:0.5px solid var(--border);">
+      <div class="settings-field" style="margin-bottom:0.5rem;"><label>Name</label><input type="text" value="${invAttr(m.name)}" ${invAdminUnlocked ? '' : 'disabled'} onchange="tmUpdateMemberName(${idx}, this.value)"></div>
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Emails <span style="font-weight:400;">(any of these signs in as this person)</span></div>
+      <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px;">
+        ${(m.emails || []).map((email, eIdx) => `<span style="font-size:12px; background:var(--bg); border:0.5px solid var(--border-strong); border-radius:999px; padding:2px 8px;">${psEscape(email)}${invAdminUnlocked ? ` <i class="fa-solid fa-xmark" style="cursor:pointer;" onclick="tmRemoveMemberEmail(${idx},${eIdx})"></i>` : ''}</span>`).join('') || `<span style="font-size:12px; color:var(--text-tertiary);">No emails yet</span>`}
+      </div>
+      ${invAdminUnlocked ? `
+      <div style="display:flex; gap:6px; margin-bottom:0.5rem;">
+        <input type="text" id="tm-email-input-${idx}" placeholder="Add another email" style="flex:1;">
+        <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="tmAddMemberEmail(${idx})">Add</button>
+      </div>
+      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px;" onclick="tmRemoveMember(${idx})"><i class="fa-solid fa-trash"></i> Remove person</button>` : ''}
     </div>
-    ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; margin:-0.4rem 0 0.6rem;" onclick="tmRemoveMember(${idx})"><i class="fa-solid fa-trash"></i> Remove</button>` : ''}
   `).join('');
 }
-function tmUpdateMember(idx, field, value) {
+function tmUpdateMemberName(idx, value) {
   if (!TEAM_MEMBERS[idx]) return;
-  TEAM_MEMBERS[idx][field] = value;
+  TEAM_MEMBERS[idx].name = value;
   tmSave();
   ttRenderTeamOptions();
 }
+function tmAddMemberEmail(idx) {
+  const input = document.getElementById('tm-email-input-' + idx);
+  if (!TEAM_MEMBERS[idx] || !input || !input.value.trim()) return;
+  if (!TEAM_MEMBERS[idx].emails) TEAM_MEMBERS[idx].emails = [];
+  TEAM_MEMBERS[idx].emails.push(input.value.trim());
+  tmSave();
+  tmRenderList();
+}
+function tmRemoveMemberEmail(idx, eIdx) {
+  if (!TEAM_MEMBERS[idx] || !TEAM_MEMBERS[idx].emails) return;
+  TEAM_MEMBERS[idx].emails.splice(eIdx, 1);
+  tmSave();
+  tmRenderList();
+}
 function tmAddMember() {
-  TEAM_MEMBERS.push({ name: '', email: '' });
+  TEAM_MEMBERS.push({ name: '', emails: [] });
   tmRenderList();
   tmSave();
 }
@@ -4992,17 +5045,53 @@ function tmRemoveMember(idx) {
   ttRenderTeamOptions();
 }
 
+// Previously this field had no gate at all — anyone who opened People & Access could change
+// the shared admin passcode outright, with nothing checking whether they already knew it. Now
+// rendered dynamically (like every other admin-gated section) so it can be locked/unlocked the
+// same way, using the same shared invAdminUnlocked flag: you need to already know the current
+// passcode to change it, the same as changing an account password.
+function renderAdminPasscodeBlock() {
+  const root = document.getElementById('admin-passcode-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="section-label" style="margin-top:1rem;">Admin passcode</div>
+    <div class="card">
+      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.75rem;">Shared team passcode that unlocks every business-configuration section (Import Mappings, Color Library, Material Catalog, Production Templates) plus price/balloons-per-bag/par in Inventory — keeps those "set and forget" numbers from getting bumped by accident during routine day-to-day use.</div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Unlocked — you can change it' : 'Locked — enter the current passcode to change it'}</div>
+        ${invAdminUnlocked
+          ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="lockAdminPasscode()">Lock</button>`
+          : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="unlockAdminPasscode()">Unlock</button>`}
+      </div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Passcode</label>
+        <input type="text" id="set-admin-passcode" placeholder="e.g. 1886" value="${invAttr(ADMIN_PASSCODE)}" ${invAdminUnlocked ? '' : 'disabled'}>
+      </div>
+      <button class="save-btn" onclick="saveAdminPasscode()" ${invAdminUnlocked ? '' : 'disabled'}>Save passcode</button>
+      <div class="saved-msg" id="admin-passcode-saved-msg"></div>
+    </div>`;
+}
+function unlockAdminPasscode() {
+  const entered = prompt('Enter the current admin passcode to change it:');
+  if (entered === null) return;
+  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; settingsRefreshAdminSections(); }
+  else alert('Incorrect passcode.');
+}
+function lockAdminPasscode() {
+  invAdminUnlocked = false;
+  settingsRefreshAdminSections();
+}
 function invLoadAdminLock() {
-  const fieldEl = document.getElementById('set-admin-passcode');
-  if (fieldEl) fieldEl.value = ADMIN_PASSCODE;
+  renderAdminPasscodeBlock();
   window.fbLoadAdminLock().then(snap => {
     if (snap.exists() && snap.data().passcode) {
       ADMIN_PASSCODE = snap.data().passcode;
-      if (fieldEl) fieldEl.value = ADMIN_PASSCODE;
+      renderAdminPasscodeBlock();
     }
   }).catch(err => console.error('Admin lock load failed:', err));
 }
 function saveAdminPasscode() {
+  if (!invAdminUnlocked) return;
   const val = document.getElementById('set-admin-passcode').value.trim();
   if (!val) { alert('Enter a passcode first.'); return; }
   ADMIN_PASSCODE = val;
@@ -5039,6 +5128,8 @@ let clPickerQuery = '';
 let clPickerSelected = new Set();
 let clCsvImportCollapsed = true;
 let clPickerExpandedId = null; // which "already have it" row's inline editor is open, if any
+let clLibraryOnlySectionCollapsed = true;
+let clAliasBoxExpanded = new Set(); // colorIds whose "add an alias" box is currently open
 
 function invTogglePendingCollapsed() {
   invPendingCollapsed = !invPendingCollapsed;
@@ -5048,12 +5139,38 @@ function invToggleImportCollapsed() {
   invImportCollapsed = !invImportCollapsed;
   clRenderSettingsSection();
 }
+// Expands to a quick single-color form first (name + brand, one click) rather than jumping
+// straight into the CSV wizard — that wizard is overkill for the common case of adding just one
+// or two off-brand colors. The wizard is still one click away via clOpenCsvImportWizard() for
+// when there really are several to add at once.
 function clToggleCsvImport() {
   clCsvImportCollapsed = !clCsvImportCollapsed;
-  if (!clCsvImportCollapsed) { impOpen(clCsvImportSpec()); jccCsvImportCollapsed = true; }
-  else impClose();
+  if (clCsvImportCollapsed && impState && impState.spec.key === 'colorLibrary') impClose();
+  clRenderSettingsSection();
+}
+function clOpenCsvImportWizard() {
+  impOpen(clCsvImportSpec());
+  jccCsvImportCollapsed = true; // only one wizard open at a time — they share one #imp-root
   clRenderSettingsSection();
   jccRenderCatalogSettingsSection();
+}
+function clQuickAddCustomColor() {
+  const nameEl = document.getElementById('cl-quick-add-name');
+  const brandEl = document.getElementById('cl-quick-add-brand');
+  const colorName = nameEl.value.trim();
+  const brand = brandEl.value.trim();
+  if (!colorName) { alert('Enter a color name.'); return; }
+  if (clFindEntry(brand, colorName)) { alert('That color is already in your Color Library.'); return; }
+  const btn = document.getElementById('cl-quick-add-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Adding...'; }
+  clAddColorsBulk([{ brand, colorName }], { trackStock: true }).then(summary => {
+    if (!summary.ok) {
+      alert(`Couldn't save "${colorName}" — nothing was added. Check your internet and try again.`);
+      clRenderSettingsSection();
+      return;
+    }
+    clRenderSettingsSection();
+  });
 }
 // Row shape: brand (optional, free text), colorName (required). Dedupes exactly like the
 // manufacturer picker and manual add — same (brand, colorName) case-insensitive match — so a
@@ -5076,7 +5193,9 @@ function clCsvImportSpec() {
       const toCreate = rows.filter(r => r.action !== 'skip');
       const skipped = rows.length - toCreate.length;
       return clAddColorsBulk(toCreate.map(r => ({ brand: r.values.brand, colorName: r.values.colorName })), { trackStock: true })
-        .then(summary => ({ created: summary.added, updated: 0, skipped: skipped + summary.alreadyHad, failed: 0 }));
+        .then(summary => summary.ok
+          ? { created: summary.added, updated: 0, skipped: skipped + summary.alreadyHad, failed: 0 }
+          : { created: 0, updated: 0, skipped, failed: toCreate.length });
     }
   };
 }
@@ -5263,7 +5382,15 @@ function clInit() {
   }).catch(err => console.error('Color Library load failed:', err));
 }
 function clSaveLibrary() {
-  window.fbSaveColorLibrary({ colors: COLOR_LIBRARY }).catch(err => console.error('Color Library save failed:', err));
+  // Re-throws (after logging) rather than swallowing the error — clAddColorsBulk awaits this
+  // specifically so a real save failure can be surfaced to the user instead of silently
+  // reporting success while nothing actually persisted. Other call sites here (archive/restore/
+  // alias edits) still fire-and-forget this the same as before; only the bulk-add flow needed
+  // the stronger guarantee, since that's the one that lost data silently.
+  return window.fbSaveColorLibrary({ colors: COLOR_LIBRARY }).catch(err => {
+    console.error('Color Library save failed:', err);
+    throw err;
+  });
 }
 
 // Permanently empties the Color Library and deletes every Inventory row — meant for wiping
@@ -5286,7 +5413,7 @@ function clClearLibraryAndInventory() {
   if (ids.length > 0) window.fbBatchDeleteInventoryItems(ids).catch(err => console.error('Clear Color Library: inventory delete failed', err));
 
   COLOR_LIBRARY = [];
-  clSaveLibrary();
+  clSaveLibrary().catch(() => {});
   clRenderSettingsSection();
   alert('Color Library and Inventory cleared.');
 }
@@ -5306,7 +5433,7 @@ function clMigrateFromInventory() {
     item.colorId = entry.id;
     invSaveItem(item);
   });
-  if (libraryChanged) clSaveLibrary();
+  if (libraryChanged) clSaveLibrary().catch(() => {});
 }
 
 function clFindEntry(brand, colorName) {
@@ -5376,14 +5503,14 @@ function clArchive(id) {
   if (!entry) return;
   entry.active = false;
   INVENTORY_ITEMS.filter(i => i.colorId === id).forEach(i => { i.active = false; invSaveItem(i); });
-  clSaveLibrary();
+  clSaveLibrary().catch(() => {});
 }
 function clRestore(id) {
   const entry = COLOR_LIBRARY.find(e => e.id === id);
   if (!entry) return;
   entry.active = true;
   INVENTORY_ITEMS.filter(i => i.colorId === id).forEach(i => { i.active = true; invSaveItem(i); });
-  clSaveLibrary();
+  clSaveLibrary().catch(() => {});
 }
 // Aliases are only ever added here, from an explicit user action — never generated
 // automatically (broad families like "Blue"/"Pink" always require a person to confirm them).
@@ -5393,13 +5520,13 @@ function clAddAlias(id, alias) {
   const a = alias.trim();
   if (!entry.aliases) entry.aliases = [];
   if (!entry.aliases.some(x => x.toLowerCase() === a.toLowerCase()) && a.toLowerCase() !== entry.colorName.toLowerCase()) entry.aliases.push(a);
-  clSaveLibrary();
+  clSaveLibrary().catch(() => {});
 }
 function clRemoveAlias(id, alias) {
   const entry = COLOR_LIBRARY.find(e => e.id === id);
   if (!entry) return;
   entry.aliases = (entry.aliases || []).filter(a => a !== alias);
-  clSaveLibrary();
+  clSaveLibrary().catch(() => {});
 }
 
 // Adds manufacturer colors to the Library and — unless the caller opts out — also creates a
@@ -5416,7 +5543,6 @@ function clAddColorsBulk(colorSpecs, { trackStock = true } = {}) {
     const entry = clFindOrCreate(brand, colorName);
     if (COLOR_LIBRARY.length !== before) addedEntries.push(entry); else alreadyHadEntries.push(entry);
   });
-  if (addedEntries.length > 0) clSaveLibrary();
 
   const newItems = [];
   if (trackStock) {
@@ -5428,10 +5554,28 @@ function clAddColorsBulk(colorSpecs, { trackStock = true } = {}) {
       newItems.push({ id: psNewInventoryItemId(), color: entry.colorName, brand: entry.brand, tier: 'main', active: true, colorId: entry.id, sizes });
     });
   }
-  const commitPromise = newItems.length > 0
-    ? window.fbBatchSaveInventoryItems(newItems).catch(err => console.error('Bulk color add: inventory batch failed', err))
-    : Promise.resolve();
-  return commitPromise.then(() => ({ added: addedEntries.length, alreadyHad: alreadyHadEntries.length, itemsCreated: newItems.length }));
+
+  // Both writes are collected and actually awaited here — previously the Library save was
+  // fire-and-forget, so the caller's "success" message could fire (and the picker could clear
+  // selections) before the Library doc had actually saved, or even after it silently failed.
+  // A real failure now comes back as ok:false instead of looking identical to success.
+  const saves = [];
+  if (addedEntries.length > 0) saves.push(clSaveLibrary());
+  if (newItems.length > 0) saves.push(window.fbBatchSaveInventoryItems(newItems).catch(err => { console.error('Bulk color add: inventory batch failed', err); throw err; }));
+
+  return Promise.all(saves).then(
+    () => ({ ok: true, added: addedEntries.length, alreadyHad: alreadyHadEntries.length, itemsCreated: newItems.length }),
+    err => {
+      // Roll back the in-memory additions on failure — otherwise the picker would keep showing
+      // these as "already have it" even though nothing actually persisted, hiding the failure
+      // from view until the next reload wipes them out for real.
+      if (addedEntries.length > 0) {
+        const addedIds = new Set(addedEntries.map(e => e.id));
+        COLOR_LIBRARY = COLOR_LIBRARY.filter(e => !addedIds.has(e.id));
+      }
+      return { ok: false, error: err, added: 0, alreadyHad: alreadyHadEntries.length, itemsCreated: 0 };
+    }
+  );
 }
 // A Library-only color has no Inventory row at all (a general/production-note color that isn't
 // stock-tracked) — used by the "library only" list in the Inventory screen.
@@ -5987,7 +6131,7 @@ function invAddColor() {
   const brand = brandEl.value.trim();
   if (!color) { alert('Enter a color name first.'); return; }
   const libraryEntry = clFindOrCreate(brand, color);
-  clSaveLibrary();
+  clSaveLibrary().catch(() => {});
   // One-off manual additions default to Misc — Main is for your established, consistent lineup.
   const item = { id: psNewInventoryItemId(), color, brand, tier: 'misc', active: true, colorId: libraryEntry.id, sizes: invBlankSizeData() };
   nameEl.value = ''; brandEl.value = '';
@@ -6204,9 +6348,7 @@ function clRenderSettingsSection() {
   </div>`;
   if (!invImportCollapsed) {
     html += `<div class="card">
-      <div class="trip-toggle" style="margin:0 0 0.6rem;">
-        ${CL_SUPPORTED_MANUFACTURERS.map(b => `<button class="trip-btn ${clPickerBrand === b ? 'active' : ''}" onclick="clSetPickerBrand('${b}')">${b}</button>`).join('')}
-      </div>
+      <div class="trip-toggle" id="cl-picker-brand-toggle" style="margin:0 0 0.6rem;"></div>
       <div class="settings-field" style="margin-bottom:0.6rem;">
         <input type="text" id="cl-picker-search" placeholder="Search ${psEscape(clPickerBrand)} colors..." value="${psEscape(clPickerQuery)}" oninput="clSetPickerQuery(this.value)">
       </div>
@@ -6214,20 +6356,31 @@ function clRenderSettingsSection() {
     </div>`;
   }
   html += `<div class="inv-group-header" onclick="clToggleCsvImport()" style="margin-top:0.6rem;">
-    <span>Add custom colors (CSV import)</span>
+    <span>Add custom colors</span>
     <i class="fa-solid fa-chevron-${clCsvImportCollapsed ? 'down' : 'up'}"></i>
   </div>`;
   if (!clCsvImportCollapsed) {
-    html += `<div style="font-size:11px; color:var(--text-secondary); margin:-0.2rem 0 0.4rem;">For colors that aren't in a manufacturer's catalog above — a house blend, a discontinued color, anything custom.</div>
-    <div id="imp-root"></div>`;
+    const wizardOpen = impState && impState.spec.key === 'colorLibrary';
+    html += `<div class="card">
+      <div style="font-size:11px; color:var(--text-secondary); margin-bottom:0.6rem;">For colors that aren't in a manufacturer's catalog above — a house blend, a discontinued color, anything custom.</div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Color name</label><input type="text" id="cl-quick-add-name" placeholder="e.g. Sage"></div>
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Brand (optional)</label><input type="text" id="cl-quick-add-brand" placeholder="e.g. Kalisan"></div>
+      </div>
+      <button class="save-btn" id="cl-quick-add-btn" onclick="clQuickAddCustomColor()"><i class="fa-solid fa-plus"></i> Add color</button>
+      ${wizardOpen ? `<div id="imp-root" style="margin-top:0.75rem;"></div>` : `
+      <div style="text-align:center; font-size:11px; color:var(--text-secondary); margin:0.75rem 0 0.5rem;">— or add several at once —</div>
+      <button class="icon-btn" style="width:100%; padding:8px; font-size:12px; border:0.5px solid var(--border-strong);" onclick="clOpenCsvImportWizard()"><i class="fa-solid fa-file-csv"></i> Import from CSV or paste from a spreadsheet</button>`}
+    </div>`;
   }
   html += invLibraryOnlyHtml();
   html += `<div style="margin-top:1rem; padding-top:0.75rem; border-top:0.5px solid var(--border);">
     <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--warning-bg); color:var(--warning-text); border:0.5px solid var(--warning-text);" onclick="clClearLibraryAndInventory()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all colors &amp; inventory</button>
   </div>`;
   root.innerHTML = html;
+  clRenderBrandToggle();
   clRenderPicker();
-  if (!clCsvImportCollapsed && impState) impRender();
+  if (!clCsvImportCollapsed && impState && impState.spec.key === 'colorLibrary') impRender();
 }
 // Re-renders whichever of the two places a Color Library alias/archive edit could be visible —
 // Inventory's per-item cards (stocked colors) and Settings' "Color Library only" list
@@ -6238,9 +6391,19 @@ function clRefreshAliasViews() {
   clRenderSettingsSection();
 }
 
+// Its own tiny render function (not folded into clRenderSettingsSection) because it needs to
+// refresh on every brand switch without touching the search box or results list — otherwise
+// the active-tab highlight silently stays on the old brand while the results underneath it
+// correctly show the new one.
+function clRenderBrandToggle() {
+  const container = document.getElementById('cl-picker-brand-toggle');
+  if (!container) return;
+  container.innerHTML = CL_SUPPORTED_MANUFACTURERS.map(b => `<button class="trip-btn ${clPickerBrand === b ? 'active' : ''}" onclick="clSetPickerBrand('${b}')">${b}</button>`).join('');
+}
 function clSetPickerBrand(brand) {
   clPickerBrand = brand;
   clPickerSelected = new Set();
+  clRenderBrandToggle();
   clRenderPicker();
   const search = document.getElementById('cl-picker-search');
   if (search) search.placeholder = `Search ${brand} colors...`;
@@ -6275,7 +6438,7 @@ function clRemoveColorFromLibrary(id) {
   if (!confirm(`Remove "${label}" from your Color Library?${warning} This can't be undone.`)) return;
 
   COLOR_LIBRARY = COLOR_LIBRARY.filter(e => e.id !== id);
-  clSaveLibrary();
+  clSaveLibrary().catch(() => {});
   stockedItems.forEach(item => window.fbDeleteInventoryItem(item.id).catch(err => console.error('Remove color: inventory delete failed', err)));
   if (clPickerExpandedId === id) clPickerExpandedId = null;
   clRenderSettingsSection();
@@ -6299,6 +6462,11 @@ function clSelectAllFiltered() {
 function clRenderPicker() {
   const container = document.getElementById('cl-picker-results');
   if (!container) return;
+  // Every toggle/select-all rebuilds this whole container, which would otherwise reset the
+  // scroll position of the color list back to the top on every single click — restoring it
+  // here is what keeps you where you were while working down a long list.
+  const prevScroll = document.getElementById('cl-picker-scroll');
+  const scrollTop = prevScroll ? prevScroll.scrollTop : 0;
   const catalogColors = BRAND_COLOR_CATALOG[clPickerBrand] || [];
   if (catalogColors.length === 0) {
     container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary); padding:8px 0;">${psEscape(clPickerBrand)} doesn't have a color catalog here yet — add its colors one at a time with "Add a color" below (tag them with the brand).</div>`;
@@ -6313,7 +6481,7 @@ function clRenderPicker() {
     <span style="font-size:11px; color:var(--text-secondary);">${matches.length} color${matches.length === 1 ? '' : 's'}${q ? ' matching' : ''}</span>
     <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" ${selectableCount === 0 ? 'disabled' : ''} onclick="clSelectAllFiltered()">${allSelected ? 'Clear selection' : `Select all ${selectableCount}`}</button>
   </div>`;
-  html += `<div style="max-height:320px; overflow-y:auto; margin-bottom:0.6rem; display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:2px 12px;">`;
+  html += `<div id="cl-picker-scroll" style="max-height:320px; overflow-y:auto; margin-bottom:0.6rem; display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:2px 12px;">`;
   matches.forEach(color => {
     const have = alreadyHave.has(color.toLowerCase());
     const checked = clPickerSelected.has(color);
@@ -6348,6 +6516,8 @@ function clRenderPicker() {
   html += `</div>`;
   html += `<button class="save-btn" ${clPickerSelected.size === 0 ? 'disabled' : ''} onclick="clAddSelectedColors()"><i class="fa-solid fa-plus"></i> Add ${clPickerSelected.size || ''} selected to Color Library</button>`;
   container.innerHTML = html;
+  const newScroll = document.getElementById('cl-picker-scroll');
+  if (newScroll) newScroll.scrollTop = scrollTop;
 }
 function clAddSelectedColors() {
   if (clPickerSelected.size === 0) return;
@@ -6356,6 +6526,11 @@ function clAddSelectedColors() {
   const btn = document.querySelector('#cl-picker-results .save-btn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Adding...'; }
   clAddColorsBulk(colors.map(colorName => ({ brand, colorName })), { trackStock: true }).then(summary => {
+    if (!summary.ok) {
+      alert(`Couldn't save to your Color Library — nothing was added. This is usually a connection issue; check your internet and try again. (${summary.error && summary.error.message ? summary.error.message : summary.error})`);
+      clRenderPicker();
+      return;
+    }
     clPickerSelected = new Set();
     alert(`Added ${summary.added} ${brand} color${summary.added === 1 ? '' : 's'} to your Color Library${summary.alreadyHad ? ` (${summary.alreadyHad} were already there)` : ''}.`);
     clRenderPicker();
@@ -6430,25 +6605,46 @@ function invAddAliasFromField(colorId) {
   clRefreshAliasViews();
 }
 
+function clToggleLibraryOnlySection() {
+  clLibraryOnlySectionCollapsed = !clLibraryOnlySectionCollapsed;
+  clRenderSettingsSection();
+}
+function clToggleAliasBox(colorId) {
+  if (clAliasBoxExpanded.has(colorId)) clAliasBoxExpanded.delete(colorId); else clAliasBoxExpanded.add(colorId);
+  clRefreshAliasViews();
+}
 // Colors that exist in the Library but have no Inventory stock row at all — a general/
-// production-note color a business uses without tracking stock for it. Archive/restore and
-// alias-editing work the same as a stocked color; there's no delete here (colors are archived,
-// not removed, whenever practical).
+// production-note color a business uses without tracking stock for it. Archive/restore work the
+// same as a stocked color; there's no delete here (colors are archived, not removed, whenever
+// practical). Collapsed behind its own section toggle since it's a secondary/edge-case list, not
+// the primary action on this screen. The full add-alias editor per color is likewise collapsed
+// by default (behind a small "+") — existing aliases still show plainly either way, only the
+// interactive add-a-new-one box is hidden until asked for, so a long list doesn't turn into a
+// wall of open text inputs nobody's using yet.
 function invLibraryOnlyHtml() {
   const entries = clLibraryOnlyEntries();
   if (entries.length === 0) return '';
-  let html = `<div class="section-label" style="margin-top:1rem;">Color Library only <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— not stock-tracked</span></div><div class="card">`;
+  let html = `<div class="inv-group-header" onclick="clToggleLibraryOnlySection()" style="margin-top:0.6rem;">
+    <span>Color Library only <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— not stock-tracked</span></span>
+    <i class="fa-solid fa-chevron-${clLibraryOnlySectionCollapsed ? 'down' : 'up'}"></i>
+  </div>`;
+  if (clLibraryOnlySectionCollapsed) return html;
+  html += `<div class="card">`;
   entries.forEach(e => {
     const isActive = e.active !== false;
+    const aliasBoxOpen = clAliasBoxExpanded.has(e.id);
     html += `<div style="padding:8px 0; border-top:0.5px solid var(--border);"${isActive ? '' : ' style="opacity:0.55;"'}>
       <div style="display:flex; align-items:center; justify-content:space-between;">
         <div>
           <div style="font-size:13px; font-weight:600;">${psEscape(e.colorName)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px;">INACTIVE</span>'}</div>
           <div style="font-size:11px; color:var(--text-secondary);">${psEscape(e.brand || 'No brand')}${e.aliases && e.aliases.length ? ' · aka ' + e.aliases.map(psEscape).join(', ') : ''}</div>
         </div>
-        <button class="icon-btn" style="padding:4px;" onclick="${isActive ? `clArchive('${e.id}')` : `clRestore('${e.id}')`}; clRefreshAliasViews();" aria-label="${isActive ? 'Deactivate' : 'Reactivate'} color"><i class="fa-solid fa-${isActive ? 'eye-slash' : 'eye'}"></i></button>
+        <div style="display:flex; gap:4px;">
+          <button class="icon-btn" style="padding:4px;" onclick="clToggleAliasBox('${e.id}')" aria-label="${aliasBoxOpen ? 'Hide' : 'Add'} alias"><i class="fa-solid fa-${aliasBoxOpen ? 'xmark' : 'plus'}"></i></button>
+          <button class="icon-btn" style="padding:4px;" onclick="${isActive ? `clArchive('${e.id}')` : `clRestore('${e.id}')`}; clRefreshAliasViews();" aria-label="${isActive ? 'Deactivate' : 'Reactivate'} color"><i class="fa-solid fa-${isActive ? 'eye-slash' : 'eye'}"></i></button>
+        </div>
       </div>
-      ${invAliasEditorHtml(e.id)}
+      ${aliasBoxOpen ? invAliasEditorHtml(e.id) : ''}
     </div>`;
   });
   html += `</div>`;
@@ -7007,7 +7203,7 @@ function jccRenderCatalogSettingsSection() {
     </div>`}
   `;
   jccRenderCatalog();
-  if (invAdminUnlocked && !jccCsvImportCollapsed && impState) impRender();
+  if (invAdminUnlocked && !jccCsvImportCollapsed && impState && impState.spec.key === 'materialCatalog') impRender();
 }
 
 function jccAddFormHtml() {
@@ -8099,7 +8295,7 @@ function showView(v) {
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.getElementById('view-' + v).classList.add('active');
   window.scrollTo(0, 0);
-  document.getElementById('app-shell').classList.toggle('app-wide', v === 'settings');
+  document.getElementById('app-shell').classList.toggle('app-wide', v === 'settings' || v === 'businessSetup');
   if (v !== 'settings') lastToolView = v;
   // Re-renders every time Business Setup becomes active (including via the back button, not
   // just a fresh click into it) so status cards always reflect whatever changed in Settings.
