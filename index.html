@@ -3099,7 +3099,7 @@ function imRuleRowHtml(rule) {
   if (!invAdminUnlocked) {
     return `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:0.5px solid var(--border); font-size:13px;">
       <div style="flex:1;">${psEscape(rule.rawName)}</div>
-      <div style="color:var(--text-secondary); text-align:right;">${classification === 'production' ? (recipe ? psEscape(recipe.label) : '(missing template)') : psEscape(imClassificationLabel(classification))}</div>
+      <div style="color:var(--text-secondary); text-align:right;">${classification === 'production' ? (recipe ? psEscape(recipe.display) : '(missing template)') : psEscape(imClassificationLabel(classification))}</div>
     </div>`;
   }
   return `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
@@ -3450,7 +3450,7 @@ function irStatusBadgeHtml(status) {
 function irItemCardHtml(item) {
   const recipe = item.recipeId ? RECIPES.find(r => r.id === item.recipeId) : null;
   const destinationSummary = item.classification === 'production'
-    ? (recipe ? recipe.label : '(no template selected)')
+    ? (recipe ? recipe.display : '(no template selected)')
     : imClassificationLabel(item.classification);
   const expanded = irExpandedItems.has(item.id) || item.status === 'needs_review';
 
@@ -3723,7 +3723,7 @@ function psItemOptionsHtml(selectedId) {
   const groups = {};
   RECIPES.forEach(r => { (groups[r.category] = groups[r.category] || []).push(r); });
   return Object.keys(groups).map(cat =>
-    `<optgroup label="${cat}s">` + groups[cat].map(r => `<option value="${r.id}"${r.id === selectedId ? ' selected' : ''}>${psEscape(r.label)}</option>`).join('') + `</optgroup>`
+    `<optgroup label="${cat}s">` + groups[cat].map(r => `<option value="${r.id}"${r.id === selectedId ? ' selected' : ''}>${psEscape(r.display)}</option>`).join('') + `</optgroup>`
   ).join('');
 }
 
@@ -3746,6 +3746,16 @@ function psRenderProductionJobs() {
 // no catalog entry for an arbitrary typed footage) — line.customRecipe, when present, wins.
 function psLineRecipe(line) {
   return line.customRecipe || RECIPES.find(x => x.id === line.recipeId);
+}
+// The actual footage typed in for this line — never a static per-template string, since size
+// is entered per job now, not stored on the template. Checks line.customLinear first (how
+// Production's "Add an item" and Import Review both store it); Quantity Calculator's "Custom
+// length" items are the one exception — they never set line.customLinear, instead baking the
+// typed footage straight into their frozen customRecipe.linearFt, so that's the fallback.
+function psLineFootageText(line, r) {
+  const ft = (typeof line.customLinear === 'number' && line.customLinear > 0) ? line.customLinear
+    : (typeof r.linearFt === 'number' && r.linearFt > 0) ? r.linearFt : null;
+  return ft ? `${ft} ft` : '—';
 }
 
 // ─── COLOR PICKER (Production) ───
@@ -3941,7 +3951,7 @@ function psProductionBodyHtml(job) {
 
       if (editing) {
         html += `<div class="no-print">
-          <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;"><b>Size:</b> ${psEscape(r.label)} <span style="font-style:italic;">(delete and re-add to change size)</span></div>
+          <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;"><b>Size:</b> ${psEscape(psLineFootageText(line, r))} <span style="font-style:italic;">(delete and re-add to change size)</span></div>
           <div class="settings-field"><label>Quantity</label><input type="number" id="pi-edit-qty-${sanitizedEditKey}" value="${line.qty}" min="1" inputmode="numeric"></div>
           <div class="settings-field">
             <label>Colors</label>
@@ -3959,7 +3969,7 @@ function psProductionBodyHtml(job) {
         </div>`;
       } else {
         html += `<div class="ps-build-fields">`;
-        html += `<b>Size:</b> ${psEscape(r.label)}<br><b>Qty:</b> ${line.qty}<br><b>Style:</b> ${psEscape(r.style || r.category)}<br>`;
+        html += `<b>Size:</b> ${psEscape(psLineFootageText(line, r))}<br><b>Qty:</b> ${line.qty}<br><b>Style:</b> ${psEscape(r.style || r.category)}<br>`;
         if (psTopperFt(r)) html += `<b>Topper:</b> ~${psTopperFt(r)} ft included${line.topperNote ? ' (' + psEscape(line.topperNote) + ')' : ''}<br>`;
         if (line.design) html += `<b>Design:</b> ${psEscape(line.design)}<br>`;
         if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
@@ -4684,10 +4694,8 @@ function ptTemplateHtml(t) {
           </select>
         </div>
       </div>
-      <div class="row">
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Style label</label><input type="text" value="${invAttr(t.label)}" onchange="ptUpdateField('${t.id}','label', this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Linear feet</label><input type="number" step="0.5" min="0" value="${t.linearFt || ''}" ${t.customLinear ? 'disabled placeholder="entered per job"' : ''} onchange="ptUpdateField('${t.id}','linearFt', this.value)"></div>
-      </div>
+      <div style="font-size:11px; color:var(--text-secondary); margin:-0.2rem 0 0.6rem;">If a style genuinely needs different build directions, give it its own template (e.g. "Classic Column" and "Freeform Column" as two separate Names) rather than expressing it as a size/label variant of this one.</div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Linear feet</label><input type="number" step="0.5" min="0" value="${t.linearFt || ''}" ${t.customLinear ? 'disabled placeholder="entered per job"' : ''} onchange="ptUpdateField('${t.id}','linearFt', this.value)"></div>
       <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">
         <input type="checkbox" ${t.customLinear ? 'checked' : ''} onchange="ptUpdateField('${t.id}','customLinear', this.checked)">
         Footage is entered per job (not a fixed size)
@@ -4720,8 +4728,11 @@ function ptUpdateField(id, field, value) {
   const t = RECIPES.find(r => r.id === id);
   if (!t) return;
   if (field === 'linearFt') t[field] = parseFloat(value) || 0;
-  else if (field === 'customLinear') t[field] = value;
   else t[field] = value;
+  // Every template's balloon-count math comes from FORMULAS.freeformRates[category] (see
+  // Balloon math above) — changing Category has to re-point "rates" at the new category's
+  // table, or the template keeps computing with whatever category it was created under.
+  if (field === 'category') t.rates = FORMULAS.freeformRates[value] || FORMULAS.freeformRates.Garland;
   ptRenderList();
   ptSaveLibrary();
 }
@@ -4734,7 +4745,7 @@ function ptUpdateListField(id, field, value) {
 function ptAddTemplate() {
   const newTemplate = psNormalizeTemplateFields({
     id: 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-    display: 'New template', category: 'Garland', style: 'Freeform', label: 'New template',
+    display: 'New template', category: 'Garland', style: 'Freeform',
     formula: 'freeform', customLinear: true, rates: FORMULAS.freeformRates.Garland,
   });
   RECIPES = RECIPES.concat([newTemplate]);
@@ -5970,7 +5981,7 @@ function psComputeInventoryRequirements() {
             unit: 'balloon',
             requiredBy: job.eventDate || '',
             category: 'balloon',
-            source: { jobId: job.id, jobName: job.jobName || '', itemLabel: recipe.display || recipe.label || '' },
+            source: { jobId: job.id, jobName: job.jobName || '', itemLabel: recipe.display || '' },
             unresolved, // multiple brands share this name (or it's not in the Library at all) — can't attribute precisely
           });
         });
