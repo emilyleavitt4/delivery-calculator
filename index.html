@@ -5039,6 +5039,7 @@ function gsRenderBody() {
     case 'sizing': return gsRenderSizing();
     case 'sizingLength': return gsRenderSizingLength();
     case 'anotherLength': return gsRenderAnotherLength();
+    case 'variantGate': return gsRenderVariantGate();
     case 'field': return gsRenderField();
     case 'wrapup': return gsRenderWrapup();
     case 'wrapupName': return gsRenderWrapupName();
@@ -5094,26 +5095,36 @@ function gsRenderTypes(categoryIndex) {
     <div style="font-size:12px; color:var(--text-secondary); margin-bottom:12px;">Pick as many as apply.</div>
     ${opts}
     <div class="settings-field" style="margin:8px 0 14px;">
-      <label>Something else? (optional)</label>
-      <input type="text" id="gs-type-custom" placeholder="e.g. Balloon Wall">
+      <label>Something else? (comma-separated for more than one)</label>
+      <input type="text" id="gs-type-custom" placeholder="e.g. Number Stack, Cluster Column, Twist Column">
     </div>
     <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsAnswerTypes()">Continue</button>`;
 }
 function gsAnswerTypes() {
   const checked = Array.from(document.querySelectorAll('.gs-type-opt:checked')).map(el => el.value);
   const customEl = document.getElementById('gs-type-custom');
-  const customName = customEl && customEl.value.trim();
-  if (!checked.length && !customName) { alert('Pick at least one, or name something in "Something else."'); return; }
+  const customNames = customEl ? customEl.value.split(',').map(s => s.trim()).filter(Boolean) : [];
+  if (!checked.length && !customNames.length) { alert('Pick at least one, or name something in "Something else."'); return; }
   const p = gsState.production;
   const categoryIndex = p.cursor.categoryIndex;
   const category = GS_CATEGORY_ORDER[categoryIndex];
   const typeQueue = checked.map(k => GS_TYPE_OPTIONS.find(o => o.key === k));
-  if (customName) typeQueue.push({ key: 'custom-' + Date.now(), label: customName, style: customName, formula: 'freeform' });
+  customNames.forEach((name, i) => typeQueue.push({ key: 'custom-' + Date.now() + '-' + i, label: name, style: name, formula: 'freeform' }));
   gsPushHistory();
-  p.active = { category, categoryIndex, typeQueue, typeIndex: 0, entries: [], fields: {}, fieldIndex: 0, fieldExpanded: false, isWrapupCustom: false };
+  p.active = gsNewActive(category, categoryIndex, typeQueue, false);
   p.cursor = { phase: 'sizing' };
   gsSave();
   gsRenderStep();
+}
+// Shared shape for the "currently being interviewed" state — one place to keep gsAnswerTypes,
+// gsAnswerWrapupCategory, and gsFinishTypeInterview's "next type in queue" reset in sync.
+function gsNewActive(category, categoryIndex, typeQueue, isWrapupCustom) {
+  return {
+    category, categoryIndex, typeQueue, typeIndex: 0,
+    entries: [], // [{customLinear, linearFt}] — the standard length(s)/footage collected for this type
+    variants: null, variantIndex: 0, fieldsByVariant: null, // set by gsAnswerVariantGate once entries are done
+    fieldIndex: 0, fieldExpanded: false, isWrapupCustom: !!isWrapupCustom,
+  };
 }
 
 // ─── Per-type interview: fixed length(s) vs. per-job footage, then the optional build-detail fields ───
@@ -5134,7 +5145,7 @@ function gsAnswerSizing(mode) {
     const newActive = JSON.parse(JSON.stringify(p.active));
     newActive.entries.push({ customLinear: true, linearFt: null });
     p.active = newActive;
-    p.cursor = { phase: 'field' };
+    p.cursor = { phase: 'variantGate' };
   } else {
     p.cursor = { phase: 'sizingLength' };
   }
@@ -5175,29 +5186,66 @@ function gsRenderAnotherLength() {
 function gsAnswerAnotherLength(value) {
   const p = gsState.production;
   gsPushHistory();
-  p.cursor = value ? { phase: 'sizingLength' } : { phase: 'field' };
+  p.cursor = value ? { phase: 'sizingLength' } : { phase: 'variantGate' };
   gsSave();
   gsRenderStep();
 }
 
-// One shared field-question screen, stepping through GS_FIELD_STEPS for whichever type is
+// Some businesses build the same style differently indoors vs. outdoors (different equipment,
+// different pack list, sometimes different steps entirely — e.g. lamp stands indoors vs. EMT +
+// paver base outdoors). Rather than trying to let ONE template hold two different answers for a
+// field, a "yes" here runs the build-detail questions twice and produces two separate templates —
+// same pattern the app already uses for "different standard length": a real difference in how
+// something is built gets its own template, not a variant field inside one template.
+function gsRenderVariantGate() {
+  const a = gsState.production.active;
+  const type = a.typeQueue[a.typeIndex];
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:6px;">Does how you build ${psEscape(type.label)} ${psEscape(a.category)} differ between indoor and outdoor jobs?</div>
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:14px;">Equipment, pack list, build steps — anything like that.</div>
+    <div style="display:flex; gap:10px;">
+      <button class="save-btn" style="width:auto; padding:10px 18px;" onclick="gsAnswerVariantGate(true)">Yes, they're different</button>
+      <button class="icon-btn" style="width:auto; padding:10px 18px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="gsAnswerVariantGate(false)">No, same either way</button>
+    </div>`;
+}
+function gsAnswerVariantGate(differs) {
+  const p = gsState.production;
+  gsPushHistory();
+  const newActive = JSON.parse(JSON.stringify(p.active));
+  newActive.variants = differs ? ['Indoor', 'Outdoor'] : ['_shared'];
+  newActive.variantIndex = 0;
+  newActive.fieldsByVariant = {};
+  newActive.variants.forEach(v => { newActive.fieldsByVariant[v] = {}; });
+  newActive.fieldIndex = 0;
+  newActive.fieldExpanded = false;
+  p.active = newActive;
+  p.cursor = { phase: 'field' };
+  gsSave();
+  gsRenderStep();
+}
+
+// One shared field-question screen, stepping through GS_FIELD_STEPS for whichever type/variant is
 // active — its answers apply to every length variant just collected for that type (so a business
-// with two standard Garland lengths isn't asked the same build-instructions question twice).
+// with two standard Garland lengths isn't asked the same build-instructions question twice), and
+// run once per Indoor/Outdoor variant when gsAnswerVariantGate found they differ.
 function gsRenderField() {
   const a = gsState.production.active;
   const step = GS_FIELD_STEPS[a.fieldIndex];
   const type = a.typeQueue[a.typeIndex];
+  const variant = a.variants[a.variantIndex];
+  const context = variant !== '_shared' ? `For ${psEscape(type.label)} ${psEscape(a.category)} — ${variant}.` : `For ${psEscape(type.label)} ${psEscape(a.category)}.`;
   if (!a.fieldExpanded) {
     return `
       <div style="font-size:16px; font-weight:600; margin-bottom:6px;">${psEscape(step.question)}</div>
-      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:14px;">For ${psEscape(type.label)} ${psEscape(a.category)}.</div>
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:14px;">${context}</div>
       <div style="display:flex; gap:10px;">
         <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsFieldYes()">Yes</button>
         <button class="icon-btn" style="width:auto; padding:10px 22px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="gsFieldNo()">No, skip</button>
       </div>`;
   }
   return `
-    <div style="font-size:16px; font-weight:600; margin-bottom:14px;">${psEscape(step.question)}</div>
+    <div style="font-size:16px; font-weight:600; margin-bottom:6px;">${psEscape(step.question)}</div>
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px;">${context}</div>
     <div class="settings-field" style="margin-bottom:14px;"><textarea id="gs-field-input" rows="${step.type === 'list' ? 4 : 3}" placeholder="${invAttr(step.placeholder)}"></textarea></div>
     <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsFieldSave()">Save &amp; Continue</button>`;
 }
@@ -5218,20 +5266,32 @@ function gsFieldSave() {
 }
 function gsFieldAdvance(rawValue) {
   const p = gsState.production;
-  const step = GS_FIELD_STEPS[p.active.fieldIndex];
+  const a = p.active;
+  const variant = a.variants[a.variantIndex];
+  const step = GS_FIELD_STEPS[a.fieldIndex];
   gsPushHistory();
-  const newActive = JSON.parse(JSON.stringify(p.active));
+  const newActive = JSON.parse(JSON.stringify(a));
   if (rawValue !== undefined) {
-    newActive.fields[step.key] = step.type === 'list'
+    newActive.fieldsByVariant[variant][step.key] = step.type === 'list'
       ? rawValue.split('\n').map(s => s.trim()).filter(Boolean)
       : rawValue.trim();
   }
   newActive.fieldIndex += 1;
   newActive.fieldExpanded = false;
-  p.active = newActive;
   if (newActive.fieldIndex >= GS_FIELD_STEPS.length) {
-    gsFinishTypeInterview();
+    if (newActive.variantIndex + 1 < newActive.variants.length) {
+      // More variants to ask about (Outdoor, having just finished Indoor) — same 5 questions again.
+      newActive.variantIndex += 1;
+      newActive.fieldIndex = 0;
+      p.active = newActive;
+      gsSave();
+      gsRenderStep();
+    } else {
+      p.active = newActive;
+      gsFinishTypeInterview();
+    }
   } else {
+    p.active = newActive;
     gsSave();
     gsRenderStep();
   }
@@ -5246,31 +5306,40 @@ function gsFinishTypeInterview() {
   const a = p.active;
   const type = a.typeQueue[a.typeIndex];
   const recipeIds = [];
-  a.entries.forEach((entryMeta, idx) => {
-    const suffix = a.entries.length > 1 ? (entryMeta.customLinear ? ' (custom length)' : ` - ${entryMeta.linearFt} ft`) : '';
-    // A custom-named type (typed into "Something else" or the wrap-up) is already a full product
-    // name someone chose on purpose — use it verbatim instead of appending the category, which
-    // reads oddly when the name already includes it (e.g. typing "Balloon Wall" or "Number Stack").
-    const baseName = String(type.key).startsWith('custom-') ? type.label : `${type.label.split(' / ')[0]} ${a.category}`;
-    const display = `${baseName}${suffix}`;
-    const id = 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '-' + idx;
-    // Firestore's setDoc throws synchronously on an explicit `undefined` field value (unlike
-    // JSON.stringify, which just drops it) — omit linearFt/rates entirely rather than setting
-    // them to undefined, exactly like the hardcoded starter templates and ptAddTemplate do.
-    const recipe = psNormalizeTemplateFields(Object.assign(
-      { id, display, category: a.category, style: type.style, label: display + ' (custom)',
-        formula: type.formula, customLinear: !!entryMeta.customLinear,
-        buildInstructions: a.fields.buildInstructions || '',
-        equipmentList: a.fields.equipmentList || [],
-        packList: a.fields.packList || [],
-        installNotes: a.fields.installNotes || '',
-        staffingRecommendation: a.fields.staffingRecommendation || '',
-        createdVia: 'guidedSetup' },
-      entryMeta.customLinear ? {} : { linearFt: entryMeta.linearFt },
-      type.formula === 'freeform' ? { rates: FORMULAS.freeformRates[a.category] } : {}
-    ));
-    RECIPES = RECIPES.concat([recipe]);
-    recipeIds.push(id);
+  const multiEntry = a.entries.length > 1;
+  const multiVariant = a.variants.length > 1;
+  // One template per (length variant × indoor/outdoor variant) combination — e.g. a business with
+  // two standard lengths AND an indoor/outdoor split ends up with 4 flat templates, exactly like
+  // the hardcoded starter set already treats "Classic Column - Standard" and "- XL" as siblings.
+  a.variants.forEach(variant => {
+    const fields = a.fieldsByVariant[variant] || {};
+    a.entries.forEach((entryMeta, idx) => {
+      const lengthSuffix = multiEntry ? (entryMeta.customLinear ? ' (custom length)' : ` - ${entryMeta.linearFt} ft`) : '';
+      const variantSuffix = multiVariant ? ` - ${variant}` : '';
+      // A custom-named type (typed into "Something else" or the wrap-up) is already a full product
+      // name someone chose on purpose — use it verbatim instead of appending the category, which
+      // reads oddly when the name already includes it (e.g. typing "Balloon Wall" or "Number Stack").
+      const baseName = String(type.key).startsWith('custom-') ? type.label : `${type.label.split(' / ')[0]} ${a.category}`;
+      const display = `${baseName}${variantSuffix}${lengthSuffix}`;
+      const id = 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '-' + idx + '-' + variant;
+      // Firestore's setDoc throws synchronously on an explicit `undefined` field value (unlike
+      // JSON.stringify, which just drops it) — omit linearFt/rates entirely rather than setting
+      // them to undefined, exactly like the hardcoded starter templates and ptAddTemplate do.
+      const recipe = psNormalizeTemplateFields(Object.assign(
+        { id, display, category: a.category, style: type.style, label: display + ' (custom)',
+          formula: type.formula, customLinear: !!entryMeta.customLinear,
+          buildInstructions: fields.buildInstructions || '',
+          equipmentList: fields.equipmentList || [],
+          packList: fields.packList || [],
+          installNotes: fields.installNotes || '',
+          staffingRecommendation: fields.staffingRecommendation || '',
+          createdVia: 'guidedSetup' },
+        entryMeta.customLinear ? {} : { linearFt: entryMeta.linearFt },
+        type.formula === 'freeform' ? { rates: FORMULAS.freeformRates[a.category] } : {}
+      ));
+      RECIPES = RECIPES.concat([recipe]);
+      recipeIds.push(id);
+    });
   });
   ptSaveLibrary();
 
@@ -5280,7 +5349,7 @@ function gsFinishTypeInterview() {
 
   a.typeIndex += 1;
   if (a.typeIndex < a.typeQueue.length) {
-    a.entries = []; a.fields = {}; a.fieldIndex = 0; a.fieldExpanded = false;
+    a.entries = []; a.variants = null; a.variantIndex = 0; a.fieldsByVariant = null; a.fieldIndex = 0; a.fieldExpanded = false;
     p.cursor = { phase: 'sizing' };
   } else if (a.isWrapupCustom) {
     p.active = null;
@@ -5343,11 +5412,7 @@ function gsAnswerWrapupCategory(category) {
   const name = p.cursor.pendingName;
   const categoryIndex = GS_CATEGORY_ORDER.indexOf(category);
   gsPushHistory();
-  p.active = {
-    category, categoryIndex,
-    typeQueue: [{ key: 'custom-' + Date.now(), label: name, style: name, formula: 'freeform' }],
-    typeIndex: 0, entries: [], fields: {}, fieldIndex: 0, fieldExpanded: false, isWrapupCustom: true,
-  };
+  p.active = gsNewActive(category, categoryIndex, [{ key: 'custom-' + Date.now(), label: name, style: name, formula: 'freeform' }], true);
   p.cursor = { phase: 'sizing' };
   gsSave();
   gsRenderStep();
