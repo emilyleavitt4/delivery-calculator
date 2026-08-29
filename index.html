@@ -3205,6 +3205,18 @@ function imMatchConfidence(a, b) {
   return 1 - dist / Math.max(na.length, nb.length);
 }
 
+// Real invoices put "Indoor" or "Outdoor" as the lead word of the Location line (optionally
+// followed by more detail, e.g. "Indoor, first floor lobby") — this is a plain keyword check,
+// not fuzzy/library matching like colors, since it's a fixed two-value domain. Manual entry
+// (the "Add an item" form, editing a line) runs the same check live against whatever's typed
+// into Location, so detection isn't limited to invoice imports.
+function psDetectIndoorOutdoor(locationText) {
+  const t = (locationText || '').toLowerCase();
+  if (/\boutdoor\b/.test(t)) return 'Outdoor';
+  if (/\bindoor\b/.test(t)) return 'Indoor';
+  return null;
+}
+
 // ─── Resolving a raw item to a classification + status ──────────────────────
 
 // The four needs_review triggers, in order: no saved mapping at all; more than one saved
@@ -3301,6 +3313,7 @@ function psReviewItemFromRaw(pItem) {
     colors: pItem.details['Colors'] ? pItem.details['Colors'].split(',').map(c => c.trim()).filter(Boolean) : [],
     colorGeneralNotes: [], // colors explicitly confirmed as general/non-inventory notes (lowercased)
     location: pItem.details['Location'] || '',
+    indoorOutdoor: psDetectIndoorOutdoor(pItem.details['Location']), // auto-detected, always editable below
 
     status: resolution.status,
     reasons: resolution.reasons,
@@ -3342,6 +3355,7 @@ function psApplyReviewDraftToEvent(draft) {
         customLinear: item.customLinear || null,
         design: '',
         location: item.location || '',
+        indoorOutdoor: item.indoorOutdoor || null,
         topperNote: '',
         notes: item.description || '',
       });
@@ -3483,7 +3497,16 @@ function irItemCardHtml(item) {
         html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Actual footage</label><input type="number" step="0.5" min="0" value="${item.customLinear || ''}" placeholder="e.g. 30" onchange="irUpdateItemField('${item.id}','customLinear', this.value)"></div>`;
       }
       html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Colors</label>${irColorPickerHtml(item)}</div>`;
-      html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Location (optional)</label><input type="text" value="${invAttr(item.location)}" onchange="irUpdateItemField('${item.id}','location', this.value)"></div>`;
+      html += `<div class="row">
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Location (optional)</label><input type="text" value="${invAttr(item.location)}" onchange="irUpdateItemField('${item.id}','location', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Indoor/Outdoor</label>
+          <select onchange="irUpdateItemField('${item.id}','indoorOutdoor', this.value || null)">
+            <option value="">— unspecified —</option>
+            <option value="Indoor"${item.indoorOutdoor === 'Indoor' ? ' selected' : ''}>Indoor</option>
+            <option value="Outdoor"${item.indoorOutdoor === 'Outdoor' ? ' selected' : ''}>Outdoor</option>
+          </select>
+        </div>
+      </div>`;
     }
 
     html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Description / notes (optional)</label><input type="text" value="${invAttr(item.description)}" onchange="irUpdateItemField('${item.id}','description', this.value)"></div>`;
@@ -3862,6 +3885,7 @@ function psSaveEditItem(jobId, idx) {
   line.colors = colors;
   line.design = design;
   line.location = location;
+  line.indoorOutdoor = psDetectIndoorOutdoor(location);
   line.topperNote = topperNote;
   delete line.colorDist; // percentages would no longer line up with the edited color list
 
@@ -3973,6 +3997,7 @@ function psProductionBodyHtml(job) {
         html += `<b>Size:</b> ${psEscape(psLineFootageText(line, r))}<br><b>Qty:</b> ${line.qty}<br><b>Style:</b> ${psEscape(r.style || r.category)}<br>`;
         if (psTopperFt(r)) html += `<b>Topper:</b> ~${psTopperFt(r)} ft included${line.topperNote ? ' (' + psEscape(line.topperNote) + ')' : ''}<br>`;
         if (line.design) html += `<b>Design:</b> ${psEscape(line.design)}<br>`;
+        if (line.indoorOutdoor) html += `<b>${psEscape(line.indoorOutdoor)}</b><br>`;
         if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
         html += `<b>Colors:</b> ${psEscape(line.colors.join(' / '))}<br>`;
         html += `</div>`;
@@ -4060,7 +4085,7 @@ function psAddItemToJob(jobId) {
     if (!customLinear || customLinear <= 0) { alert('Enter the actual footage for this garland.'); return; }
   }
 
-  job.productionItems.push({ id: psNewLineItemId(), recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, topperNote, notes: '' });
+  job.productionItems.push({ id: psNewLineItemId(), recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, indoorOutdoor: psDetectIndoorOutdoor(location), topperNote, notes: '' });
   delete psColorDraftStore[draftKey]; // reset the color picker to a single blank row for next time
   psSaveJob(job);
 }
@@ -4532,7 +4557,7 @@ function qcAddToJob() {
     colors: colors.map(c => c.name),
     colorDist: colors.map(c => ({ name: c.name, pct: c.pct })),
     customLinear: null,
-    design: '', location: '', topperNote: '', notes: ''
+    design: '', location: '', indoorOutdoor: null, topperNote: '', notes: ''
   });
   psExpandedProduction = job.id;
   psSaveJob(job);
