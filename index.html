@@ -61,19 +61,19 @@
     padding-bottom: 3rem;
     min-height: 100vh;
   }
-  /* Settings holds the bulk-data-entry screens (Color Library, Material Catalog) that are
-     genuinely faster with more horizontal room — multi-column pickers, wide preview tables.
-     Only widens while Settings is the active view, and only above phone/tablet widths, so
-     every other screen keeps its normal phone-shell layout. */
+  /* Every screen gets a moderate width bump on a real desktop viewport — noticeably more room
+     than the 430px phone shell, but nowhere near edge-to-edge; there's still real side padding
+     at typical desktop widths. Settings/Business Setup (.app-wide) go wider still on top of
+     this, since their bulk-data-entry screens (Color Library, Material Catalog, multi-column
+     pickers, wide preview tables) benefit from more room than everything else needs. */
   @media (min-width: 900px) {
+    .app { max-width: 720px; }
     .app.app-wide { max-width: 1080px; }
-    /* Settings' group tiles (.tool-grid/.tool-tile) are a fixed 3-column grid with a square
-       aspect-ratio and fixed-size icon/text — fine at 430px, but stretched to 1080px with only
-       3 columns those tiles just become huge empty squares around a small icon. Switching to
-       auto-fill keeps each tile close to its original size and adds columns instead. Scoped to
-       .app-wide so Home's identical .tool-grid (which never widens) is untouched. */
-    .app-wide .tool-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
   }
+  /* The .tool-grid/.tool-tile-icon/.tool-tile-title desktop overrides live further down (right
+     after those classes' own base rules, see the TOOL GRID section) rather than here — a
+     same-specificity override declared BEFORE the rule it's meant to override loses the
+     cascade even when its @media condition matches, since source order still decides ties. */
 
   /* TOP BAR */
   .topbar {
@@ -177,6 +177,33 @@
   .tool-tile-title { font-size: 12px; font-weight: 600; line-height: 1.25; letter-spacing: -0.1px; }
   .tool-tile.soon { opacity: 0.45; cursor: default; }
   .tool-tile.soon:hover, .tool-tile.soon:active { background: var(--surface); border-color: var(--border); }
+  @media (min-width: 900px) {
+    /* Any .tool-grid (Home's own tool tiles included, not just Settings') is a fixed 3-column
+       grid with a square aspect-ratio and fixed-size icon/text — fine at 430px, but stretched
+       wider with only 3 columns those tiles just become oversized empty squares around a small
+       icon. Auto-fill keeps each tile close to its original size and adds columns instead. */
+    .tool-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+    /* Auto-fill controls how many tiles fit per row, but each tile can still end up wider than
+       430px-mode ever anticipated — without this, the icon/title inside stay pinned at their
+       phone-shell size, leaving a small icon adrift in a much bigger empty square. Scaling both
+       up keeps the content filling the tile instead of shrinking to a corner of it. */
+    .tool-tile-icon { width: 56px; height: 56px; font-size: 24px; }
+    .tool-tile-title { font-size: 14px; }
+  }
+
+  /* Home's "Rearrange" mode (personal per-device tile order, see HOME_TOOLS/homeTileOrder) —
+     tiles wiggle to signal they're draggable (like iOS's home-screen edit mode), lift with a
+     shadow while actually being dragged, and highlight whichever tile they're currently over as
+     the drop target. touch-action:none stops the browser trying to scroll the page underneath a
+     touch-drag in progress. */
+  .tool-tile.editing { cursor: grab; touch-action: none; animation: tile-wiggle 0.22s ease-in-out infinite; }
+  .tool-tile.editing:nth-child(even) { animation-delay: -0.11s; }
+  .tool-tile.dragging { cursor: grabbing; animation: none; box-shadow: 0 8px 20px rgba(0,0,0,0.18); z-index: 10; }
+  .tool-tile.drop-target { border-color: var(--accent-border); background: var(--accent-light); }
+  @keyframes tile-wiggle {
+    0%, 100% { transform: rotate(-1deg); }
+    50% { transform: rotate(1deg); }
+  }
 
   /* Only matters once JS sets display:flex on the active group panel — lets a child opt into a
      specific position via "order" (People & Access: Team Members before Admin Passcode)
@@ -1000,69 +1027,12 @@
       </div>
     </div>
 
-    <div class="section-label" style="margin-top:0">Your tools</div>
-
-    <div class="tool-grid">
-      <div class="tool-tile" onclick="showView('import')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-file-arrow-up"></i></div>
-        <div class="tool-tile-title">Import Job</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('calc')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-location-dot"></i></div>
-        <div class="tool-tile-title">Delivery Calculator</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('production')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-clipboard-list"></i></div>
-        <div class="tool-tile-title">Production Sheets</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('staffing')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-calendar-days"></i></div>
-        <div class="tool-tile-title">Event Schedule &amp; Staffing</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('quantity')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-ruler"></i></div>
-        <div class="tool-tile-title">Quantity Calculator</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('jobcost')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-tags"></i></div>
-        <div class="tool-tile-title">Job Cost Calculator</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('helium')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-wind"></i></div>
-        <div class="tool-tile-title">Helium Cost Calculator</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('letters')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-font"></i></div>
-        <div class="tool-tile-title">Letter Styling Calculator</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('formulas')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-flask"></i></div>
-        <div class="tool-tile-title">Custom Recipes</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('inventory')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-boxes-stacked"></i></div>
-        <div class="tool-tile-title">Inventory</div>
-      </div>
-
-      <div class="tool-tile" onclick="showView('timetracker')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-clock"></i></div>
-        <div class="tool-tile-title">Time Tracker</div>
-      </div>
-
-      <div class="tool-tile soon">
-        <div class="tool-tile-icon"><i class="fa-solid fa-car"></i></div>
-        <div class="tool-tile-title">Vehicle Maintenance Log</div>
-      </div>
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-top:0;">
+      <div class="section-label" style="margin:0;">Your tools</div>
+      <button class="icon-btn" id="home-edit-toggle" style="width:auto; padding:3px 10px; font-size:11px;" onclick="homeToggleEditMode()">Rearrange</button>
     </div>
+
+    <div class="tool-grid" id="home-tool-grid"></div>
 
     <div class="home-footer-note">More tools coming soon</div>
   </div><!-- end view-home -->
@@ -1879,6 +1849,116 @@ const TOOL_META = {
   businessSetup:{ title: 'Business Setup',              icon: 'fa-solid fa-list-check',          showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: false, showGear: false }
 };
+
+// ═══════════════════════════════════════ HOME TILE ORDER ═══════════════════════════════════════
+//
+// The Home screen's tiles used to be static HTML in a fixed order; this registry drives them
+// instead so the order can be personalized. One entry per tile — view/onclick target, icon,
+// title, and `soon` for the one disabled placeholder tile that has no real destination yet.
+const HOME_TOOLS = [
+  { id: 'import', view: 'import', icon: 'fa-solid fa-file-arrow-up', title: 'Import Job' },
+  { id: 'calc', view: 'calc', icon: 'fa-solid fa-location-dot', title: 'Delivery Calculator' },
+  { id: 'production', view: 'production', icon: 'fa-solid fa-clipboard-list', title: 'Production Sheets' },
+  { id: 'staffing', view: 'staffing', icon: 'fa-solid fa-calendar-days', title: 'Event Schedule &amp; Staffing' },
+  { id: 'quantity', view: 'quantity', icon: 'fa-solid fa-ruler', title: 'Quantity Calculator' },
+  { id: 'jobcost', view: 'jobcost', icon: 'fa-solid fa-tags', title: 'Job Cost Calculator' },
+  { id: 'helium', view: 'helium', icon: 'fa-solid fa-wind', title: 'Helium Cost Calculator' },
+  { id: 'letters', view: 'letters', icon: 'fa-solid fa-font', title: 'Letter Styling Calculator' },
+  { id: 'formulas', view: 'formulas', icon: 'fa-solid fa-flask', title: 'Custom Recipes' },
+  { id: 'inventory', view: 'inventory', icon: 'fa-solid fa-boxes-stacked', title: 'Inventory' },
+  { id: 'timetracker', view: 'timetracker', icon: 'fa-solid fa-clock', title: 'Time Tracker' },
+  { id: 'vehiclemaintenance', view: null, icon: 'fa-solid fa-car', title: 'Vehicle Maintenance Log', soon: true },
+];
+// Personal per device — deliberately localStorage, not synced business data, so everyone on the
+// team can arrange their own most-used tools up top without affecting anyone else's phone/laptop.
+const HOME_ORDER_KEY = 'bbt_home_tile_order_v1';
+function homeLoadOrder() {
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(HOME_ORDER_KEY) || '[]'); } catch (e) { saved = []; }
+  const validIds = new Set(HOME_TOOLS.map(t => t.id));
+  const order = saved.filter(id => validIds.has(id));
+  const seen = new Set(order);
+  HOME_TOOLS.forEach(t => { if (!seen.has(t.id)) order.push(t.id); }); // a newly-added tool lands at the end
+  return order;
+}
+function homeSaveOrder() {
+  try { localStorage.setItem(HOME_ORDER_KEY, JSON.stringify(homeTileOrder)); } catch (e) {}
+}
+let homeTileOrder = homeLoadOrder();
+let homeEditMode = false;
+
+function homeToggleEditMode() {
+  homeEditMode = !homeEditMode;
+  document.getElementById('home-edit-toggle').textContent = homeEditMode ? 'Done' : 'Rearrange';
+  homeRenderTiles();
+}
+function homeRenderTiles() {
+  const grid = document.getElementById('home-tool-grid');
+  if (!grid) return;
+  grid.innerHTML = homeTileOrder.map(id => {
+    const t = HOME_TOOLS.find(x => x.id === id);
+    if (!t) return '';
+    const clickAttr = (!homeEditMode && !t.soon) ? ` onclick="showView('${t.view}')"` : '';
+    return `<div class="tool-tile${t.soon ? ' soon' : ''}${homeEditMode ? ' editing' : ''}" data-tool-id="${t.id}"${clickAttr}>
+      <div class="tool-tile-icon"><i class="${t.icon}"></i></div>
+      <div class="tool-tile-title">${t.title}</div>
+    </div>`;
+  }).join('');
+  if (homeEditMode) {
+    grid.querySelectorAll('.tool-tile').forEach(tile => tile.addEventListener('pointerdown', homeDragStart));
+  }
+}
+
+// Drag-and-drop via Pointer Events (unifies mouse + touch, no separate mobile implementation
+// needed) — the dragged tile is only visually offset with a CSS transform while the gesture is
+// in progress (so the DOM node driving the drag is never destroyed mid-drag); homeTileOrder
+// itself, and the actual re-render, only happen once at drop.
+let homeDragState = null;
+function homeDragStart(e) {
+  e.preventDefault();
+  const tile = e.currentTarget;
+  tile.setPointerCapture(e.pointerId);
+  homeDragState = { id: tile.dataset.toolId, tile, startX: e.clientX, startY: e.clientY, targetId: null };
+  tile.classList.add('dragging');
+  tile.addEventListener('pointermove', homeDragMove);
+  tile.addEventListener('pointerup', homeDragEnd);
+  tile.addEventListener('pointercancel', homeDragEnd);
+}
+function homeDragMove(e) {
+  if (!homeDragState) return;
+  const dx = e.clientX - homeDragState.startX;
+  const dy = e.clientY - homeDragState.startY;
+  homeDragState.tile.style.transform = `translate(${dx}px, ${dy}px)`;
+  const grid = document.getElementById('home-tool-grid');
+  const tiles = [...grid.querySelectorAll('.tool-tile')];
+  tiles.forEach(t => t.classList.remove('drop-target'));
+  const target = tiles.find(t => {
+    if (t === homeDragState.tile) return false;
+    const r = t.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  });
+  homeDragState.targetId = target ? target.dataset.toolId : null;
+  if (target) target.classList.add('drop-target');
+}
+function homeDragEnd(e) {
+  if (!homeDragState) return;
+  const { id, tile, targetId } = homeDragState;
+  tile.style.transform = '';
+  tile.classList.remove('dragging');
+  document.querySelectorAll('#home-tool-grid .tool-tile.drop-target').forEach(t => t.classList.remove('drop-target'));
+  tile.removeEventListener('pointermove', homeDragMove);
+  tile.removeEventListener('pointerup', homeDragEnd);
+  tile.removeEventListener('pointercancel', homeDragEnd);
+  homeDragState = null;
+  if (targetId && targetId !== id) {
+    const fromIdx = homeTileOrder.indexOf(id);
+    const toIdx = homeTileOrder.indexOf(targetId);
+    homeTileOrder.splice(fromIdx, 1);
+    homeTileOrder.splice(toIdx, 0, id);
+    homeSaveOrder();
+  }
+  homeRenderTiles();
+}
 
 // Every business-configuration section that lives in Settings, registered once instead of
 // hand-maintained as HTML — adding a new section going forward means adding an entry here, not
@@ -8584,6 +8664,7 @@ window.handleAuthStateChanged = handleAuthStateChanged;
 
 // Everything that used to run immediately on page load now waits until sign-in succeeds.
 function bootApp() {
+  try { homeRenderTiles(); } catch (e) { console.error('homeRenderTiles failed:', e); }
   // Builds Settings' section containers before anything below tries to render into one.
   try { settingsRenderSections(); } catch (e) { console.error('settingsRenderSections failed:', e); }
   // Jobs is the most important shared feature, so it starts first and on its own —
