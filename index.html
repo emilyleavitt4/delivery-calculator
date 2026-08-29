@@ -919,6 +919,12 @@
   window.fbLoadAttachmentCategories = () => window.fbLoadSettingsDoc('attachmentCategories');
   window.fbSaveAttachmentCategories = (data) => window.fbSaveSettingsDoc('attachmentCategories', data);
 
+  // Guided Setup's interview progress — where the conversation is, not the actual configuration
+  // it produces (that's still RECIPES/customProductionTemplates, same as a hand-edit in Settings).
+  // Losing this doc only costs interview progress, never real templates.
+  window.fbLoadGuidedSetupProgress = () => window.fbLoadSettingsDoc('guidedSetupProgress');
+  window.fbSaveGuidedSetupProgress = (data) => window.fbSaveSettingsDoc('guidedSetupProgress', data);
+
   // Freeform, occasional-use recipes (seasonal items, one-offs) kept purely for reference —
   // shared across the team like Jobs, but never feed into the Quantity Calculator or Production math.
   const customRecipesRef = collection(db, 'businesses', BUSINESS_ID, 'customRecipes');
@@ -1407,6 +1413,11 @@
     <div id="bs-root"></div>
   </div><!-- end view-businessSetup -->
 
+  <!-- ═══════════════════════════════════════ GUIDED SETUP VIEW -->
+  <div class="view" id="view-guidedSetup">
+    <div id="gs-root"></div>
+  </div><!-- end view-guidedSetup -->
+
   <!-- ═══════════════════════════════════════ SETTINGS VIEW -->
   <div class="view" id="view-settings">
 
@@ -1847,6 +1858,7 @@ const TOOL_META = {
   timetracker:{ title: 'Time Tracker',                  icon: 'fa-solid fa-clock',               showBack: true,  showGear: true  },
   importReview:{ title: 'Review Import',                icon: 'fa-solid fa-clipboard-check',     showBack: true,  showGear: false },
   businessSetup:{ title: 'Business Setup',              icon: 'fa-solid fa-list-check',          showBack: true,  showGear: false },
+  guidedSetup:{ title: 'Guided Setup',                  icon: 'fa-solid fa-comments',             showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: false, showGear: false }
 };
 
@@ -2154,10 +2166,21 @@ const BUSINESS_SETUP_ITEMS = [
     label: 'Production Templates',
     description: 'Build instructions, equipment, and pack lists for the items you build.',
     destinationType: 'settingsGroup', destination: 'templatesFormulas',
+    guidedFlow: 'production', stateLabelOverrides: { complete: 'Ready for Now' },
     status: () => {
-      // RECIPES always has 22 built-in entries, so "the list isn't empty" would always be true —
-      // completion instead means at least one has real build guidance beyond the bare balloon-
-      // count math every starter template ships with.
+      // Once Guided Setup has ever run for this business, "done" is the explicit decision made
+      // there (gsState.production.status), not a guess from what's in RECIPES — see gsInit().
+      if (gsProgressDocLoaded) {
+        const st = gsState.production.status;
+        if (st === 'ready_for_now') return { state: 'complete', count: RECIPES.filter(t => t.createdVia === 'guidedSetup').length };
+        if (st === 'in_progress') return { state: 'in_progress' };
+        return { state: 'not_started' };
+      }
+      // No Guided Setup progress recorded yet (including for every business that existed before
+      // this feature shipped) — fall back to the old heuristic so a hand-configured template
+      // library doesn't regress to "Not Started." RECIPES always has 22 built-in entries, so
+      // "the list isn't empty" would always be true; completion instead means at least one has
+      // real build guidance beyond the bare balloon-count math every starter template ships with.
       const customized = RECIPES.filter(t => t.buildInstructions || (t.equipmentList && t.equipmentList.length) || (t.packList && t.packList.length) || t.staffingRecommendation);
       return customized.length > 0 ? { state: 'complete', count: customized.length } : { state: 'not_started' };
     },
@@ -2262,8 +2285,25 @@ function bsButtonLabel(item) {
     default: return 'Set Up';
   }
 }
+// Guided-flow items (currently just Production Templates) get a primary button into the wizard
+// plus a smaller secondary link straight into Settings, instead of the single button every other
+// item gets — "clicking an area should normally launch its guided flow," with an obvious escape
+// hatch for someone who already knows exactly what they want to change.
+function bsActionHtml(item) {
+  if (item.guidedFlow) {
+    const label = item.resolvedState === 'in_progress' ? 'Continue Setup'
+      : item.resolvedState === 'complete' ? 'Review Setup'
+      : 'Start Guided Setup';
+    return `<div style="display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="gsStart('${item.guidedFlow}')">${label}</button>
+      <button class="icon-btn" style="width:auto; padding:4px 0; font-size:11px; color:var(--text-secondary); background:none; border:none;" onclick="bsGoTo('${item.id}')">Advanced: edit in Settings</button>
+    </div>`;
+  }
+  return `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:10px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="bsGoTo('${item.id}')">${bsButtonLabel(item)}</button>`;
+}
 function bsCardHtml(item) {
   const disabled = !!item.comingLater;
+  const stateLabel = (item.stateLabelOverrides && item.stateLabelOverrides[item.resolvedState]) || BUSINESS_SETUP_STATUS_LABELS[item.resolvedState];
   let html = `<div class="card" style="margin-bottom:0.6rem; ${disabled ? 'opacity:0.55;' : ''}">
     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
       <div style="flex:1; min-width:0;">
@@ -2273,9 +2313,9 @@ function bsCardHtml(item) {
       </div>
       ${disabled
         ? `<span class="ps-status-btn ps-status-optional">Coming later</span>`
-        : `<span class="ps-status-btn ${BUSINESS_SETUP_STATUS_CLASSES[item.resolvedState]}">${BUSINESS_SETUP_STATUS_LABELS[item.resolvedState]}</span>`}
+        : `<span class="ps-status-btn ${BUSINESS_SETUP_STATUS_CLASSES[item.resolvedState]}">${psEscape(stateLabel)}</span>`}
     </div>
-    ${disabled ? '' : `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:10px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="bsGoTo('${item.id}')">${bsButtonLabel(item)}</button>`}
+    ${disabled ? '' : bsActionHtml(item)}
   </div>`;
   return html;
 }
@@ -4700,7 +4740,11 @@ function frInit() {
 
 function ptInit() {
   window.fbLoadCustomProductionTemplates().then(snap => {
-    if (snap.exists() && Array.isArray(snap.data().templates) && snap.data().templates.length > 0) {
+    // Trusts ANY saved doc, including an explicitly-emptied list (e.g. "Clear all templates," or
+    // a business that hasn't run Guided Setup yet) — previously this required a non-empty array,
+    // so saving zero templates was silently ignored on the next load and RECIPES reverted to the
+    // 22 hardcoded starter defaults, which broke "Not Started" ever meaning "actually zero."
+    if (snap.exists() && Array.isArray(snap.data().templates)) {
       const saved = snap.data().templates;
       saved.forEach(t => {
         psNormalizeTemplateFields(t);
@@ -4885,6 +4929,434 @@ function ptClearAllTemplates() {
   ptSaveLibrary();
   ptRenderShell();
   alert('Production Templates cleared.');
+}
+
+// ═══════════════════════════════════════ GUIDED SETUP (conversational onboarding) ═══════════════════════════════════════
+//
+// A wizard LAYERED OVER the real configuration, never a parallel one: every answer here mutates
+// RECIPES directly and saves through the exact same ptSaveLibrary() Settings' manual editor uses,
+// so a wizard-created template is indistinguishable from a hand-created one to storage or math.
+// The only thing genuinely new to Firestore is settings/guidedSetupProgress, which tracks where
+// the CONVERSATION is (current question, what's been asked) — never the actual business data.
+// Losing that doc costs interview progress, never a real template (see fbSaveGuidedSetupProgress).
+//
+// Framework note: gsStart/gsRenderStep/gsSave/gsBack are generic — a future flow (Color Library,
+// Delivery, etc.) would add its own gsState[flowId] plus a render switch, without touching any of
+// this. Only the 'production' flow is actually built out in this pass.
+
+const GS_CATEGORY_ORDER = ['Garland', 'Column', 'Arch'];
+const GS_CATEGORY_LABEL = { Garland: 'garlands', Column: 'columns', Arch: 'arches' };
+const GS_TYPE_OPTIONS = [
+  { key: 'Freeform', label: 'Freeform / Organic', style: 'Freeform', formula: 'freeform' },
+  { key: 'Classic', label: 'Classic / Structured', style: 'Classic', formula: 'classic' },
+  { key: 'GrabAndGo', label: 'Grab & Go', style: 'Grab & Go', formula: 'freeform' },
+];
+// One screen per field, in order — a plain Yes/No first (skip leaves the template's default
+// blank/empty value untouched), Yes reveals the actual input. Deliberately matches only what the
+// approved question tree asks; "pull list notes" stays editable in Settings, not asked here.
+const GS_FIELD_STEPS = [
+  { key: 'buildInstructions', question: 'Do you have standard build instructions that should appear every time on the production sheet?', type: 'text', placeholder: 'e.g. Build in sections of 10, attach to the backdrop frame with cable ties every 12"' },
+  { key: 'equipmentList', question: 'Should specific equipment automatically appear on the production sheet for this?', type: 'list', placeholder: 'One item per line, e.g.\nDecorating strip\nFishing line\nCommand hooks' },
+  { key: 'packList', question: 'Do you use a standard pack list for this?', type: 'list', placeholder: 'One item per line' },
+  { key: 'installNotes', question: 'Any standard installation notes?', type: 'text', placeholder: 'e.g. Confirm ceiling height on site before building' },
+  { key: 'staffingRecommendation', question: 'Want a typical staffing or time recommendation noted?', type: 'text', placeholder: 'e.g. 2 people, 30 minutes' },
+];
+
+function gsDefaultProductionState() {
+  return {
+    status: 'not_started', // 'not_started' | 'in_progress' | 'ready_for_now'
+    categories: {}, // { Garland: { offered, types: [{ key, label, style, formula, entries: [recipeId,...] }] }, ... }
+    cursor: { phase: 'offered', categoryIndex: 0 },
+    active: null, // the type currently being interviewed — see gsAnswerTypes
+    history: [], // stack of {cursor, active} snapshots, popped by gsBack()
+  };
+}
+let gsState = { production: gsDefaultProductionState() };
+let gsProgressDocLoaded = false;
+
+function gsInit() {
+  window.fbLoadGuidedSetupProgress().then(snap => {
+    if (snap.exists() && snap.data().production) {
+      gsState.production = Object.assign(gsDefaultProductionState(), snap.data().production);
+      gsProgressDocLoaded = true;
+      bsUpdateHomeBanner();
+      const bsView = document.getElementById('view-businessSetup');
+      if (bsView && bsView.classList.contains('active')) bsRenderShell();
+    }
+  }).catch(err => console.error('Guided setup progress load failed:', err));
+}
+function gsSave() {
+  window.fbSaveGuidedSetupProgress({ production: gsState.production }).catch(err => console.error('Guided setup progress save failed:', err));
+}
+
+function gsStart(flowId) {
+  if (flowId !== 'production') return;
+  const p = gsState.production;
+  // From the moment someone actually starts the wizard, its own status is authoritative — even
+  // on a brand-new business where gsInit()'s load never found an existing doc to set this from
+  // (there's nothing to load yet). Otherwise Business Setup's card would still show the old
+  // heuristic immediately after finishing the wizard for the very first time.
+  gsProgressDocLoaded = true;
+  if (p.status === 'not_started') p.status = 'in_progress';
+  else if (p.status === 'ready_for_now') p.cursor = { phase: 'wrapup' }; // "Review Setup" re-opens at "anything else?"
+  gsSave();
+  showView('guidedSetup');
+  gsRenderStep();
+}
+
+// Snapshots {cursor, active} onto the history stack before every forward transition — gsBack()
+// just pops one back off, which is what lets an arbitrary branching interview support Back
+// without a hand-written reverse transition per step. Never touches RECIPES, so rewinding the
+// conversation never un-saves a template that was already committed by gsFinishTypeInterview.
+function gsPushHistory() {
+  const p = gsState.production;
+  p.history.push(JSON.parse(JSON.stringify({ cursor: p.cursor, active: p.active })));
+}
+function gsBack() {
+  const p = gsState.production;
+  if (!p.history.length) { showView('businessSetup'); return; }
+  const prev = p.history.pop();
+  p.cursor = prev.cursor;
+  p.active = prev.active;
+  gsSave();
+  gsRenderStep();
+}
+
+function gsRenderStep() {
+  const root = document.getElementById('gs-root');
+  if (!root) return;
+  const p = gsState.production;
+  const body = gsRenderBody();
+  const showBack = p.history.length > 0;
+  root.innerHTML = `<div class="card">${body}</div>${showBack
+    ? `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; margin-top:12px; background:none; border:none; color:var(--text-secondary);" onclick="gsBack()"><i class="fa-solid fa-arrow-left"></i> Back</button>`
+    : ''}`;
+}
+function gsRenderBody() {
+  const p = gsState.production;
+  switch (p.cursor.phase) {
+    case 'types': return gsRenderTypes(p.cursor.categoryIndex);
+    case 'sizing': return gsRenderSizing();
+    case 'sizingLength': return gsRenderSizingLength();
+    case 'anotherLength': return gsRenderAnotherLength();
+    case 'field': return gsRenderField();
+    case 'wrapup': return gsRenderWrapup();
+    case 'wrapupName': return gsRenderWrapupName();
+    case 'wrapupCategory': return gsRenderWrapupCategory();
+    case 'done': return gsRenderDone();
+    default: return gsRenderOffered(p.cursor.categoryIndex || 0);
+  }
+}
+
+// ─── "Do you offer X?" — one per broad category, in GS_CATEGORY_ORDER ───────────────────────
+function gsRenderOffered(categoryIndex) {
+  const category = GS_CATEGORY_ORDER[categoryIndex];
+  const catState = gsState.production.categories[category];
+  const existingCount = catState && catState.types ? catState.types.reduce((n, t) => n + t.entries.length, 0) : 0;
+  const intro = (categoryIndex === 0 && gsState.production.history.length === 0)
+    ? `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:12px;">I'll ask about what you build, one thing at a time — skip anything that doesn't apply. Answers save as you go, so you can leave and come back anytime.</div>`
+    : '';
+  return `${intro}
+    <div style="font-size:16px; font-weight:600; margin-bottom:14px;">Do you offer balloon ${GS_CATEGORY_LABEL[category]}?</div>
+    ${existingCount ? `<div style="font-size:11px; color:var(--text-tertiary); margin-bottom:10px;">You already have ${existingCount} saved ${category.toLowerCase()} template${existingCount === 1 ? '' : 's'} — answering differently here won't delete them.</div>` : ''}
+    <div style="display:flex; gap:10px;">
+      <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsAnswerOffered(true)">Yes</button>
+      <button class="icon-btn" style="width:auto; padding:10px 22px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="gsAnswerOffered(false)">No</button>
+    </div>`;
+}
+function gsAnswerOffered(value) {
+  const p = gsState.production;
+  const categoryIndex = p.cursor.categoryIndex;
+  const category = GS_CATEGORY_ORDER[categoryIndex];
+  gsPushHistory();
+  if (!p.categories[category]) p.categories[category] = { offered: value, types: [] };
+  else p.categories[category].offered = value;
+  if (value) {
+    p.cursor = { phase: 'types', categoryIndex };
+  } else {
+    const nextIndex = categoryIndex + 1;
+    p.cursor = nextIndex < GS_CATEGORY_ORDER.length ? { phase: 'offered', categoryIndex: nextIndex } : { phase: 'wrapup' };
+  }
+  gsSave();
+  gsRenderStep();
+}
+
+// ─── "Which types do you build?" — multi-select, one flat template per selected type ────────
+function gsRenderTypes(categoryIndex) {
+  const category = GS_CATEGORY_ORDER[categoryIndex];
+  const opts = GS_TYPE_OPTIONS.map(o => `
+    <label style="display:flex; align-items:center; gap:8px; font-size:13px; margin-bottom:8px;">
+      <input type="checkbox" value="${o.key}" class="gs-type-opt">
+      ${psEscape(o.label)}
+    </label>`).join('');
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:6px;">Which types of ${category.toLowerCase()} do you build?</div>
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:12px;">Pick as many as apply.</div>
+    ${opts}
+    <div class="settings-field" style="margin:8px 0 14px;">
+      <label>Something else? (optional)</label>
+      <input type="text" id="gs-type-custom" placeholder="e.g. Balloon Wall">
+    </div>
+    <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsAnswerTypes()">Continue</button>`;
+}
+function gsAnswerTypes() {
+  const checked = Array.from(document.querySelectorAll('.gs-type-opt:checked')).map(el => el.value);
+  const customEl = document.getElementById('gs-type-custom');
+  const customName = customEl && customEl.value.trim();
+  if (!checked.length && !customName) { alert('Pick at least one, or name something in "Something else."'); return; }
+  const p = gsState.production;
+  const categoryIndex = p.cursor.categoryIndex;
+  const category = GS_CATEGORY_ORDER[categoryIndex];
+  const typeQueue = checked.map(k => GS_TYPE_OPTIONS.find(o => o.key === k));
+  if (customName) typeQueue.push({ key: 'custom-' + Date.now(), label: customName, style: customName, formula: 'freeform' });
+  gsPushHistory();
+  p.active = { category, categoryIndex, typeQueue, typeIndex: 0, entries: [], fields: {}, fieldIndex: 0, fieldExpanded: false, isWrapupCustom: false };
+  p.cursor = { phase: 'sizing' };
+  gsSave();
+  gsRenderStep();
+}
+
+// ─── Per-type interview: fixed length(s) vs. per-job footage, then the optional build-detail fields ───
+function gsRenderSizing() {
+  const a = gsState.production.active;
+  const type = a.typeQueue[a.typeIndex];
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:14px;">For ${psEscape(type.label)} ${psEscape(a.category)}, is this usually a fixed length, or does the footage vary per job?</div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <button class="save-btn" style="width:auto; padding:10px 18px;" onclick="gsAnswerSizing('fixed')">Fixed length</button>
+      <button class="icon-btn" style="width:auto; padding:10px 18px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="gsAnswerSizing('varies')">Varies per job</button>
+    </div>`;
+}
+function gsAnswerSizing(mode) {
+  const p = gsState.production;
+  gsPushHistory();
+  if (mode === 'varies') {
+    const newActive = JSON.parse(JSON.stringify(p.active));
+    newActive.entries.push({ customLinear: true, linearFt: null });
+    p.active = newActive;
+    p.cursor = { phase: 'field' };
+  } else {
+    p.cursor = { phase: 'sizingLength' };
+  }
+  gsSave();
+  gsRenderStep();
+}
+function gsRenderSizingLength() {
+  const a = gsState.production.active;
+  const type = a.typeQueue[a.typeIndex];
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:14px;">What's the standard length, in feet, for ${psEscape(type.label)} ${psEscape(a.category)}?</div>
+    <div class="settings-field" style="margin-bottom:14px;"><input type="number" step="0.5" min="0" id="gs-length-input" placeholder="e.g. 9"></div>
+    <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsAnswerSizingLength()">Continue</button>`;
+}
+function gsAnswerSizingLength() {
+  const el = document.getElementById('gs-length-input');
+  const ft = parseFloat(el && el.value);
+  if (!ft || ft <= 0) { alert('Enter a length in feet, greater than 0.'); return; }
+  const p = gsState.production;
+  gsPushHistory();
+  const newActive = JSON.parse(JSON.stringify(p.active));
+  newActive.entries.push({ customLinear: false, linearFt: ft });
+  p.active = newActive;
+  p.cursor = { phase: 'anotherLength' };
+  gsSave();
+  gsRenderStep();
+}
+function gsRenderAnotherLength() {
+  const a = gsState.production.active;
+  const type = a.typeQueue[a.typeIndex];
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:14px;">Do you also offer a different standard length for ${psEscape(type.label)} ${psEscape(a.category)}?</div>
+    <div style="display:flex; gap:10px;">
+      <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsAnswerAnotherLength(true)">Yes</button>
+      <button class="icon-btn" style="width:auto; padding:10px 22px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="gsAnswerAnotherLength(false)">No</button>
+    </div>`;
+}
+function gsAnswerAnotherLength(value) {
+  const p = gsState.production;
+  gsPushHistory();
+  p.cursor = value ? { phase: 'sizingLength' } : { phase: 'field' };
+  gsSave();
+  gsRenderStep();
+}
+
+// One shared field-question screen, stepping through GS_FIELD_STEPS for whichever type is
+// active — its answers apply to every length variant just collected for that type (so a business
+// with two standard Garland lengths isn't asked the same build-instructions question twice).
+function gsRenderField() {
+  const a = gsState.production.active;
+  const step = GS_FIELD_STEPS[a.fieldIndex];
+  const type = a.typeQueue[a.typeIndex];
+  if (!a.fieldExpanded) {
+    return `
+      <div style="font-size:16px; font-weight:600; margin-bottom:6px;">${psEscape(step.question)}</div>
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:14px;">For ${psEscape(type.label)} ${psEscape(a.category)}.</div>
+      <div style="display:flex; gap:10px;">
+        <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsFieldYes()">Yes</button>
+        <button class="icon-btn" style="width:auto; padding:10px 22px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="gsFieldNo()">No, skip</button>
+      </div>`;
+  }
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:14px;">${psEscape(step.question)}</div>
+    <div class="settings-field" style="margin-bottom:14px;"><textarea id="gs-field-input" rows="${step.type === 'list' ? 4 : 3}" placeholder="${invAttr(step.placeholder)}"></textarea></div>
+    <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsFieldSave()">Save &amp; Continue</button>`;
+}
+function gsFieldYes() {
+  const p = gsState.production;
+  gsPushHistory();
+  const newActive = JSON.parse(JSON.stringify(p.active));
+  newActive.fieldExpanded = true;
+  p.active = newActive;
+  gsSave();
+  gsRenderStep();
+}
+function gsFieldNo() { gsFieldAdvance(undefined); }
+function gsFieldSave() {
+  const step = GS_FIELD_STEPS[gsState.production.active.fieldIndex];
+  const el = document.getElementById('gs-field-input');
+  gsFieldAdvance(el ? el.value : '');
+}
+function gsFieldAdvance(rawValue) {
+  const p = gsState.production;
+  const step = GS_FIELD_STEPS[p.active.fieldIndex];
+  gsPushHistory();
+  const newActive = JSON.parse(JSON.stringify(p.active));
+  if (rawValue !== undefined) {
+    newActive.fields[step.key] = step.type === 'list'
+      ? rawValue.split('\n').map(s => s.trim()).filter(Boolean)
+      : rawValue.trim();
+  }
+  newActive.fieldIndex += 1;
+  newActive.fieldExpanded = false;
+  p.active = newActive;
+  if (newActive.fieldIndex >= GS_FIELD_STEPS.length) {
+    gsFinishTypeInterview();
+  } else {
+    gsSave();
+    gsRenderStep();
+  }
+}
+
+// Commits every entry collected for the current type as its own flat RECIPES entry (exactly how
+// the app's own 22 starter templates model "one broad type, multiple standard lengths"), saves
+// through ptSaveLibrary — the same call Settings' manual editor uses — then advances to the next
+// type, the next category, or the wrap-up.
+function gsFinishTypeInterview() {
+  const p = gsState.production;
+  const a = p.active;
+  const type = a.typeQueue[a.typeIndex];
+  const recipeIds = [];
+  a.entries.forEach((entryMeta, idx) => {
+    const suffix = a.entries.length > 1 ? (entryMeta.customLinear ? ' (custom length)' : ` - ${entryMeta.linearFt} ft`) : '';
+    // A custom-named type (typed into "Something else" or the wrap-up) is already a full product
+    // name someone chose on purpose — use it verbatim instead of appending the category, which
+    // reads oddly when the name already includes it (e.g. typing "Balloon Wall" or "Number Stack").
+    const baseName = String(type.key).startsWith('custom-') ? type.label : `${type.label.split(' / ')[0]} ${a.category}`;
+    const display = `${baseName}${suffix}`;
+    const id = 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '-' + idx;
+    // Firestore's setDoc throws synchronously on an explicit `undefined` field value (unlike
+    // JSON.stringify, which just drops it) — omit linearFt/rates entirely rather than setting
+    // them to undefined, exactly like the hardcoded starter templates and ptAddTemplate do.
+    const recipe = psNormalizeTemplateFields(Object.assign(
+      { id, display, category: a.category, style: type.style, label: display + ' (custom)',
+        formula: type.formula, customLinear: !!entryMeta.customLinear,
+        buildInstructions: a.fields.buildInstructions || '',
+        equipmentList: a.fields.equipmentList || [],
+        packList: a.fields.packList || [],
+        installNotes: a.fields.installNotes || '',
+        staffingRecommendation: a.fields.staffingRecommendation || '',
+        createdVia: 'guidedSetup' },
+      entryMeta.customLinear ? {} : { linearFt: entryMeta.linearFt },
+      type.formula === 'freeform' ? { rates: FORMULAS.freeformRates[a.category] } : {}
+    ));
+    RECIPES = RECIPES.concat([recipe]);
+    recipeIds.push(id);
+  });
+  ptSaveLibrary();
+
+  const catState = p.categories[a.category] || (p.categories[a.category] = { offered: true, types: [] });
+  catState.offered = true;
+  catState.types.push({ key: type.key, label: type.label, style: type.style, formula: type.formula, entries: recipeIds });
+
+  a.typeIndex += 1;
+  if (a.typeIndex < a.typeQueue.length) {
+    a.entries = []; a.fields = {}; a.fieldIndex = 0; a.fieldExpanded = false;
+    p.cursor = { phase: 'sizing' };
+  } else if (a.isWrapupCustom) {
+    p.active = null;
+    p.cursor = { phase: 'wrapup' };
+  } else {
+    const nextIndex = a.categoryIndex + 1;
+    p.active = null;
+    p.cursor = nextIndex < GS_CATEGORY_ORDER.length ? { phase: 'offered', categoryIndex: nextIndex } : { phase: 'wrapup' };
+  }
+  gsSave();
+  gsRenderStep();
+}
+
+// ─── Wrap-up: anything the three main categories didn't cover, then done ────────────────────
+function gsRenderWrapup() {
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:14px;">Anything else you build that we haven't covered?</div>
+    <div style="display:flex; gap:10px;">
+      <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsAnswerWrapup(true)">Yes, add one</button>
+      <button class="icon-btn" style="width:auto; padding:10px 22px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="gsAnswerWrapup(false)">No, that's everything</button>
+    </div>`;
+}
+function gsAnswerWrapup(value) {
+  const p = gsState.production;
+  gsPushHistory();
+  if (value) {
+    p.cursor = { phase: 'wrapupName' };
+  } else {
+    p.status = 'ready_for_now';
+    p.cursor = { phase: 'done' };
+  }
+  gsSave();
+  gsRenderStep();
+}
+function gsRenderWrapupName() {
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:14px;">What do you call it?</div>
+    <div class="settings-field" style="margin-bottom:14px;"><input type="text" id="gs-wrapup-name" placeholder="e.g. Balloon Wall"></div>
+    <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="gsAnswerWrapupName()">Continue</button>`;
+}
+function gsAnswerWrapupName() {
+  const el = document.getElementById('gs-wrapup-name');
+  const name = el && el.value.trim();
+  if (!name) { alert('Give it a name to continue.'); return; }
+  const p = gsState.production;
+  gsPushHistory();
+  p.cursor = { phase: 'wrapupCategory', pendingName: name };
+  gsSave();
+  gsRenderStep();
+}
+function gsRenderWrapupCategory() {
+  const name = gsState.production.cursor.pendingName;
+  const opts = GS_CATEGORY_ORDER.map(c => `<button class="icon-btn" style="width:auto; padding:10px 18px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="gsAnswerWrapupCategory('${c}')">${c}</button>`).join('');
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:14px;">Which is "${psEscape(name)}" closest to?</div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">${opts}</div>`;
+}
+function gsAnswerWrapupCategory(category) {
+  const p = gsState.production;
+  const name = p.cursor.pendingName;
+  const categoryIndex = GS_CATEGORY_ORDER.indexOf(category);
+  gsPushHistory();
+  p.active = {
+    category, categoryIndex,
+    typeQueue: [{ key: 'custom-' + Date.now(), label: name, style: name, formula: 'freeform' }],
+    typeIndex: 0, entries: [], fields: {}, fieldIndex: 0, fieldExpanded: false, isWrapupCustom: true,
+  };
+  p.cursor = { phase: 'sizing' };
+  gsSave();
+  gsRenderStep();
+}
+function gsRenderDone() {
+  return `
+    <div style="font-size:16px; font-weight:600; margin-bottom:8px;">You're all set for now.</div>
+    <div style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">Your production templates are ready to use. You can come back anytime to add more, or fine-tune anything in Settings.</div>
+    <button class="save-btn" style="width:auto; padding:10px 22px;" onclick="showView('businessSetup')">Back to Business Setup</button>`;
 }
 
 function frApplyFormulasOverride(saved) {
@@ -8582,6 +9054,10 @@ function goBack() {
   // Latex is a level below the Inventory category picker, not directly off home.
   const inLatexInventory = document.getElementById('view-inventory-latex').classList.contains('active');
   if (inLatexInventory) { showView('inventory'); return; }
+  // Guided Setup only ever launches from Business Setup — the topbar back arrow always returns
+  // there (in-flow "Back" between questions is a separate control, handled by gsBack()).
+  const inGuidedSetup = document.getElementById('view-guidedSetup').classList.contains('active');
+  if (inGuidedSetup) { showView('businessSetup'); return; }
   // Letter Styling Calculator has no "remembered origin" of its own — this is the one path
   // Business Setup sends someone to that isn't a Settings group (see bsGoTo), so it needs its
   // own one-off return path back to Business Setup instead of falling through to Home.
@@ -8676,6 +9152,7 @@ function bootApp() {
   try { calc(); } catch (e) { console.error('calc failed:', e); }
   try { qcInit(); } catch (e) { console.error('qcInit failed:', e); }
   try { ptInit(); } catch (e) { console.error('ptInit failed:', e); }
+  try { gsInit(); } catch (e) { console.error('gsInit failed:', e); }
   try { tmInit(); } catch (e) { console.error('tmInit failed:', e); }
   try { acInit(); } catch (e) { console.error('acInit failed:', e); }
   try { frInit(); } catch (e) { console.error('frInit failed:', e); }
