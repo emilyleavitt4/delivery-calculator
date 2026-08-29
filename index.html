@@ -1641,6 +1641,7 @@ function loadSettings() {
       deliveryDefaultsSaved = true;
       applySettingsToForm();
       calc(); // in case Delivery Calculator was already showing stale defaults
+      bsUpdateHomeBanner(); // this is one of the 5 required Business Setup items
     }
   }).catch(err => console.error('Delivery defaults load failed:', err));
 }
@@ -4604,6 +4605,7 @@ function ptInit() {
       });
       RECIPES = saved; // this business's saved library entirely replaces the starter defaults
       ptRenderShell();
+      bsUpdateHomeBanner(); // Production Templates is one of the 5 required Business Setup items
     }
   }).catch(err => console.error('Production templates load failed:', err));
 }
@@ -5043,6 +5045,7 @@ function tmInit() {
       TEAM_MEMBERS = snap.data().members.map(m => (m.emails ? m : { name: m.name, emails: m.email ? [m.email] : [] }));
       tmRenderShell();
       ttRenderTeamOptions(); // Time Tracker's name suggestions, if that screen is already up
+      bsUpdateHomeBanner(); // Team Members is one of the 5 required Business Setup items
     }
   }).catch(err => console.error('Team members load failed:', err));
 }
@@ -5308,6 +5311,7 @@ function invStartListeners() {
       // the Library loads after inventory already has.
       if (clLoaded) clMigrateFromInventory();
       invRenderLatex();
+      bsUpdateHomeBanner(); // Color Library's Business Setup status is derived from INVENTORY_ITEMS
     },
     (err) => console.error('Inventory items sync error:', err)
   );
@@ -7205,6 +7209,7 @@ function jccInit() {
       }
       jccRenderCatalog();
       jccRenderCatalogSettingsSection();
+      bsUpdateHomeBanner(); // Material Catalog is one of the 5 required Business Setup items
     }
   }).catch(err => console.error('Job cost catalog load failed:', err));
 
