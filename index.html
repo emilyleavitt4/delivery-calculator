@@ -1875,7 +1875,7 @@ const TOOL_META = {
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: true  },
   timetracker:{ title: 'Time Tracker',                  icon: 'fa-solid fa-clock',               showBack: true,  showGear: true  },
   importReview:{ title: 'Review Import',                icon: 'fa-solid fa-clipboard-check',     showBack: true,  showGear: false },
-  businessSetup:{ title: 'Business Setup',              icon: 'fa-solid fa-list-check',          showBack: false, showGear: true  },
+  businessSetup:{ title: 'Business Setup',              icon: 'fa-solid fa-list-check',          showBack: true,  showGear: false },
   settings:   { title: 'Settings',                     icon: 'fa-solid fa-gear',               showBack: false, showGear: false }
 };
 
@@ -2365,7 +2365,6 @@ function psNormalizeTemplateFields(t) {
   if (!Array.isArray(t.packList)) t.packList = [];
   if (typeof t.installNotes !== 'string') t.installNotes = '';
   if (typeof t.pullListNotes !== 'string') t.pullListNotes = '';
-  if (typeof t.laborEstimateMinutes !== 'number') t.laborEstimateMinutes = 0;
   if (typeof t.staffingRecommendation !== 'string') t.staffingRecommendation = '';
   return t;
 }
@@ -3974,9 +3973,7 @@ function psProductionBodyHtml(job) {
         if (r.equipmentList && r.equipmentList.length) html += `<div class="ps-build-fields"><b>Equipment:</b> ${r.equipmentList.map(psEscape).join(', ')}</div>`;
         if (r.packList && r.packList.length) html += `<div class="ps-build-fields"><b>Pack list:</b> ${r.packList.map(psEscape).join(', ')}</div>`;
         if (r.installNotes) html += `<div class="ps-build-fields"><b>Install notes:</b> ${psEscape(r.installNotes)}</div>`;
-        if (r.laborEstimateMinutes || r.staffingRecommendation) {
-          html += `<div class="ps-build-fields">${r.laborEstimateMinutes ? `<b>Labor estimate:</b> ${r.laborEstimateMinutes} min` : ''}${r.laborEstimateMinutes && r.staffingRecommendation ? ' — ' : ''}${r.staffingRecommendation ? `<b>Staffing:</b> ${psEscape(r.staffingRecommendation)}` : ''}</div>`;
-        }
+        if (r.staffingRecommendation) html += `<div class="ps-build-fields"><b>Staffing:</b> ${psEscape(r.staffingRecommendation)}</div>`;
       }
 
       html += `<div class="settings-field no-print" style="margin-top:0.5rem;">
@@ -4581,7 +4578,7 @@ function frInit() {
 // is editable here, persisted as a whole so it survives a reload and never reverts to the
 // hardcoded defaults once customized. A mapping (Import Mapping Rules) only ever points at a
 // template's id; a template itself owns build instructions, equipment, pack list, install
-// notes, labor estimate, and staffing recommendation — none of that lives in the mapping.
+// notes, and staffing recommendation — none of that lives in the mapping.
 // Formula/rate numbers stay owned by "Balloon math" above (never duplicated here) — a template
 // only references a category's shared rate group, exactly as it always has.
 
@@ -4627,7 +4624,7 @@ function ptRenderShell() {
     </div>
     ${ptCollapsed ? '' : `
     <div class="card" style="margin-bottom:0.75rem;">
-      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Every field here is yours to change — names, categories, build steps, equipment, pack list, install notes, labor estimate, staffing. Balloon-count math still comes from Balloon math above, referenced by category, never duplicated.</div>
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Every field here is yours to change — names, categories, build steps, equipment, pack list, install notes, staffing. Balloon-count math still comes from Balloon math above, referenced by category, never duplicated.</div>
       <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
         <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Templates unlocked' : 'Templates locked'}</div>
         ${invAdminUnlocked
@@ -4636,6 +4633,9 @@ function ptRenderShell() {
       </div>
       <div id="pt-list"></div>
       ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="ptAddTemplate()"><i class="fa-solid fa-plus"></i> Add template</button>` : ''}
+      <div style="margin-top:1rem; padding-top:0.75rem; border-top:0.5px solid var(--border);">
+        <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--bg); color:var(--text-secondary); border:0.5px solid var(--border-strong);" onclick="ptClearAllTemplates()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all templates</button>
+      </div>
     </div>`}
   `;
   ptRenderList();
@@ -4697,10 +4697,7 @@ function ptTemplateHtml(t) {
       <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pack list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','packList', this.value)">${psEscape(t.packList.join('\n'))}</textarea></div>
       <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pull list notes <span style="font-weight:400;">(optional, alongside the calculated balloon counts)</span></label><input type="text" value="${invAttr(t.pullListNotes)}" onchange="ptUpdateField('${t.id}','pullListNotes', this.value)"></div>
       <div class="settings-field" style="margin-bottom:0.6rem;"><label>Install notes</label><textarea rows="2" onchange="ptUpdateField('${t.id}','installNotes', this.value)">${psEscape(t.installNotes)}</textarea></div>
-      <div class="row">
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Default labor estimate (min)</label><input type="number" min="0" value="${t.laborEstimateMinutes || ''}" onchange="ptUpdateField('${t.id}','laborEstimateMinutes', this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Staffing recommendation</label><input type="text" value="${invAttr(t.staffingRecommendation)}" placeholder="e.g. 2 people, 30 min" onchange="ptUpdateField('${t.id}','staffingRecommendation', this.value)"></div>
-      </div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Staffing recommendation</label><input type="text" value="${invAttr(t.staffingRecommendation)}" placeholder="e.g. 2 people, 30 min" onchange="ptUpdateField('${t.id}','staffingRecommendation', this.value)"></div>
       <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="ptRemoveTemplate('${t.id}')"><i class="fa-solid fa-trash"></i> Delete template</button>`;
     } else {
       html += `<div style="font-size:12px; color:var(--text-secondary);">
@@ -4708,9 +4705,8 @@ function ptTemplateHtml(t) {
         ${t.equipmentList.length ? `<div style="margin-bottom:6px;"><b>Equipment:</b> ${t.equipmentList.map(psEscape).join(', ')}</div>` : ''}
         ${t.packList.length ? `<div style="margin-bottom:6px;"><b>Pack list:</b> ${t.packList.map(psEscape).join(', ')}</div>` : ''}
         ${t.installNotes ? `<div style="margin-bottom:6px;"><b>Install notes:</b> ${psEscape(t.installNotes)}</div>` : ''}
-        ${t.laborEstimateMinutes ? `<div style="margin-bottom:6px;"><b>Labor estimate:</b> ${t.laborEstimateMinutes} min</div>` : ''}
         ${t.staffingRecommendation ? `<div style="margin-bottom:6px;"><b>Staffing:</b> ${psEscape(t.staffingRecommendation)}</div>` : ''}
-        ${!t.buildInstructions && !t.equipmentList.length && !t.packList.length && !t.installNotes && !t.laborEstimateMinutes && !t.staffingRecommendation ? 'No build details added yet.' : ''}
+        ${!t.buildInstructions && !t.equipmentList.length && !t.packList.length && !t.installNotes && !t.staffingRecommendation ? 'No build details added yet.' : ''}
       </div>`;
     }
     html += `</div>`;
@@ -4723,7 +4719,7 @@ function ptTemplateHtml(t) {
 function ptUpdateField(id, field, value) {
   const t = RECIPES.find(r => r.id === id);
   if (!t) return;
-  if (field === 'linearFt' || field === 'laborEstimateMinutes') t[field] = parseFloat(value) || 0;
+  if (field === 'linearFt') t[field] = parseFloat(value) || 0;
   else if (field === 'customLinear') t[field] = value;
   else t[field] = value;
   ptRenderList();
@@ -4751,6 +4747,26 @@ function ptRemoveTemplate(id) {
   RECIPES = RECIPES.filter(r => r.id !== id);
   ptRenderList();
   ptSaveLibrary();
+}
+// Wipes the whole library, including the 22 built-in starter templates — meant for a business
+// that wants to build its own list from scratch instead of starting from (and pruning) the
+// starter set. Jobs that already used a deleted template are unaffected, same as removing one
+// at a time — psSnapshotTemplate froze a full copy onto each of those jobs at import/add time.
+function ptClearAllTemplates() {
+  if (!invAdminUnlocked) {
+    const entered = prompt('Enter the admin passcode to clear production templates:');
+    if (entered === null) return;
+    if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode — nothing cleared.'); return; }
+  }
+  if (RECIPES.length === 0) { alert('No templates to clear.'); return; }
+  const typed = prompt(`This permanently deletes all ${RECIPES.length} production template(s), including the built-in starter set. This can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not cleared — you must type DELETE exactly.'); return; }
+
+  RECIPES = [];
+  ptSaveLibrary();
+  ptRenderShell();
+  alert('Production Templates cleared.');
 }
 
 function frApplyFormulasOverride(saved) {
@@ -8422,6 +8438,12 @@ function showView(v) {
   // Re-renders every time Business Setup becomes active (including via the back button, not
   // just a fresh click into it) so status cards always reflect whatever changed in Settings.
   if (v === 'businessSetup') bsRenderShell();
+  // The home banner otherwise only refreshes on specific trigger events (boot, visiting
+  // Business Setup, certain admin-gated saves) — none of which fire just from navigating back
+  // to Home, so it could show a stale "X of 5" left over from before something was completed
+  // elsewhere. Recomputing on every Home visit keeps it honest without needing every single
+  // place progress could change to remember to call this.
+  if (v === 'home') bsUpdateHomeBanner();
   setTopBar(v);
 }
 
