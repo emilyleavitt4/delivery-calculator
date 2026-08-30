@@ -1043,7 +1043,7 @@
       <h1 id="topbar-title">Balloon Business Toolkit</h1>
       <span class="app-mode-badge">Admin</span>
     </div>
-    <button class="icon-btn" id="topbar-gear" onclick="settingsShowHome(); showView('settings')" aria-label="Settings" style="display:none">
+    <button class="icon-btn" id="topbar-gear" onclick="gateAdminNav(() => { settingsShowHome(); showView('settings'); })" aria-label="Settings" style="display:none">
       <i class="fa-solid fa-gear"></i>
     </button>
   </div>
@@ -1051,7 +1051,7 @@
   <!-- ═══════════════════════════════════════ HOME VIEW -->
   <div class="view active" id="view-home">
     <!-- Shown only while required setup is incomplete — see bsUpdateHomeBanner(). -->
-    <div class="card" id="bs-home-banner" style="display:none; margin-bottom:1rem; cursor:pointer;" onclick="showView('businessSetup')">
+    <div class="card" id="bs-home-banner" style="display:none; margin-bottom:1rem; cursor:pointer;" onclick="gateAdminNav(() => showView('businessSetup'))">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
         <div>
           <div style="font-size:14px; font-weight:700;"><i class="fa-solid fa-list-check" style="color:var(--accent); margin-right:6px;"></i>Finish setting up your business</div>
@@ -1069,6 +1069,11 @@
     <div class="tool-grid" id="home-tool-grid"></div>
 
     <div class="home-footer-note">More tools coming soon</div>
+    <!-- Settings (where sign-out used to live) is now admin-gated — this stays reachable by
+         everyone so switching accounts on a shared device never requires the admin passcode. -->
+    <div style="text-align:center; margin-top:0.5rem;">
+      <button class="icon-btn" style="width:auto; padding:6px 10px; font-size:12px; color:var(--text-secondary);" onclick="handleSignOutClick()">Sign out</button>
+    </div>
   </div><!-- end view-home -->
 
   <!-- ═══════════════════════════════════════ CALCULATOR VIEW -->
@@ -5913,6 +5918,20 @@ function saveAdminPasscode() {
   const msg = document.getElementById('admin-passcode-saved-msg');
   msg.textContent = 'Saved.';
   setTimeout(() => { msg.textContent = ''; }, 2000);
+}
+// Settings and Business Setup are pure business-configuration surfaces — nothing a routine team
+// member needs day-to-day (Inventory's counting screen has its own separate per-field admin
+// gates, still reachable without this). Reuses the exact same shared passcode/flag as everywhere
+// else, so entering it here also unlocks every other admin-gated section for the rest of the
+// session, same as unlocking from inside Inventory does.
+function gateAdminNav(afterUnlock) {
+  if (invAdminUnlocked) { afterUnlock(); return; }
+  const entered = prompt('Enter the admin passcode:');
+  if (entered === null) return;
+  if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode.'); return; }
+  invAdminUnlocked = true;
+  settingsRefreshAdminSections();
+  afterUnlock();
 }
 function invUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit price / balloons per bag / par:');
