@@ -706,6 +706,10 @@
   .inv-color-row-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .inv-color-row-brand { font-size: 11px; color: var(--text-secondary); }
   .inv-color-row-chevron { color: var(--text-tertiary); font-size: 12px; }
+  .inv-color-row.editing { touch-action: none; }
+  .inv-color-row.editing .inv-color-row-header { cursor: grab; }
+  .inv-color-row.dragging { cursor: grabbing; background: var(--surface); box-shadow: 0 8px 20px rgba(0,0,0,0.18); position: relative; z-index: 10; }
+  .inv-color-row.drop-target .inv-color-row-header { background: var(--accent-light); border-radius: var(--radius-sm); }
 
   /* Type-ahead suggestions for matching a typed color name to a Color Library color. Always
      overlays below its input instead of pushing the rest of the form down — every call site
@@ -911,6 +915,12 @@
   // "cleared by accident" is always something Recently Deleted can undo, not permanent data loss.
   window.fbLoadColorLibraryTrash = () => window.fbLoadSettingsDoc('colorLibraryTrash');
   window.fbSaveColorLibraryTrash = (data) => window.fbSaveSettingsDoc('colorLibraryTrash', data);
+
+  // A shared, physical-shelf order for Inventory's "My Order" view (e.g. rainbow order on the
+  // actual shelf) — business-wide, not per-device like Home's tile order, since everyone counting
+  // stock should see colors in the same order they'd walk past them.
+  window.fbLoadInventoryColorOrder = () => window.fbLoadSettingsDoc('inventoryColorOrder');
+  window.fbSaveInventoryColorOrder = (data) => window.fbSaveSettingsDoc('inventoryColorOrder', data);
 
   // Delivery Calculator's pricing defaults (mpg, gas, rate, profit, multipliers) — previously
   // localStorage-only (per-device); now a shared doc like every other business default.
@@ -5661,8 +5671,36 @@ let invFlagComposerKey = null; // `${itemId}|${size}` of the flag-note composer 
 let invMode = 'view';
 let invSearchQuery = '';
 let invTierTab = 'main'; // 'main' or 'misc' — which colors show at all; a hard filter, applied before search/sort
-let invGroupBy = 'tier'; // 'tier' (alphabetical, within the current invTierTab), 'brand', or 'size'
+// 'custom' (default — matches walking the physical shelf), 'tier' (alphabetical), 'brand', or 'size'.
+let invGroupBy = 'custom';
 let invSizeSortSize = '11"'; // which size to rank by when invGroupBy === 'size'
+// Shared, business-wide shelf order (item ids) for 'custom' — loaded once via invCustomOrderInit,
+// reconciled against whatever's actually in INVENTORY_ITEMS at render time in invCustomOrdered()
+// (a color deleted elsewhere just drops out; a brand-new one lands at the end until dragged).
+let invCustomOrder = [];
+let invRearrangeMode = false;
+function invCustomOrderInit() {
+  window.fbLoadInventoryColorOrder().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().order)) invCustomOrder = snap.data().order;
+    invRenderLatex();
+  }).catch(err => console.error('Inventory shelf order load failed:', err));
+}
+function invSaveCustomOrder() {
+  window.fbSaveInventoryColorOrder({ order: invCustomOrder }).catch(err => console.error('Inventory shelf order save failed:', err));
+}
+// The reconciled order: saved order first (dropping anything no longer in items), then anything
+// not yet placed (a color someone just added) appended alphabetically at the end.
+function invCustomOrdered(items) {
+  const byId = new Map(items.map(i => [i.id, i]));
+  const ordered = invCustomOrder.map(id => byId.get(id)).filter(Boolean);
+  const placed = new Set(ordered.map(i => i.id));
+  const rest = items.filter(i => !placed.has(i.id)).sort((a, b) => a.color.localeCompare(b.color));
+  return ordered.concat(rest);
+}
+function invToggleRearrangeMode() {
+  invRearrangeMode = !invRearrangeMode;
+  invRenderLatex();
+}
 
 // Gates the "admin" fields (price, balloons per bag, par) that shouldn't change during routine
 // backstock updates — a shared team passcode, not a real security boundary (Firestore rules +
@@ -5999,6 +6037,7 @@ function invStartListeners() {
   // all) so the view always shows something instead of staying blank while waiting.
   invRenderLatex();
   invModeInit();
+  invCustomOrderInit();
   window.fbOnSnapshotInventoryItems(
     (snapshot) => {
       const all = snapshot.docs.map(d => d.data());
@@ -6883,6 +6922,9 @@ function invGroupedItems(items, upcomingMap) {
     }).sort((a, b) => b.totalBags - a.totalBags || a.item.color.localeCompare(b.item.color));
     return [{ key: 'size:' + size, label: size + ' — most urgent first', items: ranked.map(r => r.item) }];
   }
+  if (invGroupBy === 'custom') {
+    return [{ key: 'custom:' + invTierTab, label: invTierTab === 'main' ? 'Main' : 'Miscellaneous', items: invCustomOrdered(items) }];
+  }
   return [{ key: 'tier:' + invTierTab, label: invTierTab === 'main' ? 'Main' : 'Miscellaneous', items }];
 }
 function invSetTierTab(tab) {
@@ -7221,14 +7263,19 @@ function invRenderLatex() {
         <input type="text" id="inv-search" placeholder="Search colors or brands..." value="${psEscape(invSearchQuery)}" oninput="invSetSearch(this.value)">
       </div>
       <div class="trip-toggle" style="margin:0;">
-        <button class="trip-btn ${invGroupBy === 'tier' ? 'active' : ''}" onclick="invSetGroupBy('tier')">Sort by Color</button>
-        <button class="trip-btn ${invGroupBy === 'brand' ? 'active' : ''}" onclick="invSetGroupBy('brand')">Sort by Brand</button>
-        <button class="trip-btn ${invGroupBy === 'size' ? 'active' : ''}" onclick="invSetGroupBy('size')">Sort by Size</button>
+        <button class="trip-btn ${invGroupBy === 'custom' ? 'active' : ''}" onclick="invSetGroupBy('custom')">My Order</button>
+        <button class="trip-btn ${invGroupBy === 'tier' ? 'active' : ''}" onclick="invSetGroupBy('tier')">Color</button>
+        <button class="trip-btn ${invGroupBy === 'brand' ? 'active' : ''}" onclick="invSetGroupBy('brand')">Brand</button>
+        <button class="trip-btn ${invGroupBy === 'size' ? 'active' : ''}" onclick="invSetGroupBy('size')">Size</button>
       </div>
       ${invGroupBy === 'size' ? `<div class="settings-field" style="margin:0.6rem 0 0;">
         <select onchange="invSetSizeSort(this.value)">
           ${INV_SIZES.map(s => `<option value="${s}" ${s === invSizeSortSize ? 'selected' : ''}>${s}</option>`).join('')}
         </select>
+      </div>` : ''}
+      ${invGroupBy === 'custom' && invAdminUnlocked ? `<div style="margin-top:0.6rem;">
+        <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invToggleRearrangeMode()"><i class="fa-solid fa-${invRearrangeMode ? 'check' : 'arrow-up-down'}"></i> ${invRearrangeMode ? 'Done arranging' : 'Rearrange shelf order'}</button>
+        ${invRearrangeMode ? `<div style="font-size:11px; color:var(--text-secondary); margin-top:6px;">Drag a color by its grip icon to match your shelf — this order is shared with the whole team.</div>` : ''}
       </div>` : ''}
       <div style="display:flex; align-items:center; justify-content:space-between; margin-top:0.75rem; padding-top:0.6rem; border-top:0.5px solid var(--border);">
         <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Admin unlocked' : 'Admin locked'}</div>
@@ -7548,7 +7595,7 @@ function invRenderColorsList() {
     const groups = invGroupedItems(items, upcomingMap);
     groups.forEach(g => {
       if (g.items.length === 0) return; // hide empty groups (e.g. no Misc colors, or a search with no brand matches)
-      const collapsed = invCollapsedGroups.has(g.key);
+      const collapsed = invCollapsedGroups.has(g.key) && !invRearrangeMode; // can't drag into a collapsed group
       html += `<div class="inv-group-header" onclick="invToggleGroup('${g.key}')">
         <span>${psEscape(g.label)} (${g.items.length})</span>
         <span style="display:flex; align-items:center; gap:10px;">
@@ -7574,6 +7621,72 @@ function invRenderColorsList() {
   }
 
   container.innerHTML = html;
+  if (invRearrangeMode) {
+    container.querySelectorAll('.inv-color-row.editing .inv-color-row-header').forEach(header => {
+      header.addEventListener('pointerdown', invRowDragStart);
+    });
+  }
+}
+
+// Drag-and-drop for "My Order" — same Pointer Events approach as Home's tile reorder (unifies
+// mouse + touch, and the dragged row is only ever visually offset with a CSS transform while the
+// gesture is in progress; invCustomOrder and the actual re-render only happen once at drop, via
+// invRowDragEnd rebuilding the full reconciled order rather than patching invCustomOrder in
+// place — see the comment there). Unlike Home's flat, unfiltered tile list, this can be
+// reordering a SUBSET (search/tier-filtered) of the full shelf, but moving the dragged id to sit
+// adjacent to the target id's true position in the full order works correctly regardless of what
+// else is hidden between them.
+let invRowDragState = null;
+function invRowDragStart(e) {
+  e.preventDefault();
+  const header = e.currentTarget;
+  const row = header.closest('.inv-color-row');
+  header.setPointerCapture(e.pointerId);
+  invRowDragState = { id: row.dataset.itemId, row, startX: e.clientX, startY: e.clientY, targetId: null };
+  row.classList.add('dragging');
+  header.addEventListener('pointermove', invRowDragMove);
+  header.addEventListener('pointerup', invRowDragEnd);
+  header.addEventListener('pointercancel', invRowDragEnd);
+}
+function invRowDragMove(e) {
+  if (!invRowDragState) return;
+  const dy = e.clientY - invRowDragState.startY;
+  invRowDragState.row.style.transform = `translateY(${dy}px)`;
+  const rows = [...document.querySelectorAll('.inv-color-row.editing')];
+  rows.forEach(r => r.classList.remove('drop-target'));
+  const target = rows.find(r => {
+    if (r === invRowDragState.row) return false;
+    const rect = r.getBoundingClientRect();
+    return e.clientY >= rect.top && e.clientY <= rect.bottom;
+  });
+  invRowDragState.targetId = target ? target.dataset.itemId : null;
+  if (target) target.classList.add('drop-target');
+}
+function invRowDragEnd(e) {
+  if (!invRowDragState) return;
+  const { id, row, targetId } = invRowDragState;
+  row.style.transform = '';
+  row.classList.remove('dragging');
+  document.querySelectorAll('.inv-color-row.drop-target').forEach(r => r.classList.remove('drop-target'));
+  const header = e.currentTarget;
+  header.removeEventListener('pointermove', invRowDragMove);
+  header.removeEventListener('pointerup', invRowDragEnd);
+  header.removeEventListener('pointercancel', invRowDragEnd);
+  invRowDragState = null;
+  if (targetId && targetId !== id) {
+    // Rebuild from the reconciled order (invCustomOrdered) rather than patching invCustomOrder
+    // directly — that guarantees both ids are present (a color added since the last reorder has
+    // no spot in invCustomOrder yet, only in the reconciled view), so this always resolves to a
+    // real position instead of needing -1/"not found" special-casing.
+    const full = invCustomOrdered(INVENTORY_ITEMS).map(i => i.id);
+    const fromIdx = full.indexOf(id);
+    const toIdx = full.indexOf(targetId);
+    full.splice(fromIdx, 1);
+    full.splice(toIdx, 0, id);
+    invCustomOrder = full;
+    invSaveCustomOrder();
+  }
+  invRenderColorsList();
 }
 
 // Editable aliases for one Color Library entry (e.g. "Sage" → Eucalyptus) — shown inside an
@@ -7650,7 +7763,7 @@ function invLibraryOnlyHtml() {
 // Renders one color's card — collapsed header (name, brand, size/quantity glance) and, when
 // expanded, the Main/Misc toggle plus each size's editable fields and order action.
 function invColorCardHtml(item, upcomingMap) {
-  const expanded = invExpandedItem === item.id;
+  const expanded = invExpandedItem === item.id && !invRearrangeMode; // can't stay open mid-drag
   const tier = item.tier || 'main';
   const isActive = item.active !== false;
 
@@ -7671,14 +7784,14 @@ function invColorCardHtml(item, upcomingMap) {
     }).join('')}
   </div>`;
 
-  let html = `<div class="inv-color-row"${isActive ? '' : ' style="opacity:0.55;"'}>`;
-  html += `<div class="inv-color-row-header" onclick="invToggleExpand('${item.id}')">
+  let html = `<div class="inv-color-row${invRearrangeMode ? ' editing' : ''}"${isActive ? '' : ' style="opacity:0.55;"'} data-item-id="${item.id}">`;
+  html += `<div class="inv-color-row-header"${invRearrangeMode ? '' : ` onclick="invToggleExpand('${item.id}')"`}>
     <div class="inv-color-row-text">
       <div class="inv-color-row-name">${psEscape(item.color)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px; margin-left:2px;">INACTIVE</span>'}</div>
       <div class="inv-color-row-brand">${psEscape(item.brand || 'No brand')}</div>
     </div>
-    ${sizeSummary}
-    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+    ${invRearrangeMode ? '' : sizeSummary}
+    <i class="fa-solid ${invRearrangeMode ? 'fa-grip-lines' : 'fa-chevron-' + (expanded ? 'up' : 'down')} inv-color-row-chevron"${invRearrangeMode ? ' style="cursor:grab; font-size:16px;"' : ''}></i>
   </div>`;
 
   if (expanded) {
