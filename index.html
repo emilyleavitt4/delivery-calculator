@@ -23,6 +23,8 @@
     --accent-border: #52b788;
     --warning-bg: #fff8e6;
     --warning-text: #92600a;
+    --info-bg: #e8f1fb;
+    --info-text: #2f6ca3;
     --radius: 12px;
     --radius-sm: 8px;
     --font: -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
@@ -42,6 +44,8 @@
       --accent-border: #2d6a4f;
       --warning-bg: #2a1f00;
       --warning-text: #f0a500;
+      --info-bg: #10202e;
+      --info-text: #6fa8d8;
     }
   }
 
@@ -5626,6 +5630,9 @@ function frDeleteRecipe(id) {
 // that's what keeps "pressed order" from getting lost before it "arrives and we've got it."
 
 const INV_SIZES = ['5"/7"', '11"', '17"/18"', '24"', '30"/36"'];
+// Short labels for the at-a-glance per-size strip on a color's collapsed row — the full labels
+// (e.g. '17"/18"') are correct but too wide to show five of them side by side on a phone.
+const INV_SIZE_SHORT = { '5"/7"': '5"', '11"': '11"', '17"/18"': '18"', '24"': '24"', '30"/36"': '36"' };
 // Maps a Production balloon size to the inventory size group it belongs to.
 const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '18"': '17"/18"', '24"': '24"', '36"': '30"/36"' };
 const INV_OPEN_STATUSES = ['Full', 'Partial', 'Empty'];
@@ -7624,12 +7631,30 @@ function invColorCardHtml(item, upcomingMap) {
     itemUrgentBags += need.urgentBags;
   });
 
+  // At-a-glance backstock per size, sitting inline next to the color/brand instead of stacked
+  // below it — keeps the collapsed row a single compact line instead of growing every card
+  // taller. Color follows the actual bag count, not the separate Open Bin status field (the two
+  // can disagree — someone may have counted bags without updating Open Bin yet) — pale blue at
+  // 0, soft green once there's anything in stock.
+  const sizeSummary = `<div style="display:grid; grid-template-columns:repeat(${INV_SIZES.length}, minmax(24px, 1fr)); gap:3px; flex-shrink:0;">
+    ${INV_SIZES.map(size => `<div style="text-align:center; font-size:9px; font-weight:600; color:var(--text-tertiary);">${INV_SIZE_SHORT[size]}</div>`).join('')}
+    ${INV_SIZES.map(size => {
+      const sd = item.sizes[size];
+      // Green draws the eye on purpose — it means "needs ordering" here, not "good to go."
+      const needsOrder = (sd.backstock || 0) === 0;
+      const bg = needsOrder ? 'var(--accent-light)' : 'var(--info-bg)';
+      const color = needsOrder ? 'var(--accent)' : 'var(--info-text)';
+      return `<div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:1px 2px; background:${bg}; color:${color};">${sd.backstock || 0}</div>`;
+    }).join('')}
+  </div>`;
+
   let html = `<div class="inv-color-row"${isActive ? '' : ' style="opacity:0.55;"'}>`;
   html += `<div class="inv-color-row-header" onclick="invToggleExpand('${item.id}')">
     <div class="inv-color-row-text">
       <div class="inv-color-row-name">${psEscape(item.color)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px; margin-left:2px;">INACTIVE</span>'}</div>
       <div class="inv-color-row-brand">${psEscape(item.brand || 'No brand')}</div>
     </div>
+    ${sizeSummary}
     ${itemUrgentBags > 0 ? `<span class="ps-status-btn ps-status-waiting">${itemUrgentBags} urgent</span>` : ''}
     ${itemTotalBags > itemUrgentBags ? `<span class="ps-status-btn ps-status-not_started">${itemTotalBags} total</span>` : ''}
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
