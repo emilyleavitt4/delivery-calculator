@@ -840,6 +840,10 @@
   function settingsDocRef(name) { return doc(db, 'businesses', BUSINESS_ID, 'settings', name); }
   window.fbLoadSettingsDoc = (name) => getDoc(settingsDocRef(name));
   window.fbSaveSettingsDoc = (name, data) => setDoc(settingsDocRef(name), data);
+  // Live-subscribe variant — for the rare settings doc where every device should reflect a
+  // change immediately (e.g. inventoryMode: someone flips the team into "Editing" for a count
+  // day and everyone's phone should pick that up without a manual reload).
+  window.fbOnSnapshotSettingsDoc = (name, onNext, onError) => onSnapshot(settingsDocRef(name), onNext, onError);
 
   // Balloon-math rates are business-specific (everyone builds to their own ratios), so they're
   // stored per business instead of hardcoded — one shared doc, editable from the Formulas &
@@ -897,6 +901,12 @@
   // referenced by Inventory (stock levels) and searched by every color autocomplete in the app.
   window.fbLoadColorLibrary = () => window.fbLoadSettingsDoc('colorLibrary');
   window.fbSaveColorLibrary = (data) => window.fbSaveSettingsDoc('colorLibrary', data);
+
+  // A real backup, not just a display filter — a removed Library color/colors land here (see
+  // clRemoveColorFromLibrary/clClearLibraryAndInventory) instead of being discarded outright, so
+  // "cleared by accident" is always something Recently Deleted can undo, not permanent data loss.
+  window.fbLoadColorLibraryTrash = () => window.fbLoadSettingsDoc('colorLibraryTrash');
+  window.fbSaveColorLibraryTrash = (data) => window.fbSaveSettingsDoc('colorLibraryTrash', data);
 
   // Delivery Calculator's pricing defaults (mpg, gas, rate, profit, multipliers) — previously
   // localStorage-only (per-device); now a shared doc like every other business default.
@@ -5621,11 +5631,26 @@ const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '18"': '17"/18"'
 const INV_OPEN_STATUSES = ['Full', 'Partial', 'Empty'];
 
 let INVENTORY_ITEMS = [];
+// Items with `deletedAt` set — split out of INVENTORY_ITEMS at the one place it's populated (see
+// invStartListeners) so every existing reader of INVENTORY_ITEMS automatically excludes them
+// without needing its own filter, the same way `active` items already do. The Firestore doc
+// itself is never actually removed — deletedAt is just a flag — so "Recently Deleted" can always
+// restore it; see invDeleteColor/invClearGroup/invRestoreItem.
+let INVENTORY_ITEMS_TRASHED = [];
 let INVENTORY_ORDERS = [];
 let invExpandedItem = null;
 let invOrderFormKey = null; // `${itemId}|${size}` of the order form currently open, or null
+let invFlagComposerKey = null; // `${itemId}|${size}` of the flag-note composer currently open, or null
+// 'view' (default, safe): Open bin/Backstock show as plain read-only text, so a normal "what do
+// we have?" check can't accidentally change a real count. 'edit': the same fields become the
+// actual select/input, for count days. Separate from the admin passcode on purpose — anyone on
+// the team can flip this (no lock), it's the price/par/tier/delete fields that stay admin-only.
+// Shared business-wide (live-subscribed, not per-device) so flipping it once puts the whole team
+// in Editing mode together — see invModeInit/invSetMode.
+let invMode = 'view';
 let invSearchQuery = '';
-let invGroupBy = 'tier'; // 'tier' (Main/Misc), 'brand', or 'size'
+let invTierTab = 'main'; // 'main' or 'misc' — which colors show at all; a hard filter, applied before search/sort
+let invGroupBy = 'tier'; // 'tier' (alphabetical, within the current invTierTab), 'brand', or 'size'
 let invSizeSortSize = '11"'; // which size to rank by when invGroupBy === 'size'
 
 // Gates the "admin" fields (price, balloons per bag, par) that shouldn't change during routine
@@ -5940,14 +5965,34 @@ function clCsvImportSpec() {
   };
 }
 
+function invModeInit() {
+  window.fbOnSnapshotSettingsDoc('inventoryMode',
+    (snap) => {
+      invMode = (snap.exists() && snap.data().mode === 'edit') ? 'edit' : 'view';
+      invRenderLatex();
+    },
+    (err) => console.error('Inventory mode sync error:', err)
+  );
+}
+function invSetMode(mode) {
+  window.fbSaveSettingsDoc('inventoryMode', { mode }).catch(err => console.error('Inventory mode save failed:', err));
+  // Optimistic — don't wait for the round trip on this device, the listener above will confirm
+  // it (and is what brings every OTHER device along).
+  invMode = mode;
+  invRenderLatex();
+}
+
 function invStartListeners() {
   // Render the shell immediately (Firestore reads are async, and onSnapshot's first callback
   // can be delayed or — if the security rules don't cover these paths yet — never arrive at
   // all) so the view always shows something instead of staying blank while waiting.
   invRenderLatex();
+  invModeInit();
   window.fbOnSnapshotInventoryItems(
     (snapshot) => {
-      INVENTORY_ITEMS = snapshot.docs.map(d => d.data());
+      const all = snapshot.docs.map(d => d.data());
+      INVENTORY_ITEMS = all.filter(i => !i.deletedAt);
+      INVENTORY_ITEMS_TRASHED = all.filter(i => i.deletedAt);
       // Guarded on clLoaded so this never runs (and creates/duplicates Library entries) before
       // the real saved Library has arrived — clInit's own migration pass covers the case where
       // the Library loads after inventory already has.
@@ -6101,6 +6146,11 @@ INV_SEED_BRANDS.forEach(b => { if (!BRAND_COLOR_CATALOG[b]) BRAND_COLOR_CATALOG[
 // name independently). Every color autocomplete in the app — Production, Quantity Calculator,
 // Import Review — searches this, never BRAND_COLOR_CATALOG or INVENTORY_ITEMS directly.
 let COLOR_LIBRARY = [];
+// Removed Library entries land here instead of being discarded (see clRemoveColorFromLibrary/
+// clClearLibraryAndInventory) — a real backup doc, not a display filter, since COLOR_LIBRARY is
+// saved back to Firestore as one whole array on every edit, so anything not copied out BEFORE
+// removal would be gone the next time anything saved.
+let COLOR_LIBRARY_TRASH = [];
 let clLoaded = false; // true once the saved Library has actually arrived — guards migration
 // Only these three manufacturers get the "add colors from catalog" picker for now — Kalisan/
 // Qualatex stay in BRAND_COLOR_CATALOG (used elsewhere) but aren't offered here yet.
@@ -6121,6 +6171,13 @@ function clInit() {
     invRenderLatex();
     clRenderSettingsSection();
   }).catch(err => console.error('Color Library load failed:', err));
+  window.fbLoadColorLibraryTrash().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().entries)) COLOR_LIBRARY_TRASH = snap.data().entries;
+    clRenderSettingsSection();
+  }).catch(err => console.error('Color Library trash load failed:', err));
+}
+function clSaveTrash() {
+  window.fbSaveColorLibraryTrash({ entries: COLOR_LIBRARY_TRASH }).catch(err => console.error('Color Library trash save failed:', err));
 }
 function clSaveLibrary() {
   // Re-throws (after logging) rather than swallowing the error — clAddColorsBulk awaits this
@@ -6134,11 +6191,12 @@ function clSaveLibrary() {
   });
 }
 
-// Permanently empties the Color Library and deletes every Inventory row — meant for wiping
-// seed/sample data before entering a business's real colors from scratch, not a routine action.
-// Same admin-passcode + type-DELETE pattern as invClearGroup, since this is irreversible.
-// Inventory's own onSnapshot listener will reflect the deletes once they land; the Library
-// isn't listener-backed (a one-time load), so it's updated locally right away.
+// Empties the Color Library and moves every Inventory row to Recently Deleted — meant for
+// clearing out seed/sample data before entering a business's real colors from scratch, not a
+// routine action. Same admin-passcode + type-DELETE pattern as invClearGroup, but this is a soft
+// delete now, not a real one: every removed color/row lands in COLOR_LIBRARY_TRASH/
+// INVENTORY_ITEMS_TRASHED (see clRestoreFromTrash / invRestoreItem) instead of being erased, so
+// this can never be the "wiped it all and it's just gone" scenario it used to be.
 function clClearLibraryAndInventory() {
   if (!invAdminUnlocked) {
     const entered = prompt('Enter the admin passcode to clear the Color Library:');
@@ -6146,17 +6204,21 @@ function clClearLibraryAndInventory() {
     if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode — nothing deleted.'); return; }
   }
   if (COLOR_LIBRARY.length === 0 && INVENTORY_ITEMS.length === 0) { alert('Already empty.'); return; }
-  const typed = prompt(`This permanently deletes all ${COLOR_LIBRARY.length} color(s) in your Color Library and all ${INVENTORY_ITEMS.length} Inventory row(s). This can't be undone.\n\nType DELETE to confirm.`);
+  const typed = prompt(`This moves all ${COLOR_LIBRARY.length} color(s) in your Color Library and all ${INVENTORY_ITEMS.length} Inventory row(s) to Recently Deleted. You can restore them anytime from there.\n\nType DELETE to confirm.`);
   if (typed === null) return;
   if (typed !== 'DELETE') { alert('Not cleared — you must type DELETE exactly.'); return; }
 
-  const ids = INVENTORY_ITEMS.map(i => i.id);
-  if (ids.length > 0) window.fbBatchDeleteInventoryItems(ids).catch(err => console.error('Clear Color Library: inventory delete failed', err));
+  INVENTORY_ITEMS.forEach(item => { item.deletedAt = Date.now(); invSaveItem(item); });
+  INVENTORY_ITEMS_TRASHED = INVENTORY_ITEMS_TRASHED.concat(INVENTORY_ITEMS);
+  INVENTORY_ITEMS = [];
 
+  COLOR_LIBRARY_TRASH = COLOR_LIBRARY_TRASH.concat(COLOR_LIBRARY);
+  clSaveTrash();
   COLOR_LIBRARY = [];
   clSaveLibrary().catch(() => {});
   clRenderSettingsSection();
-  alert('Color Library and Inventory cleared.');
+  invRenderLatex();
+  alert('Color Library and Inventory moved to Recently Deleted — restore them anytime from there.');
 }
 
 // One-time (and self-healing — safe to call repeatedly) migration: every Inventory color that
@@ -6780,13 +6842,14 @@ function invPickMasterCatalogSuggestion(color, brand) {
 // separate axis from this sort, set via invGroupBy.
 function invFilteredSortedItems() {
   const q = invSearchQuery.trim().toLowerCase();
-  const items = invSortedItems();
+  const items = invSortedItems().filter(i => (i.tier || 'main') === invTierTab);
   if (!q) return items;
   return items.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q));
 }
-// Buckets the given items into groups per invGroupBy, preserving a sensible group order
-// (Main before Misc; brands alphabetically with blank brand last; size mode is a single list
-// ranked by order urgency for whichever size is picked, not a Main/Misc/brand bucket).
+// Buckets the given (already tier-filtered) items into groups per invGroupBy — brands
+// alphabetically with blank brand last; size mode is a single list ranked by order urgency for
+// whichever size is picked; otherwise one flat alphabetical list for whichever tab (Main/Misc)
+// is currently showing, since Main-vs-Misc is now the invTierTab filter above, not a group split.
 function invGroupedItems(items, upcomingMap) {
   if (invGroupBy === 'brand') {
     const byBrand = {};
@@ -6809,12 +6872,11 @@ function invGroupedItems(items, upcomingMap) {
     }).sort((a, b) => b.totalBags - a.totalBags || a.item.color.localeCompare(b.item.color));
     return [{ key: 'size:' + size, label: size + ' — most urgent first', items: ranked.map(r => r.item) }];
   }
-  const main = items.filter(i => (i.tier || 'main') === 'main');
-  const misc = items.filter(i => (i.tier || 'main') === 'misc');
-  return [
-    { key: 'tier:main', label: 'Main', items: main },
-    { key: 'tier:misc', label: 'Miscellaneous', items: misc }
-  ];
+  return [{ key: 'tier:' + invTierTab, label: invTierTab === 'main' ? 'Main' : 'Miscellaneous', items }];
+}
+function invSetTierTab(tab) {
+  invTierTab = tab;
+  invRenderLatex(); // rebuilds the tab row too, so the active highlight and counts stay in sync
 }
 function invSetSearch(val) {
   invSearchQuery = val;
@@ -6851,13 +6913,18 @@ function invClearGroup(key) {
   const group = groups.find(g => g.key === key);
   if (!group || group.items.length === 0) return;
 
-  const typed = prompt(`This permanently deletes all ${group.items.length} color(s) in "${group.label}". This can't be undone.\n\nType DELETE to confirm.`);
+  const typed = prompt(`This moves all ${group.items.length} color(s) in "${group.label}" to Recently Deleted. You can restore them anytime from there.\n\nType DELETE to confirm.`);
   if (typed === null) return;
-  if (typed !== 'DELETE') { alert('Not deleted — you must type DELETE exactly.'); return; }
+  if (typed !== 'DELETE') { alert('Not cleared — you must type DELETE exactly.'); return; }
 
+  const ids = new Set(group.items.map(i => i.id));
   group.items.forEach(item => {
-    window.fbDeleteInventoryItem(item.id).catch(err => console.error('Delete failed for', item.color, err));
+    item.deletedAt = Date.now();
+    invSaveItem(item);
   });
+  INVENTORY_ITEMS = INVENTORY_ITEMS.filter(i => !ids.has(i.id));
+  INVENTORY_ITEMS_TRASHED = INVENTORY_ITEMS_TRASHED.concat(group.items);
+  invRenderLatex();
 }
 
 function invToggleExpand(itemId) {
@@ -6874,10 +6941,14 @@ function invAddColor() {
   const libraryEntry = clFindOrCreate(brand, color);
   clSaveLibrary().catch(() => {});
   // One-off manual additions default to Misc — Main is for your established, consistent lineup.
+  // Since setting Main/Misc is admin-gated (see invColorCardHtml), a non-admin adding a color
+  // couldn't otherwise get it out of Misc to even SEE it if the Main tab were left selected —
+  // switch to the Misc tab too, so the newly-added (and auto-expanded) color is actually visible.
   const item = { id: psNewInventoryItemId(), color, brand, tier: 'misc', active: true, colorId: libraryEntry.id, sizes: invBlankSizeData() };
   nameEl.value = ''; brandEl.value = '';
   document.getElementById('inv-new-color-suggest').style.display = 'none';
   invExpandedItem = item.id;
+  invTierTab = 'misc';
   invSaveItem(item);
 }
 function invSetTier(itemId, tier) {
@@ -6886,13 +6957,42 @@ function invSetTier(itemId, tier) {
   item.tier = tier;
   invSaveItem(item);
 }
+// Soft delete — the item's Firestore doc is never actually removed, just flagged with
+// `deletedAt` and filtered out of INVENTORY_ITEMS (see invStartListeners). "Recently Deleted"
+// below can always bring it back, so an accidental tap here (or a whole "Clear All") is never
+// the permanent, unrecoverable loss it used to be.
 function invDeleteColor(itemId) {
-  if (!confirm("Delete this color from inventory? This can't be undone.")) return;
+  const item = invFindItem(itemId);
+  if (!item) return;
+  if (!confirm(`Move "${item.color}" to Recently Deleted? You can restore it from there anytime.`)) return;
   if (invExpandedItem === itemId) invExpandedItem = null;
-  window.fbDeleteInventoryItem(itemId).catch(err => {
-    console.error(err);
-    alert("Couldn't delete that color — check your connection and try again.");
-  });
+  item.deletedAt = Date.now();
+  invSaveItem(item);
+  INVENTORY_ITEMS = INVENTORY_ITEMS.filter(i => i.id !== itemId);
+  INVENTORY_ITEMS_TRASHED = INVENTORY_ITEMS_TRASHED.concat([item]);
+  invRenderLatex();
+}
+function invRestoreItem(itemId) {
+  const item = INVENTORY_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  delete item.deletedAt;
+  invSaveItem(item);
+  INVENTORY_ITEMS_TRASHED = INVENTORY_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  INVENTORY_ITEMS = INVENTORY_ITEMS.concat([item]);
+  invRenderLatex();
+}
+// The one truly permanent-delete path left in the app — reachable only from inside Recently Deleted,
+// never as a first tap, and still gated behind admin + typed confirmation like the bulk clears.
+function invPermanentlyDeleteItem(itemId) {
+  if (!invAdminUnlocked) { alert('Unlock admin first.'); return; }
+  const item = INVENTORY_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  const typed = prompt(`This permanently erases "${item.color}" — even Recently Deleted won't have it anymore. This truly can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not deleted — you must type DELETE exactly.'); return; }
+  window.fbDeleteInventoryItem(itemId).catch(err => console.error('Permanent delete failed:', err));
+  INVENTORY_ITEMS_TRASHED = INVENTORY_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  invRenderLatex();
 }
 // The reversible alternative to deleting — for a color you're not currently using but don't
 // want to lose the record of (par/pricing history, etc.). Inactive colors stay visible here
@@ -6928,6 +7028,35 @@ function invOpenOrderForm(itemId, size) {
 }
 function invCancelOrderForm() {
   invOrderFormKey = null;
+  invRenderColorsList();
+}
+function invOpenFlagComposer(itemId, size) {
+  invFlagComposerKey = `${itemId}|${size}`;
+  invRenderColorsList();
+}
+function invCancelFlagComposer() {
+  invFlagComposerKey = null;
+  invRenderColorsList();
+}
+function invSubmitFlag(itemId, size) {
+  const el = document.getElementById('inv-flag-note');
+  const note = el ? el.value.trim() : '';
+  if (!note) { alert('Enter a quick note about what looks off.'); return; }
+  const item = invFindItem(itemId);
+  if (!item) return;
+  item.sizes[size].flag = { note, flaggedAt: Date.now() };
+  invSaveItem(item);
+  invFlagComposerKey = null;
+  invRenderColorsList();
+}
+// Admin-only so a flag can't get quietly dismissed by whoever finds it easiest to clear — it's
+// meant to reach whoever manages the catalog, not just disappear the moment someone taps it.
+function invResolveFlag(itemId, size) {
+  if (!invAdminUnlocked) { alert('Unlock admin first.'); return; }
+  const item = invFindItem(itemId);
+  if (!item) return;
+  delete item.sizes[size].flag;
+  invSaveItem(item);
   invRenderColorsList();
 }
 function invSubmitOrder(itemId, size) {
@@ -6986,6 +7115,21 @@ function invRenderLatex() {
   if (!root) return;
   let html = '';
 
+  // The mode toggle — no passcode, anyone on the team can flip it. Viewing is the safe default
+  // for a routine "what do we have?" check; Editing is what count day actually needs. Deliberately
+  // the first thing on the screen, and visually different per mode, so nobody is ever unsure
+  // which one they're in before they start tapping around.
+  const editing = invMode === 'edit';
+  html += `<div class="card" style="background:${editing ? 'var(--accent-light)' : 'var(--surface)'}; border-color:${editing ? 'var(--accent-border)' : 'var(--border)'};">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+      <div>
+        <div style="font-size:15px; font-weight:700; color:${editing ? 'var(--accent)' : 'var(--text)'};">${editing ? 'Editing mode' : 'Viewing stock'}</div>
+        <div style="font-size:12px; color:var(--text-secondary);">${editing ? "Counts you enter save right away — everyone's screen updates too." : 'Switch to Editing to record a count.'}</div>
+      </div>
+      <button class="save-btn" style="width:auto; padding:9px 16px; flex-shrink:0; ${editing ? 'background:var(--text-secondary);' : ''}" onclick="invSetMode('${editing ? 'view' : 'edit'}')">${editing ? 'Done counting' : 'Start Editing'}</button>
+    </div>
+  </div>`;
+
   // Pending orders — the "what's in flight" list, so nothing gets lost between pressing
   // order and it actually landing in backstock. Sorted by color name, collapsible like the
   // color groups below, and rendered as a dense list (not one card per order) to stay compact.
@@ -7032,7 +7176,13 @@ function invRenderLatex() {
   if (INVENTORY_ITEMS.length === 0) {
     html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — add one below, or add colors from a manufacturer under Settings → Color Library.</div>`;
   } else {
+    const mainCount = INVENTORY_ITEMS.filter(i => (i.tier || 'main') === 'main').length;
+    const miscCount = INVENTORY_ITEMS.filter(i => (i.tier || 'main') === 'misc').length;
     html += `<div class="card">
+      <div class="trip-toggle" style="margin:0 0 0.6rem;">
+        <button class="trip-btn ${invTierTab === 'main' ? 'active' : ''}" onclick="invSetTierTab('main')">Main (${mainCount})</button>
+        <button class="trip-btn ${invTierTab === 'misc' ? 'active' : ''}" onclick="invSetTierTab('misc')">Miscellaneous (${miscCount})</button>
+      </div>
       <div class="settings-field" style="margin-bottom:0.6rem;">
         <input type="text" id="inv-search" placeholder="Search colors or brands..." value="${psEscape(invSearchQuery)}" oninput="invSetSearch(this.value)">
       </div>
@@ -7055,6 +7205,27 @@ function invRenderLatex() {
     </div>`;
   }
   html += `<div id="inv-colors-results"></div>`;
+
+  // A real safety net, not just a confirmation dialog — every color/color-group delete in this
+  // screen is a soft delete now (see invDeleteColor/invClearGroup), so anything moved here can
+  // always come back. Admin-only and hidden entirely when empty, so it never clutters the
+  // counting view — it's a recovery tool, not something a routine count needs to see.
+  if (invAdminUnlocked && INVENTORY_ITEMS_TRASHED.length > 0) {
+    html += `<div class="section-label">Recently deleted (${INVENTORY_ITEMS_TRASHED.length})</div>
+    <div class="card">
+      ${INVENTORY_ITEMS_TRASHED.map(item => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:600;">${psEscape(item.color)}</div>
+            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'No brand')}</div>
+          </div>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invRestoreItem('${item.id}')">Restore</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="invPermanentlyDeleteItem('${item.id}')">Delete forever</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
 
   html += `<div class="section-label">Add a color</div>
   <div class="card">
@@ -7115,6 +7286,21 @@ function clRenderSettingsSection() {
     </div>`;
   }
   html += invLibraryOnlyHtml();
+  // Same safety-net pattern as Inventory's Recently Deleted — every removal above is a soft
+  // delete now, so this is where it can actually be undone. Admin-only, hidden when empty.
+  if (invAdminUnlocked && COLOR_LIBRARY_TRASH.length > 0) {
+    html += `<div class="section-label">Recently deleted (${COLOR_LIBRARY_TRASH.length})</div>
+    <div class="card">
+      ${COLOR_LIBRARY_TRASH.map(entry => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="min-width:0; font-size:13px; font-weight:600;">${entry.brand ? psEscape(entry.brand) + ' ' : ''}${psEscape(entry.colorName)}</div>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="clRestoreFromTrash('${entry.id}')">Restore</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="clPermanentlyDeleteFromTrash('${entry.id}')">Delete forever</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
   html += `<div style="margin-top:1rem; padding-top:0.75rem; border-top:0.5px solid var(--border);">
     <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--bg); color:var(--text-secondary); border:0.5px solid var(--border-strong);" onclick="clClearLibraryAndInventory()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all colors &amp; inventory</button>
   </div>`;
@@ -7161,10 +7347,11 @@ function clTogglePickerExpanded(id) {
   clPickerExpandedId = (clPickerExpandedId === id) ? null : id;
   clRenderPicker();
 }
-// Permanently removes one color from the Library and deletes its Inventory row, if any — the
-// "undo a wrong pick" counterpart to clClearLibraryAndInventory's wipe-everything. A single
-// item is much less catastrophic than the whole Library, so this uses a plain confirm() rather
+// Removes one color from the Library and moves its Inventory row (if any) to Recently Deleted —
+// the "undo a wrong pick" counterpart to clClearLibraryAndInventory's clear-everything. A single
+// item is much less disruptive than the whole Library, so this uses a plain confirm() rather
 // than the type-DELETE prompt, but still requires the admin passcode like other catalog edits.
+// Soft delete like every other removal path here — see COLOR_LIBRARY_TRASH/clRestoreFromTrash.
 function clRemoveColorFromLibrary(id) {
   const entry = COLOR_LIBRARY.find(e => e.id === id);
   if (!entry) return;
@@ -7175,13 +7362,42 @@ function clRemoveColorFromLibrary(id) {
   }
   const stockedItems = INVENTORY_ITEMS.filter(i => i.colorId === id);
   const label = `${entry.brand ? entry.brand + ' ' : ''}${entry.colorName}`;
-  const warning = stockedItems.length > 0 ? ` This also deletes its Inventory row and any stock recorded for it.` : '';
-  if (!confirm(`Remove "${label}" from your Color Library?${warning} This can't be undone.`)) return;
+  const warning = stockedItems.length > 0 ? ` This also moves its Inventory row to Recently Deleted.` : '';
+  if (!confirm(`Remove "${label}" from your Color Library?${warning} You can restore it anytime from Recently Deleted.`)) return;
 
   COLOR_LIBRARY = COLOR_LIBRARY.filter(e => e.id !== id);
+  COLOR_LIBRARY_TRASH = COLOR_LIBRARY_TRASH.concat([entry]);
   clSaveLibrary().catch(() => {});
-  stockedItems.forEach(item => window.fbDeleteInventoryItem(item.id).catch(err => console.error('Remove color: inventory delete failed', err)));
+  clSaveTrash();
+  stockedItems.forEach(item => { item.deletedAt = Date.now(); invSaveItem(item); });
+  const stockedIds = new Set(stockedItems.map(i => i.id));
+  INVENTORY_ITEMS = INVENTORY_ITEMS.filter(i => !stockedIds.has(i.id));
+  INVENTORY_ITEMS_TRASHED = INVENTORY_ITEMS_TRASHED.concat(stockedItems);
   if (clPickerExpandedId === id) clPickerExpandedId = null;
+  clRenderSettingsSection();
+  invRenderLatex();
+}
+function clRestoreFromTrash(id) {
+  const entry = COLOR_LIBRARY_TRASH.find(e => e.id === id);
+  if (!entry) return;
+  COLOR_LIBRARY_TRASH = COLOR_LIBRARY_TRASH.filter(e => e.id !== id);
+  COLOR_LIBRARY = COLOR_LIBRARY.concat([entry]);
+  clSaveLibrary().catch(() => {});
+  clSaveTrash();
+  clRenderSettingsSection();
+}
+// The one truly permanent-delete path for the Library — reachable only from inside Recently
+// Deleted, never as a first tap, and still gated behind admin + typed confirmation.
+function clPermanentlyDeleteFromTrash(id) {
+  if (!invAdminUnlocked) { alert('Unlock admin first.'); return; }
+  const entry = COLOR_LIBRARY_TRASH.find(e => e.id === id);
+  if (!entry) return;
+  const label = `${entry.brand ? entry.brand + ' ' : ''}${entry.colorName}`;
+  const typed = prompt(`This permanently erases "${label}" — even Recently Deleted won't have it anymore. This truly can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not deleted — you must type DELETE exactly.'); return; }
+  COLOR_LIBRARY_TRASH = COLOR_LIBRARY_TRASH.filter(e => e.id !== id);
+  clSaveTrash();
   clRenderSettingsSection();
 }
 // Selects (or clears) every currently-filtered, not-already-owned color at once — the "bulk"
@@ -7416,75 +7632,108 @@ function invColorCardHtml(item, upcomingMap) {
     </div>
     ${itemUrgentBags > 0 ? `<span class="ps-status-btn ps-status-waiting">${itemUrgentBags} urgent</span>` : ''}
     ${itemTotalBags > itemUrgentBags ? `<span class="ps-status-btn ps-status-not_started">${itemTotalBags} total</span>` : ''}
-    <button class="icon-btn" style="padding:4px;" onclick="event.stopPropagation(); invToggleActive('${item.id}')" aria-label="${isActive ? 'Deactivate' : 'Reactivate'} color"><i class="fa-solid fa-${isActive ? 'eye-slash' : 'eye'}"></i></button>
-    <button class="icon-btn" style="padding:4px;" onclick="event.stopPropagation(); invDeleteColor('${item.id}')" aria-label="Delete color"><i class="fa-solid fa-trash"></i></button>
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
   </div>`;
 
   if (expanded) {
     html += `<div class="ps-job-body">`;
-    html += `<div class="trip-toggle" style="margin:0.75rem 0 0;">
-      <button class="trip-btn ${tier === 'main' ? 'active' : ''}" onclick="invSetTier('${item.id}','main')">Main</button>
-      <button class="trip-btn ${tier === 'misc' ? 'active' : ''}" onclick="invSetTier('${item.id}','misc')">Misc</button>
-    </div>`;
-    html += invAliasEditorHtml(item.colorId);
+    // Which bucket a color belongs to (Main vs. Misc), deactivating, and deleting are all catalog
+    // decisions, not something a counting session needs to touch — gated behind admin like the
+    // alias editor and pricing fields below, and kept small/secondary rather than the large,
+    // always-visible eye/trash icons this used to have right on the collapsed row.
+    if (invAdminUnlocked) {
+      html += `<div style="display:flex; align-items:center; gap:8px; margin:0.75rem 0 0; flex-wrap:wrap;">
+        <span style="font-size:11px; color:var(--text-secondary);">Category:</span>
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border-radius:999px; border:0.5px solid ${tier === 'main' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${tier === 'main' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invSetTier('${item.id}','main')">Main</button>
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border-radius:999px; border:0.5px solid ${tier === 'misc' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${tier === 'misc' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invSetTier('${item.id}','misc')">Misc</button>
+        <span style="flex:1;"></span>
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invToggleActive('${item.id}')">${isActive ? 'Deactivate' : 'Reactivate'}</button>
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invDeleteColor('${item.id}')"><i class="fa-solid fa-trash"></i></button>
+      </div>`;
+      html += invAliasEditorHtml(item.colorId);
+    }
     INV_SIZES.forEach(size => {
       const sd = item.sizes[size];
-      const upcoming = invUpcomingFor(item, size, upcomingMap);
-      const pendingQty = invPendingOrderedQty(item.id, size);
-      const need = invNeedBreakdown(sd, upcoming, pendingQty);
       const formKey = `${item.id}|${size}`;
 
-      html += `<div class="ps-item-block">`;
-      html += `<div style="font-size:14px; font-weight:700; margin-bottom:0.5rem; margin-top:0.75rem;">${psEscape(size)}</div>`;
-      // Line 1 — changes constantly during routine use, always editable.
-      html += `<div class="row">
-        <div class="settings-field" style="margin-bottom:0"><label>Open bin</label>
-          <select onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','openStatus',this.value)">
-            ${INV_OPEN_STATUSES.map(s => `<option value="${s}" ${s === sd.openStatus ? 'selected' : ''}>${s}</option>`).join('')}
-          </select>
-        </div>
-        <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','backstock',this.value)"></div>
-      </div>`;
-      // Line 2 — "set and forget" numbers, gated behind the admin passcode so a routine
-      // backstock update can't accidentally bump price/count-per-bag/par.
+      html += `<div class="ps-item-block" style="margin-bottom:0.75rem; padding-bottom:0.75rem;">`;
+      html += `<div style="font-size:15px; font-weight:700; margin-bottom:0.5rem; margin-top:0.5rem;">${psEscape(size)}</div>`;
+      // The only two things a physical count needs to record. In Viewing mode (the safe default
+      // for a routine "what do we have?" check) these are plain read-only text — no select/input
+      // for a stray tap to accidentally change; Editing mode swaps in the real controls.
+      if (invMode === 'edit') {
+        html += `<div class="row">
+          <div class="settings-field" style="margin-bottom:0"><label>Open bin</label>
+            <select onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','openStatus',this.value)">
+              ${INV_OPEN_STATUSES.map(s => `<option value="${s}" ${s === sd.openStatus ? 'selected' : ''}>${s}</option>`).join('')}
+            </select>
+          </div>
+          <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','backstock',this.value)"></div>
+        </div>`;
+      } else {
+        html += `<div class="row">
+          <div><div style="font-size:12px; color:var(--text-secondary); font-weight:500; margin-bottom:5px;">Open bin</div><div style="font-size:16px; font-weight:600;">${psEscape(sd.openStatus)}</div></div>
+          <div><div style="font-size:12px; color:var(--text-secondary); font-weight:500; margin-bottom:5px;">Backstock (bags)</div><div style="font-size:16px; font-weight:600;">${sd.backstock}</div></div>
+        </div>`;
+      }
+      // Flagging works the same in either mode — noticing something's off shouldn't require
+      // switching the whole team into Editing just to say so. Visible to everyone; only
+      // resolving it is admin-gated, so a flag can't get quietly dismissed by whoever finds it.
+      const flagKey = `${item.id}|${size}`;
+      if (sd.flag) {
+        html += `<div style="background:var(--warning-bg); border:0.5px solid var(--warning-text); border-radius:var(--radius-sm); padding:0.6rem 0.75rem; margin-top:0.6rem; font-size:12px;">
+          <div style="font-weight:700; color:var(--warning-text); margin-bottom:2px;"><i class="fa-solid fa-flag"></i> Flagged for review</div>
+          <div style="color:var(--text);">${psEscape(sd.flag.note)}</div>
+          ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; margin-top:6px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invResolveFlag('${item.id}','${invAttr(size)}')">Resolve</button>` : ''}
+        </div>`;
+      } else if (invFlagComposerKey === flagKey) {
+        html += `<div style="margin-top:0.6rem;">
+          <div class="settings-field" style="margin-bottom:0.4rem;"><textarea id="inv-flag-note" rows="2" placeholder="What looks off? e.g. Bin says Full but the shelf looked empty"></textarea></div>
+          <div style="display:flex; gap:8px;">
+            <button class="save-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invSubmitFlag('${item.id}','${invAttr(size)}')">Submit flag</button>
+            <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invCancelFlagComposer()">Cancel</button>
+          </div>
+        </div>`;
+      } else {
+        html += `<div style="margin-top:0.4rem;"><button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary);" onclick="invOpenFlagComposer('${item.id}','${invAttr(size)}')"><i class="fa-regular fa-flag"></i> Flag this</button></div>`;
+      }
+      // Pricing, restock math, and ordering are a manager's job, not a counter's — gated behind
+      // the same admin passcode as the pricing fields themselves, so the counting view stays down
+      // to just the fields above instead of showing info nobody taking a physical count needs.
       if (invAdminUnlocked) {
-        html += `<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:1rem;">
+        const upcoming = invUpcomingFor(item, size, upcomingMap);
+        const pendingQty = invPendingOrderedQty(item.id, size);
+        const need = invNeedBreakdown(sd, upcoming, pendingQty);
+        html += `<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin:0.75rem 0;">
           <div class="settings-field" style="margin-bottom:0"><label>Price/bag</label><input type="number" step="0.01" min="0" value="${sd.price}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','price',this.value)"></div>
           <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${sd.perBag || 100}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','perBag',this.value)"></div>
           <div class="settings-field" style="margin-bottom:0"><label>Par (bags)</label><input type="number" min="0" value="${sd.par}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','par',this.value)"></div>
         </div>`;
-      } else {
-        html += `<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:1rem; opacity:0.55;">
-          <div><div style="font-size:12px; color:var(--text-secondary);">Price/bag</div><div style="font-size:14px;">$${(sd.price || 0).toFixed(2)}</div></div>
-          <div><div style="font-size:12px; color:var(--text-secondary);">Balloons/bag</div><div style="font-size:14px;">${sd.perBag || 100}</div></div>
-          <div><div style="font-size:12px; color:var(--text-secondary);">Par (bags)</div><div style="font-size:14px;">${sd.par || 0}</div></div>
+        html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Upcoming (from open jobs): ${upcoming} balloons${pendingQty ? ` · Pending order: ${pendingQty} bags` : ''}</div>`;
+        html += `<div style="margin-bottom:0.5rem;">
+          ${need.urgentBags > 0 ? `<div style="font-weight:700; font-size:14px; color:var(--warning-text);">Needed now for jobs: ${need.urgentBags} bag${need.urgentBags === 1 ? '' : 's'}</div>` : ''}
+          ${need.restockBags > 0 ? `<div style="font-size:13px; color:var(--text-secondary);">Plus ${need.restockBags} bag${need.restockBags === 1 ? '' : 's'} to restock to your normal par</div>` : ''}
+          ${need.totalBags === 0 ? `<div style="font-weight:700; font-size:14px;">Stocked</div>` : ''}
         </div>`;
-      }
-      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Upcoming (from open jobs): ${upcoming} balloons${pendingQty ? ` · Pending order: ${pendingQty} bags` : ''}</div>`;
-      html += `<div style="margin-bottom:0.5rem;">
-        ${need.urgentBags > 0 ? `<div style="font-weight:700; font-size:14px; color:var(--warning-text);">Needed now for jobs: ${need.urgentBags} bag${need.urgentBags === 1 ? '' : 's'}</div>` : ''}
-        ${need.restockBags > 0 ? `<div style="font-size:13px; color:var(--text-secondary);">Plus ${need.restockBags} bag${need.restockBags === 1 ? '' : 's'} to restock to your normal par</div>` : ''}
-        ${need.totalBags === 0 ? `<div style="font-weight:700; font-size:14px;">Stocked</div>` : ''}
-      </div>`;
-      html += `<div style="display:flex; justify-content:flex-end;">
-        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenOrderForm('${item.id}','${invAttr(size)}')"><i class="fa-solid fa-cart-plus"></i> Order</button>
-      </div>`;
+        html += `<div style="display:flex; justify-content:flex-end;">
+          <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenOrderForm('${item.id}','${invAttr(size)}')"><i class="fa-solid fa-cart-plus"></i> Order</button>
+        </div>`;
 
-      if (invOrderFormKey === formKey) {
-        const defaultQty = need.urgentBags > 0 ? need.urgentBags : (need.totalBags > 0 ? need.totalBags : 1);
-        html += `<div style="margin-top:0.75rem;">
-          ${need.restockBags > 0 ? `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Defaulted to the ${need.urgentBags > 0 ? 'urgent' : 'total'} amount (${defaultQty}) — bump it up to ${need.totalBags} to also cover your normal restock, if budget/availability allows.</div>` : ''}
-          <div class="row">
-            <div class="settings-field" style="margin-bottom:0"><label>Quantity (bags)</label><input type="number" id="inv-order-qty" min="1" value="${defaultQty}"></div>
-            <div class="settings-field" style="margin-bottom:0"><label>Ordered from</label><input type="text" id="inv-order-vendor" placeholder="e.g. Loftus"></div>
-          </div>
-          <div class="settings-field"><label>Order date</label><input type="text" id="inv-order-date" placeholder="e.g. 3/14"></div>
-          <div style="display:flex; gap:8px;">
-            <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="invSubmitOrder('${item.id}','${invAttr(size)}')">Save order</button>
-            <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invCancelOrderForm()">Cancel</button>
-          </div>
-        </div>`;
+        if (invOrderFormKey === formKey) {
+          const defaultQty = need.urgentBags > 0 ? need.urgentBags : (need.totalBags > 0 ? need.totalBags : 1);
+          html += `<div style="margin-top:0.75rem;">
+            ${need.restockBags > 0 ? `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Defaulted to the ${need.urgentBags > 0 ? 'urgent' : 'total'} amount (${defaultQty}) — bump it up to ${need.totalBags} to also cover your normal restock, if budget/availability allows.</div>` : ''}
+            <div class="row">
+              <div class="settings-field" style="margin-bottom:0"><label>Quantity (bags)</label><input type="number" id="inv-order-qty" min="1" value="${defaultQty}"></div>
+              <div class="settings-field" style="margin-bottom:0"><label>Ordered from</label><input type="text" id="inv-order-vendor" placeholder="e.g. Loftus"></div>
+            </div>
+            <div class="settings-field"><label>Order date</label><input type="text" id="inv-order-date" placeholder="e.g. 3/14"></div>
+            <div style="display:flex; gap:8px;">
+              <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="invSubmitOrder('${item.id}','${invAttr(size)}')">Save order</button>
+              <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invCancelOrderForm()">Cancel</button>
+            </div>
+          </div>`;
+        }
       }
       html += `</div>`; // ps-item-block
     });
