@@ -7525,7 +7525,7 @@ function invRenderColorsList() {
       html += `<div class="inv-group-header" onclick="invToggleGroup('${g.key}')">
         <span>${psEscape(g.label)} (${g.items.length})</span>
         <span style="display:flex; align-items:center; gap:10px;">
-          <button class="icon-btn" style="padding:2px 8px; font-size:10px; text-transform:none; letter-spacing:normal; color:var(--text-secondary);" onclick="event.stopPropagation(); invClearGroup('${g.key}')">Clear All</button>
+          <button class="icon-btn" style="padding:2px 8px; font-size:10px; text-transform:none; letter-spacing:normal; color:var(--text-secondary);" onclick="event.stopPropagation(); invClearGroup('${g.key}')" title="Deletes every color in this section — not a count reset"><i class="fa-solid fa-trash" style="font-size:9px;"></i> Delete colors</button>
           <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
         </span>
       </div>`;
@@ -7535,11 +7535,15 @@ function invRenderColorsList() {
     });
   }
 
-  let totalValue = 0;
-  INVENTORY_ITEMS.forEach(item => {
-    INV_SIZES.forEach(size => { totalValue += (item.sizes[size].backstock || 0) * (item.sizes[size].price || 0); });
-  });
-  html += `<div class="ps-pack-note">Estimated backstock value: $${totalValue.toFixed(2)}</div>`;
+  // Derived from price, which is itself admin-only — showing a dollar estimate to a non-admin
+  // would leak business-sensitive info the price field itself is already gated to protect.
+  if (invAdminUnlocked) {
+    let totalValue = 0;
+    INVENTORY_ITEMS.forEach(item => {
+      INV_SIZES.forEach(size => { totalValue += (item.sizes[size].backstock || 0) * (item.sizes[size].price || 0); });
+    });
+    html += `<div class="ps-pack-note">Estimated backstock value: $${totalValue.toFixed(2)}</div>`;
+  }
 
   container.innerHTML = html;
 }
@@ -7615,21 +7619,12 @@ function invLibraryOnlyHtml() {
   return html;
 }
 
-// Renders one color's card — collapsed header (name, brand, "N to order" badge) and, when
+// Renders one color's card — collapsed header (name, brand, size/quantity glance) and, when
 // expanded, the Main/Misc toggle plus each size's editable fields and order action.
 function invColorCardHtml(item, upcomingMap) {
   const expanded = invExpandedItem === item.id;
   const tier = item.tier || 'main';
   const isActive = item.active !== false;
-  let itemTotalBags = 0, itemUrgentBags = 0;
-  INV_SIZES.forEach(size => {
-    const sd = item.sizes[size];
-    const upcoming = invUpcomingFor(item, size, upcomingMap);
-    const pendingQty = invPendingOrderedQty(item.id, size);
-    const need = invNeedBreakdown(sd, upcoming, pendingQty);
-    itemTotalBags += need.totalBags;
-    itemUrgentBags += need.urgentBags;
-  });
 
   // At-a-glance backstock per size, sitting inline next to the color/brand instead of stacked
   // below it — keeps the collapsed row a single compact line instead of growing every card
@@ -7655,8 +7650,6 @@ function invColorCardHtml(item, upcomingMap) {
       <div class="inv-color-row-brand">${psEscape(item.brand || 'No brand')}</div>
     </div>
     ${sizeSummary}
-    ${itemUrgentBags > 0 ? `<span class="ps-status-btn ps-status-waiting">${itemUrgentBags} urgent</span>` : ''}
-    ${itemTotalBags > itemUrgentBags ? `<span class="ps-status-btn ps-status-not_started">${itemTotalBags} total</span>` : ''}
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
   </div>`;
 
