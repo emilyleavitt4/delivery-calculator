@@ -6903,16 +6903,12 @@ function invToggleGroup(key) {
   invRenderColorsList();
 }
 
-// Permanently deletes every color currently shown in this group (respecting the active search
-// filter — "what you see is what gets cleared"). Destructive and irreversible, so it requires
-// BOTH the admin passcode (same one that gates price/par edits — skipped if already unlocked
-// this session) AND typing DELETE, rather than a plain OK/Cancel confirm.
+// Moves every color currently shown in this group (respecting the active search filter — "what
+// you see is what gets cleared") to Recently Deleted. Both this and the button that triggers it
+// are admin-only now (see invRenderColorsList) — it also requires typing DELETE, rather than a
+// plain OK/Cancel confirm, since it affects a whole section at once.
 function invClearGroup(key) {
-  if (!invAdminUnlocked) {
-    const entered = prompt('Enter the admin passcode to delete a whole group:');
-    if (entered === null) return;
-    if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode — nothing deleted.'); return; }
-  }
+  if (!invAdminUnlocked) { alert('Unlock admin first.'); return; }
 
   const upcomingMap = invComputeUpcoming();
   const items = invFilteredSortedItems();
@@ -6932,6 +6928,33 @@ function invClearGroup(key) {
   INVENTORY_ITEMS = INVENTORY_ITEMS.filter(i => !ids.has(i.id));
   INVENTORY_ITEMS_TRASHED = INVENTORY_ITEMS_TRASHED.concat(group.items);
   invRenderLatex();
+}
+// The other half of the "Clear All" ambiguity this replaced — this one resets THE COUNT (every
+// size's backstock to 0, Open Bin to Empty) for every color currently shown in this group,
+// without touching the colors/catalog themselves. For starting a fresh count period. Admin-only
+// like invClearGroup, and still requires typing RESET since a reset count has no Recently
+// Deleted to fall back on — the old numbers are simply gone once this runs.
+function invResetCounts(key) {
+  if (!invAdminUnlocked) { alert('Unlock admin first.'); return; }
+
+  const upcomingMap = invComputeUpcoming();
+  const items = invFilteredSortedItems();
+  const groups = invGroupedItems(items, upcomingMap);
+  const group = groups.find(g => g.key === key);
+  if (!group || group.items.length === 0) return;
+
+  const typed = prompt(`This resets backstock to 0 and Open Bin to Empty, for every size, on all ${group.items.length} color(s) in "${group.label}". The colors themselves aren't touched — just the counts, and there's no undo for this one.\n\nType RESET to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'RESET') { alert('Not reset — you must type RESET exactly.'); return; }
+
+  group.items.forEach(item => {
+    INV_SIZES.forEach(size => {
+      item.sizes[size].backstock = 0;
+      item.sizes[size].openStatus = 'Empty';
+    });
+    invSaveItem(item);
+  });
+  invRenderColorsList();
 }
 
 function invToggleExpand(itemId) {
@@ -7525,7 +7548,8 @@ function invRenderColorsList() {
       html += `<div class="inv-group-header" onclick="invToggleGroup('${g.key}')">
         <span>${psEscape(g.label)} (${g.items.length})</span>
         <span style="display:flex; align-items:center; gap:10px;">
-          <button class="icon-btn" style="padding:2px 8px; font-size:10px; text-transform:none; letter-spacing:normal; color:var(--text-secondary);" onclick="event.stopPropagation(); invClearGroup('${g.key}')" title="Deletes every color in this section — not a count reset"><i class="fa-solid fa-trash" style="font-size:9px;"></i> Delete colors</button>
+          ${invAdminUnlocked ? `<button class="icon-btn" style="padding:2px 8px; font-size:10px; text-transform:none; letter-spacing:normal; color:var(--text-secondary);" onclick="event.stopPropagation(); invResetCounts('${g.key}')" title="Resets backstock to 0 and Open Bin to Empty for this section — keeps the colors"><i class="fa-solid fa-rotate-left" style="font-size:9px;"></i> Reset counts</button>` : ''}
+          ${invAdminUnlocked ? `<button class="icon-btn" style="padding:2px 8px; font-size:10px; text-transform:none; letter-spacing:normal; color:var(--text-secondary);" onclick="event.stopPropagation(); invClearGroup('${g.key}')" title="Deletes every color in this section — not a count reset"><i class="fa-solid fa-trash" style="font-size:9px;"></i> Delete colors</button>` : ''}
           <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
         </span>
       </div>`;
