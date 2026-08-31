@@ -6898,6 +6898,224 @@ function impRender() {
   root.innerHTML = html;
 }
 
+// ── Bulk CSV export/import for Cost per Bag & Balloons per Bag (Inventory Settings) ──────────
+// Deliberately its own small, self-contained flow rather than reusing the generic bulk-import
+// wizard above (impState/impOpen) — that one is built around a create-or-update-existing model
+// for adding new colors, but this tool must NEVER create a color or item, only ever correct
+// costPerBag/perBag on item+size combos that already exist. Matching is strictly by itemId+size
+// (never by name), nothing is written until an explicit confirm after preview, and it touches
+// only the two catalog fields — never backstock, so it stays completely out of the ledger.
+let invCsvImport = null; // { step: 'input'|'preview'|'results', rawText, rows, results } | null
+
+function invCsvCell(v) {
+  const s = String(v == null ? '' : v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+// Only currently-stocked sizes on active colors — a placeholder slot nobody's ever priced isn't
+// something this spreadsheet needs to carry, matching invIsStocked's baseline-count filter.
+function invExportInventoryCsv() {
+  const lines = [['itemId', 'size', 'brand', 'color', 'costPerBag', 'perBag']];
+  INVENTORY_ITEMS.filter(i => i.active !== false).forEach(item => {
+    INV_SIZES.forEach(size => {
+      const sd = item.sizes[size];
+      if (!invIsStocked(sd)) return;
+      lines.push([item.id, size, item.brand || '', item.color || '', sd.price || 0, sd.perBag || '']);
+    });
+  });
+  const csv = lines.map(row => row.map(invCsvCell).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `inventory-setup-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function invCsvOpenImport() {
+  invCsvImport = { step: 'input', rawText: '', rows: [], results: null };
+  invCsvRenderImport();
+}
+function invCsvCloseImport() {
+  invCsvImport = null;
+  const root = document.getElementById('inv-csv-import-root');
+  if (root) root.innerHTML = '';
+}
+function invCsvSetRawText(value) {
+  if (!invCsvImport) return;
+  invCsvImport.rawText = value;
+}
+function invCsvHandleFileUpload(input) {
+  const file = input.files && input.files[0];
+  if (!file || !invCsvImport) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    invCsvImport.rawText = String(reader.result || '');
+    const textarea = document.getElementById('inv-csv-paste-area');
+    if (textarea) textarea.value = invCsvImport.rawText;
+  };
+  reader.readAsText(file);
+}
+// Matched by header name, not position — this only ever needs to recognize the exact columns its
+// own export produced (plus a couple of tolerant aliases), so there's no column-mapping step to
+// walk through the way the generic wizard has; an unrecognized header is simply ignored.
+function invCsvHeaderIndex(headers, ...names) {
+  const normalized = headers.map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  for (const name of names) {
+    const idx = normalized.indexOf(name);
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+function invCsvProceedToPreview() {
+  if (!invCsvImport) return;
+  const text = invCsvImport.rawText.trim();
+  if (!text) { alert('Paste some rows or upload a CSV first.'); return; }
+  const delimiter = impDetectDelimiter(text);
+  const table = impParseDelimited(text, delimiter);
+  if (table.length < 2) { alert('Need a header row plus at least one data row.'); return; }
+  const headers = table[0].map(h => h.trim());
+  const dataRows = table.slice(1);
+  const idIdx = invCsvHeaderIndex(headers, 'itemid', 'id');
+  const sizeIdx = invCsvHeaderIndex(headers, 'size');
+  const costIdx = invCsvHeaderIndex(headers, 'costperbag', 'price', 'pricebag');
+  const perBagIdx = invCsvHeaderIndex(headers, 'perbag', 'balloonsperbag');
+  if (idIdx === -1 || sizeIdx === -1) { alert('Couldn\'t find "itemId" and "size" columns — use the file from Export Inventory Setup CSV.'); return; }
+  if (costIdx === -1 && perBagIdx === -1) { alert('Couldn\'t find a "costPerBag" or "perBag" column to import.'); return; }
+
+  invCsvImport.rows = dataRows.map(row => {
+    const itemId = (row[idIdx] || '').trim();
+    const sizeLabel = (row[sizeIdx] || '').trim();
+    const costRaw = costIdx >= 0 ? (row[costIdx] || '').trim() : '';
+    const perBagRaw = perBagIdx >= 0 ? (row[perBagIdx] || '').trim() : '';
+    const base = { itemId, size: sizeLabel, costRaw, perBagRaw };
+
+    if (!INV_SIZES.includes(sizeLabel)) return Object.assign(base, { status: 'error', reason: `Unrecognized size "${sizeLabel}"` });
+    const item = invFindItem(itemId);
+    if (!item) return Object.assign(base, { status: 'unmatched', reason: 'itemId not found — may have been deleted' });
+    const sd = item.sizes[sizeLabel];
+
+    let newCost = sd.price, newPerBag = sd.perBag;
+    if (costRaw !== '') {
+      const n = Number(costRaw);
+      if (!Number.isFinite(n) || n < 0) return Object.assign(base, { status: 'error', reason: `Invalid Cost per Bag "${costRaw}"` });
+      newCost = n;
+    }
+    if (perBagRaw !== '') {
+      const n = Number(perBagRaw);
+      if (!Number.isFinite(n) || n <= 0) return Object.assign(base, { status: 'error', reason: `Invalid Balloons per Bag "${perBagRaw}"` });
+      newPerBag = n;
+    }
+    const changed = Math.abs((newCost || 0) - (sd.price || 0)) > 0.001 || (newPerBag || 0) !== (sd.perBag || 0);
+    return Object.assign(base, {
+      status: changed ? 'changed' : 'unchanged',
+      reason: null,
+      itemLabel: `${item.color} (${item.brand || 'no brand'})`,
+      oldCost: sd.price, newCost,
+      oldPerBag: sd.perBag, newPerBag,
+    });
+  });
+  invCsvImport.step = 'preview';
+  invCsvRenderImport();
+}
+// A Firestore writeBatch caps at 500 operations, and every touched item here is exactly one
+// write — a bulk-priced catalog (many colors × many sizes each) could plausibly cross that in a
+// single import, so touched items are committed in safe-sized chunks rather than one batch.
+const INV_CSV_ITEMS_PER_CHUNK = 450;
+async function invCsvCommit() {
+  if (!invCsvImport) return;
+  const btn = document.getElementById('inv-csv-commit-btn');
+  const changedRows = invCsvImport.rows.filter(r => r.status === 'changed');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...'; }
+  const touchedItems = new Map();
+  changedRows.forEach(r => {
+    const item = invFindItem(r.itemId);
+    if (!item) return;
+    item.sizes[r.size].price = r.newCost;
+    item.sizes[r.size].perBag = r.newPerBag;
+    touchedItems.set(item.id, item);
+  });
+  const items = Array.from(touchedItems.values());
+  try {
+    for (let i = 0; i < items.length; i += INV_CSV_ITEMS_PER_CHUNK) {
+      const chunk = items.slice(i, i + INV_CSV_ITEMS_PER_CHUNK);
+      await window.fbBatchSaveInventoryItems(chunk);
+    }
+    invCsvImport.results = { updated: changedRows.length, items: items.length };
+    invCsvImport.step = 'results';
+    invCsvRenderImport();
+    invRenderColorsList();
+  } catch (err) {
+    console.error('Inventory CSV import failed:', err);
+    alert(err.message || "Couldn't save those changes — check your connection and try again.");
+    if (btn) { btn.disabled = false; btn.innerHTML = `Apply ${changedRows.length} change${changedRows.length === 1 ? '' : 's'}`; }
+  }
+}
+function invCsvRenderImport() {
+  const root = document.getElementById('inv-csv-import-root');
+  if (!root) return;
+  if (!invCsvImport) { root.innerHTML = ''; return; }
+  const s = invCsvImport;
+  let html = `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Import Inventory Setup CSV</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invCsvCloseImport()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>`;
+
+  if (s.step === 'input') {
+    html += `<div class="settings-field" style="margin-bottom:0.6rem;">
+        <label>Upload the edited CSV</label>
+        <input type="file" accept=".csv,text/csv,text/plain" onchange="invCsvHandleFileUpload(this)">
+      </div>
+      <div style="font-size:11px; color:var(--text-secondary); margin:0.3rem 0;">— or paste it directly —</div>
+      <textarea id="inv-csv-paste-area" rows="8" placeholder="Paste the exported CSV here after editing..." style="width:100%; font-family:monospace; font-size:12px; padding:8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--bg); color:var(--text);" oninput="invCsvSetRawText(this.value)"></textarea>
+      <button class="save-btn" style="margin-top:0.6rem;" onclick="invCsvProceedToPreview()">Preview changes</button>`;
+  } else if (s.step === 'preview') {
+    const changed = s.rows.filter(r => r.status === 'changed').length;
+    const unchanged = s.rows.filter(r => r.status === 'unchanged').length;
+    const unmatched = s.rows.filter(r => r.status === 'unmatched').length;
+    const errored = s.rows.filter(r => r.status === 'error').length;
+    html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">${changed} changed, ${unchanged} unchanged, ${unmatched} unmatched, ${errored} invalid. Only the ${changed} changed row${changed === 1 ? '' : 's'} will be applied — nothing else is touched, and no colors or sizes are ever created.</div>`;
+    html += `<div style="max-height:360px; overflow:auto; border:0.5px solid var(--border); border-radius:var(--radius-sm);">
+      <table style="width:100%; border-collapse:collapse; font-size:12px;">
+        <thead><tr style="position:sticky; top:0; background:var(--bg);">
+          <th style="text-align:left; padding:6px 8px;">Item</th>
+          <th style="text-align:left; padding:6px 8px;">Size</th>
+          <th style="text-align:left; padding:6px 8px;">Cost/Bag</th>
+          <th style="text-align:left; padding:6px 8px;">Balloons/Bag</th>
+          <th style="text-align:left; padding:6px 8px;">Status</th>
+        </tr></thead><tbody>`;
+    s.rows.forEach(r => {
+      const itemCell = psEscape(r.itemLabel || r.itemId);
+      let costCell, perBagCell, statusCell;
+      if (r.status === 'error' || r.status === 'unmatched') {
+        costCell = `<td style="padding:5px 8px;">${psEscape(r.costRaw)}</td>`;
+        perBagCell = `<td style="padding:5px 8px;">${psEscape(r.perBagRaw)}</td>`;
+        statusCell = `<td style="padding:5px 8px; color:${r.status === 'error' ? '#c0392b' : 'var(--text-tertiary)'};">${psEscape(r.reason)}</td>`;
+      } else {
+        costCell = `<td style="padding:5px 8px;">${r.oldCost !== r.newCost ? `${r.oldCost} → <strong>${r.newCost}</strong>` : r.oldCost}</td>`;
+        perBagCell = `<td style="padding:5px 8px;">${r.oldPerBag !== r.newPerBag ? `${r.oldPerBag} → <strong>${r.newPerBag}</strong>` : r.oldPerBag}</td>`;
+        statusCell = r.status === 'changed'
+          ? `<td style="padding:5px 8px; color:var(--accent); font-weight:600;">Changed</td>`
+          : `<td style="padding:5px 8px; color:var(--text-tertiary);">Unchanged</td>`;
+      }
+      html += `<tr style="border-top:0.5px solid var(--border);"><td style="padding:5px 8px;">${itemCell}</td><td style="padding:5px 8px;">${psEscape(r.size)}</td>${costCell}${perBagCell}${statusCell}</tr>`;
+    });
+    html += `</tbody></table></div>`;
+    html += `<div style="display:flex; gap:8px; margin-top:0.6rem;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="invCsvImport.step='input'; invCsvRenderImport();"><i class="fa-solid fa-arrow-left"></i> Back</button>
+      <button class="save-btn" id="inv-csv-commit-btn" style="flex:1;" ${changed === 0 ? 'disabled' : ''} onclick="invCsvCommit()">Apply ${changed} change${changed === 1 ? '' : 's'}</button>
+    </div>`;
+  } else if (s.step === 'results') {
+    html += `<div style="font-size:13px;"><i class="fa-solid fa-circle-check" style="color:var(--accent);"></i> ${s.results.updated} size${s.results.updated === 1 ? '' : 's'} updated across ${s.results.items} color${s.results.items === 1 ? '' : 's'}.</div>
+    <button class="save-btn" style="margin-top:0.8rem;" onclick="invCsvCloseImport()">Done</button>`;
+  }
+  html += `</div>`;
+  root.innerHTML = html;
+}
+
 // perBag defaults to 100 (a common count for standard round latex) — it varies by brand and
 // size in reality, so it's editable per size just like price; existing seed data doesn't have
 // a real value from the spreadsheet, so it starts at the same default until corrected.
@@ -7947,7 +8165,16 @@ function invRenderSettingsSection() {
       <button class="trip-btn ${invTrackingUnit === 'bags' ? 'active' : ''}" onclick="invSetTrackingUnit('bags')">Bags</button>
       <button class="trip-btn ${invTrackingUnit === 'balloons' ? 'active' : ''}" onclick="invSetTrackingUnit('balloons')">Individual Balloons</button>
     </div>
+  </div>
+  <div class="card" style="margin-top:0.75rem;">
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">Bulk-update Cost per Bag and Balloons per Bag from a spreadsheet instead of editing each color one at a time. Export, edit the two number columns, then import — matched strictly by item and size, so nothing new ever gets created here.</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="invExportInventoryCsv()"><i class="fa-solid fa-file-arrow-down"></i> Export Inventory Setup CSV</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="invCsvOpenImport()"><i class="fa-solid fa-file-arrow-up"></i> Import Inventory Setup CSV</button>
+    </div>
+    <div id="inv-csv-import-root"></div>
   </div>`;
+  if (invCsvImport) invCsvRenderImport();
 }
 function clRenderSettingsSection() {
   const root = document.getElementById('cl-settings-root');
