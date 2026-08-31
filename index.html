@@ -992,6 +992,15 @@
   window.fbSaveSpecialtyLatexItem = (item) => setDoc(doc(specialtyLatexItemsRef, item.id), item);
   window.fbDeleteSpecialtyLatexItem = (id) => deleteDoc(doc(specialtyLatexItemsRef, id));
 
+  // Foil (Letters & Numbers now; Decorator Shapes/Themed later) — its own collection, same
+  // reasoning as Specialty Latex: nothing here should be able to affect Standard or Specialty
+  // Latex. Letters & Numbers records are grouped (one doc per size+color+brand, holding a
+  // per-character quantities map) rather than one doc per character — see foilBlankQuantities.
+  const foilItemsRef = collection(db, 'businesses', BUSINESS_ID, 'foilItems');
+  window.fbOnSnapshotFoilItems = (onNext, onError) => onSnapshot(foilItemsRef, onNext, onError);
+  window.fbSaveFoilItem = (item) => setDoc(doc(foilItemsRef, item.id), item);
+  window.fbDeleteFoilItem = (id) => deleteDoc(doc(foilItemsRef, id));
+
   // The audit trail every inventory quantity change writes to — see invApplyInventoryTransactions.
   // Read-only from the classic script's point of view except through that one function; exposing
   // runTransaction + the two doc-ref builders lets the business logic (delta math, INITIAL_COUNT
@@ -1414,7 +1423,7 @@
         <div class="tool-tile-icon"><i class="fa-solid fa-circle"></i></div>
         <div class="tool-tile-title">Latex</div>
       </div>
-      <div class="tool-tile soon">
+      <div class="tool-tile" onclick="showView('inventory-foil')">
         <div class="tool-tile-icon"><i class="fa-solid fa-ghost"></i></div>
         <div class="tool-tile-title">Foil</div>
       </div>
@@ -1424,6 +1433,14 @@
       </div>
     </div>
   </div><!-- end view-inventory -->
+
+  <!-- ═══════════════════════════════════════ FOIL INVENTORY VIEW -->
+  <!-- A top-level Inventory category, sibling to Latex (not nested under it). Letters & Numbers
+       is the only live section for now; Decorator Shapes/Themed Foils show as "coming soon"
+       inside the screen itself — see foilRenderScreen. Built entirely in JS from FOIL_ITEMS. -->
+  <div class="view" id="view-inventory-foil">
+    <div id="inv-foil-root"></div>
+  </div><!-- end view-inventory-foil -->
 
   <!-- ═══════════════════════════════════════ LATEX CATEGORY PICKER -->
   <!-- Sits between the Inventory category picker and the two actual Latex screens — Standard
@@ -1942,6 +1959,7 @@ const TOOL_META = {
   'inventory-latex-choice': { title: 'Latex Inventory', icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
   'inventory-latex': { title: 'Standard Latex',         icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
   'inventory-specialty': { title: 'Specialty Latex',    icon: 'fa-solid fa-shapes',              showBack: true,  showGear: true  },
+  'inventory-foil': { title: 'Foil Inventory',          icon: 'fa-solid fa-ghost',               showBack: true,  showGear: true  },
   letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: true  },
   jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: true  },
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: true  },
@@ -9085,6 +9103,348 @@ function spRenderScreen() {
   spRenderResults();
 }
 
+// ═══════════════════════════════════════ FOIL INVENTORY (Letters & Numbers now; Decorator Shapes / Themed later) ═══════════════════════════════════════
+//
+// A top-level Inventory category, sibling to Latex — not nested under it. Its own Firestore
+// collection/array (FOIL_ITEMS), completely independent of INVENTORY_ITEMS and SPECIALTY_ITEMS,
+// so nothing here can affect either. Letters & Numbers is a GROUPED record — one doc per
+// size+color+brand combination holding a per-character quantities map — rather than one doc per
+// character, matching the exact pattern Standard Latex already uses (one item, a nested map keyed
+// by a sub-identifier: size there, character here). Decorator Shapes and Themed Foils will be
+// flat single-quantity records instead (like Specialty Latex), sharing this same collection via
+// the `category` discriminator, but are not built yet — their tabs are inert placeholders.
+// Quantity edits are plain saves for now, exactly like Specialty Latex Phase 1 — no ledger yet.
+let FOIL_ITEMS = [];
+let FOIL_ITEMS_TRASHED = [];
+const FOIL_CATEGORIES = [
+  { id: 'lettersNumbers', label: 'Letters & Numbers', soon: false },
+  { id: 'decoratorShapes', label: 'Decorator Shapes', soon: true },
+  { id: 'themed', label: 'Themed Foils', soon: true },
+];
+const FOIL_CHARACTERS = { letters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''), numbers: '0123456789'.split('') };
+let foilCategoryTab = 'lettersNumbers';
+let foilCharTypeTab = 'letters';
+let foilSearchQuery = '';
+let foilExpandedItem = null;
+let foilAddOpen = false;
+let foilAddDraft = null;
+
+function foilStartListeners() {
+  foilRenderScreen(); // shell first, same pattern as invStartListeners/spStartListeners
+  window.fbOnSnapshotFoilItems(
+    (snapshot) => {
+      const all = snapshot.docs.map(d => d.data());
+      FOIL_ITEMS = all.filter(i => !i.deletedAt);
+      FOIL_ITEMS_TRASHED = all.filter(i => i.deletedAt);
+      foilRenderScreen();
+    },
+    (err) => console.error('Foil items sync error:', err)
+  );
+}
+function psNewFoilItemId() { return 'foilitem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+function foilFindItem(id) { return FOIL_ITEMS.find(i => i.id === id) || FOIL_ITEMS_TRASHED.find(i => i.id === id); }
+function foilSaveItem(item) {
+  window.fbSaveFoilItem(item).catch(err => {
+    console.error(err);
+    alert("Couldn't save that change — check your connection and try again.");
+  });
+}
+function foilBlankQuantities(charType) {
+  const q = {};
+  FOIL_CHARACTERS[charType].forEach(c => { q[c] = 0; });
+  return q;
+}
+
+// No master foil-brand catalog and no hardcoded "universal" size list (per the approved
+// architecture) — both Size and Brand grow organically from whatever's already been entered,
+// always with Custom/free-text available so an unusual product is never blocked. Brand still
+// gets Generic/Unknown and Other, matching Specialty Latex's exact pattern.
+function foilKnownSizes() {
+  return [...new Set(FOIL_ITEMS.filter(i => i.category === 'lettersNumbers').map(i => i.size).filter(Boolean))].sort();
+}
+function foilKnownColors() {
+  return [...new Set(FOIL_ITEMS.map(i => i.color).filter(Boolean))].sort();
+}
+function foilKnownBrands() {
+  return [...new Set(FOIL_ITEMS.map(i => i.brand).filter(b => b && b !== 'Generic/Unknown'))].sort();
+}
+function foilBrandOptions() {
+  return [...foilKnownBrands(), 'Generic/Unknown', 'Other'];
+}
+
+function foilSetCategoryTab(cat) {
+  const c = FOIL_CATEGORIES.find(x => x.id === cat);
+  if (c && c.soon) { alert(`${c.label} is coming in a later phase.`); return; }
+  foilCategoryTab = cat;
+  foilExpandedItem = null;
+  foilRenderScreen();
+}
+function foilSetCharTypeTab(charType) {
+  foilCharTypeTab = charType;
+  foilExpandedItem = null;
+  foilRenderScreen();
+}
+function foilSetSearch(q) { foilSearchQuery = q; foilRenderResults(); }
+function foilToggleExpand(id) { foilExpandedItem = foilExpandedItem === id ? null : id; foilRenderResults(); }
+
+function foilFilteredGroups() {
+  const q = foilSearchQuery.trim().toLowerCase();
+  const items = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === foilCharTypeTab)
+    .sort((a, b) => (a.size || '').localeCompare(b.size || '') || (a.color || '').localeCompare(b.color || ''));
+  if (!q) return items;
+  return items.filter(i => [i.size, i.color, i.brand].some(f => (f || '').toLowerCase().includes(q)));
+}
+// Matched by charType+size+color+brand (case/whitespace-insensitive) — the same real-world thing
+// shouldn't get a second competing record just because someone re-typed it slightly differently.
+function foilFindDuplicateGroup(charType, size, color, brand) {
+  const norm = s => (s || '').trim().toLowerCase();
+  return FOIL_ITEMS.find(i => i.category === 'lettersNumbers' && i.charType === charType &&
+    norm(i.size) === norm(size) && norm(i.color) === norm(color) && norm(i.brand) === norm(brand));
+}
+
+function foilOpenAdd() {
+  foilAddOpen = true;
+  foilAddDraft = { charType: foilCharTypeTab, size: '', color: '', brand: '', brandOther: '', costPerFoil: '', storageLocation: '' };
+  foilRenderScreen();
+}
+function foilCancelAdd() { foilAddOpen = false; foilAddDraft = null; foilRenderScreen(); }
+function foilSetDraftField(field, value) {
+  if (!foilAddDraft) return;
+  foilAddDraft[field] = value;
+  if (field === 'charType') foilRenderScreen(); // form title/character count depends on this
+}
+function foilSubmitAdd() {
+  if (!foilAddDraft) return;
+  const d = foilAddDraft;
+  const size = (d.size || '').trim();
+  const color = (d.color || '').trim();
+  if (!size) { alert('Enter a size.'); return; }
+  if (!color) { alert('Enter a color.'); return; }
+  if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
+  const brand = d.brand === 'Other' ? (d.brandOther || '').trim() : d.brand;
+  if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
+
+  const dup = foilFindDuplicateGroup(d.charType, size, color, brand);
+  if (dup) {
+    alert(`"${size} ${color} ${d.charType === 'letters' ? 'Letters' : 'Numbers'}" already exists — opening it instead of creating another.`);
+    foilAddOpen = false;
+    foilAddDraft = null;
+    foilCharTypeTab = d.charType;
+    foilExpandedItem = dup.id;
+    foilRenderScreen();
+    return;
+  }
+
+  const item = {
+    id: psNewFoilItemId(),
+    category: 'lettersNumbers',
+    charType: d.charType,
+    size, color, brand,
+    costPerFoil: d.costPerFoil === '' ? null : (parseFloat(d.costPerFoil) || 0),
+    storageLocation: (d.storageLocation || '').trim(),
+    quantities: foilBlankQuantities(d.charType),
+    active: true,
+  };
+  FOIL_ITEMS.push(item);
+  foilSaveItem(item);
+  foilAddOpen = false;
+  foilAddDraft = null;
+  foilCharTypeTab = d.charType;
+  foilExpandedItem = item.id;
+  foilRenderScreen();
+}
+// Plain saves for now, matching Specialty Latex Phase 1 — no ledger involved yet.
+function foilUpdateField(itemId, field, value) {
+  const item = foilFindItem(itemId);
+  if (!item) return;
+  item[field] = field === 'costPerFoil' ? (value === '' ? null : (parseFloat(value) || 0)) : value;
+  foilSaveItem(item);
+}
+function foilUpdateQuantity(itemId, character, value) {
+  const item = foilFindItem(itemId);
+  if (!item) return;
+  item.quantities[character] = parseFloat(value) || 0;
+  foilSaveItem(item);
+}
+// Delete/restore/permanent-delete mirrors invDeleteColor/invRestoreItem/invPermanentlyDeleteItem
+// exactly — soft delete by default (deletedAt + move to a trashed array), always recoverable from
+// Recently Deleted, with a typed-confirmation permanent option as the one true dead end.
+function foilDeleteItem(itemId) {
+  const item = foilFindItem(itemId);
+  if (!item) return;
+  const label = `${item.size} ${item.color} ${item.charType === 'letters' ? 'Letters' : 'Numbers'}`;
+  if (!confirm(`Move "${label}" to Recently Deleted? You can restore it from there anytime.`)) return;
+  if (foilExpandedItem === itemId) foilExpandedItem = null;
+  item.deletedAt = Date.now();
+  foilSaveItem(item);
+  FOIL_ITEMS = FOIL_ITEMS.filter(i => i.id !== itemId);
+  FOIL_ITEMS_TRASHED = FOIL_ITEMS_TRASHED.concat([item]);
+  foilRenderScreen();
+}
+function foilRestoreItem(itemId) {
+  const item = FOIL_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  delete item.deletedAt;
+  foilSaveItem(item);
+  FOIL_ITEMS_TRASHED = FOIL_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  FOIL_ITEMS = FOIL_ITEMS.concat([item]);
+  foilRenderScreen();
+}
+function foilPermanentlyDeleteItem(itemId) {
+  const item = FOIL_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  const typed = prompt(`This permanently erases this item — even Recently Deleted won't have it anymore. This truly can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not deleted — you must type DELETE exactly.'); return; }
+  window.fbDeleteFoilItem(itemId).catch(err => console.error('Permanent delete failed:', err));
+  FOIL_ITEMS_TRASHED = FOIL_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  foilRenderScreen();
+}
+
+function foilGroupTotal(item) {
+  return FOIL_CHARACTERS[item.charType].reduce((sum, c) => sum + (item.quantities[c] || 0), 0);
+}
+
+function foilAddFormHtml() {
+  const d = foilAddDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Add ${d.charType === 'letters' ? 'Letters' : 'Numbers'} group</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field"><label>Letters or Numbers</label>
+      <select onchange="foilSetDraftField('charType', this.value)">
+        <option value="letters" ${d.charType === 'letters' ? 'selected' : ''}>Letters (A-Z)</option>
+        <option value="numbers" ${d.charType === 'numbers' ? 'selected' : ''}>Numbers (0-9)</option>
+      </select>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Size</label>
+        <input type="text" list="foil-size-suggestions" placeholder="e.g. 34&quot;" value="${invAttr(d.size)}" oninput="foilSetDraftField('size', this.value)">
+        <datalist id="foil-size-suggestions">${foilKnownSizes().map(s => `<option value="${invAttr(s)}">`).join('')}</datalist>
+      </div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Color</label>
+        <input type="text" list="foil-color-suggestions" placeholder="e.g. Silver" value="${invAttr(d.color)}" oninput="foilSetDraftField('color', this.value)">
+        <datalist id="foil-color-suggestions">${foilKnownColors().map(c => `<option value="${invAttr(c)}">`).join('')}</datalist>
+      </div>
+    </div>
+    <div class="settings-field">
+      <label>Brand</label>
+      <select onchange="foilSetDraftField('brand', this.value)">
+        <option value="" ${d.brand === '' ? 'selected' : ''}>— select —</option>
+        ${foilBrandOptions().map(b => `<option value="${invAttr(b)}" ${b === d.brand ? 'selected' : ''}>${psEscape(b)}</option>`).join('')}
+      </select>
+      ${d.brand === 'Other' ? `<input type="text" style="margin-top:6px;" placeholder="Brand name" value="${invAttr(d.brandOther)}" oninput="foilSetDraftField('brandOther', this.value)">` : ''}
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Cost per foil <span style="font-weight:400;">(optional)</span></label><input type="number" step="0.01" min="0" placeholder="e.g. 2.50" value="${invAttr(d.costPerFoil)}" oninput="foilSetDraftField('costPerFoil', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location <span style="font-weight:400;">(optional)</span></label><input type="text" placeholder="e.g. Shelf 3" value="${invAttr(d.storageLocation)}" oninput="foilSetDraftField('storageLocation', this.value)"></div>
+    </div>
+    <button class="save-btn" onclick="foilSubmitAdd()">Create group</button>
+  </div>`;
+}
+
+// The dense character grid is the whole point — a physical count means typing ~26 (or 10) numbers
+// in a row, not opening 26 separate rows. auto-fill/minmax lets it reflow from a couple of wide
+// columns on mobile to many narrow ones on desktop without two separate layouts to maintain.
+function foilItemCardHtml(item) {
+  const expanded = foilExpandedItem === item.id;
+  const chars = FOIL_CHARACTERS[item.charType];
+  const total = foilGroupTotal(item);
+  let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
+  html += `<div class="inv-color-row-header" onclick="foilToggleExpand('${item.id}')">
+    <div class="inv-color-row-text">
+      <div class="inv-color-row-name">${psEscape(item.size)} ${psEscape(item.color)}</div>
+      <div class="inv-color-row-brand">${psEscape(item.brand || 'Generic/Unknown')}</div>
+    </div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${total === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${total === 0 ? 'var(--accent)' : 'var(--info-text)'};">${total}</div>
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+  </div>`;
+  if (expanded) {
+    html += `<div class="ps-job-body">`;
+    html += `<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(52px, 1fr)); gap:6px; margin-bottom:0.75rem;">
+      ${chars.map(c => `<div style="text-align:center;">
+        <div style="font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:2px;">${psEscape(c)}</div>
+        <input type="number" min="0" value="${item.quantities[c] || 0}" style="width:100%; text-align:center; padding:6px 2px; font-size:14px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);" onchange="foilUpdateQuantity('${item.id}','${invAttr(c)}', this.value)">
+      </div>`).join('')}
+    </div>`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Cost per foil</label><input type="number" step="0.01" min="0" value="${item.costPerFoil == null ? '' : item.costPerFoil}" placeholder="optional" onchange="foilUpdateField('${item.id}','costPerFoil',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdateField('${item.id}','storageLocation',this.value)"></div>
+    </div>`;
+    html += `<div style="display:flex; justify-content:flex-end;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+    </div>`;
+    html += `</div>`; // ps-job-body
+  }
+  html += `</div>`; // inv-color-row
+  return html;
+}
+
+function foilRenderResults() {
+  const root = document.getElementById('foil-ln-results-root');
+  if (!root) return;
+  const items = foilFilteredGroups();
+  root.innerHTML = items.length === 0
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${foilCharTypeTab === 'letters' ? 'letter' : 'number'} groups yet.</div>`
+    : `<div class="inv-color-list">` + items.map(foilItemCardHtml).join('') + `</div>`;
+}
+
+function foilRenderLettersNumbers() {
+  let html = `<div class="card">
+    <div class="trip-toggle" style="margin:0 0 0.6rem;">
+      <button class="trip-btn ${foilCharTypeTab === 'letters' ? 'active' : ''}" onclick="foilSetCharTypeTab('letters')">Letters</button>
+      <button class="trip-btn ${foilCharTypeTab === 'numbers' ? 'active' : ''}" onclick="foilSetCharTypeTab('numbers')">Numbers</button>
+    </div>
+    <div class="settings-field" style="margin-bottom:0.6rem;">
+      <input type="text" placeholder="Search size, color, brand..." value="${invAttr(foilSearchQuery)}" oninput="foilSetSearch(this.value)">
+    </div>
+    <button class="save-btn" onclick="foilOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${foilCharTypeTab === 'letters' ? 'Letters' : 'Numbers'} group</button>
+  </div>`;
+  if (foilAddOpen) html += foilAddFormHtml();
+  html += `<div id="foil-ln-results-root"></div>`;
+
+  // Same reversible-delete safety net as Standard Latex's Recently Deleted — hidden entirely
+  // when empty so it never clutters a routine count.
+  const trashed = FOIL_ITEMS_TRASHED.filter(i => i.category === 'lettersNumbers');
+  if (trashed.length > 0) {
+    html += `<div class="section-label">Recently deleted (${trashed.length})</div>
+    <div class="card">
+      ${trashed.map(item => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:600;">${psEscape(item.size)} ${psEscape(item.color)}</div>
+            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'Generic/Unknown')} · ${item.charType === 'letters' ? 'Letters' : 'Numbers'}</div>
+          </div>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilRestoreItem('${item.id}')">Restore</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="foilPermanentlyDeleteItem('${item.id}')">Delete forever</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
+  return html;
+}
+
+function foilRenderScreen() {
+  const root = document.getElementById('inv-foil-root');
+  if (!root) return;
+  let html = `<div class="card">
+    <div class="trip-toggle" style="margin:0;">
+      ${FOIL_CATEGORIES.map(c => `<button class="trip-btn ${foilCategoryTab === c.id ? 'active' : ''}" style="${c.soon ? 'opacity:0.5;' : ''}" onclick="foilSetCategoryTab('${c.id}')">${psEscape(c.label)}${c.soon ? ' (soon)' : ''}</button>`).join('')}
+    </div>
+  </div>`;
+  if (foilCategoryTab === 'lettersNumbers') {
+    html += foilRenderLettersNumbers();
+  } else {
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">${psEscape((FOIL_CATEGORIES.find(c => c.id === foilCategoryTab) || {}).label || '')} is coming in a later phase.</div>`;
+  }
+  root.innerHTML = html;
+  if (foilCategoryTab === 'lettersNumbers') foilRenderResults();
+}
+
 // ═══════════════════════════════════════ LETTER STYLING CALCULATOR VIEW ═══════════════════════════════════════
 //
 // Formulas reverse-engineered from the real Master Calculators spreadsheet, verified against
@@ -10715,6 +11075,9 @@ function goBack() {
   if (inLatexInventory) { showView('inventory-latex-choice'); return; }
   const inSpecialtyInventory = document.getElementById('view-inventory-specialty').classList.contains('active');
   if (inSpecialtyInventory) { showView('inventory-latex-choice'); return; }
+  // Foil sits directly under the Inventory category picker, a sibling to Latex — not nested.
+  const inFoilInventory = document.getElementById('view-inventory-foil').classList.contains('active');
+  if (inFoilInventory) { showView('inventory'); return; }
   // Guided Setup only ever launches from Business Setup — the topbar back arrow always returns
   // there (in-flow "Back" between questions is a separate control, handled by gsBack()).
   const inGuidedSetup = document.getElementById('view-guidedSetup').classList.contains('active');
@@ -10824,6 +11187,7 @@ function bootApp() {
   try { clInit(); } catch (e) { console.error('clInit failed:', e); }
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
   try { spStartListeners(); } catch (e) { console.error('Specialty Latex listeners failed to start:', e); }
+  try { foilStartListeners(); } catch (e) { console.error('Foil inventory listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { bsUpdateHomeBanner(); } catch (e) { console.error('bsUpdateHomeBanner failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
