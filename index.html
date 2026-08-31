@@ -7799,7 +7799,7 @@ function invRenderBatchRoot() {
   root.innerHTML = `<div class="card">
     <div style="font-size:15px; font-weight:700; margin-bottom:0.6rem;">${isReceive ? 'Receive Inventory' : 'Pull Inventory'}</div>
     <div class="settings-field" style="margin-bottom:0.4rem;">
-      <input type="text" id="inv-batch-search" placeholder="Search colors or brands..." value="${psEscape(invBatch.search)}" oninput="invBatchSetSearch(this.value)">
+      ${invSearchFieldHtml({ id: 'inv-batch-search', placeholder: 'Search colors or brands...', value: invBatch.search, onInput: 'invBatchSetSearch(this.value)', onClear: "invBatchSetSearch('')" })}
     </div>
     <div id="inv-batch-search-results" style="max-height:220px; overflow-y:auto; margin-bottom:0.6rem;"></div>
     ${invBatch.rows.length ? `<div class="section-label" style="margin:0 0 0.4rem;">Items (${invBatch.rows.length})</div>
@@ -7955,7 +7955,7 @@ function invRenderAdjustRoot() {
   if (!invAdjust.selected) {
     root.innerHTML = `<div class="card">
       <div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">Adjust Inventory</div>
-      <div class="settings-field" style="margin-bottom:0.4rem;"><input type="text" id="inv-adjust-search" placeholder="Search colors or brands..." value="${psEscape(invAdjust.search)}" oninput="invAdjustSetSearch(this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0.4rem;">${invSearchFieldHtml({ id: 'inv-adjust-search', placeholder: 'Search colors or brands...', value: invAdjust.search, onInput: 'invAdjustSetSearch(this.value)', onClear: "invAdjustSetSearch('')" })}</div>
       <div id="inv-adjust-results" style="max-height:220px; overflow-y:auto;"></div>
       <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; margin-top:0.5rem;" onclick="invCloseAdjust()">Cancel</button>
     </div>`;
@@ -8093,6 +8093,31 @@ async function invSubmitPerBagReconcile(itemId, size) {
 // (not for visible text, where a literal quote is harmless).
 function invAttr(str) {
   return String(str == null ? '' : str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Shared search-input markup — every searchable list across Inventory (Standard Latex, Receive/
+// Pull, Adjust, Specialty Latex, Foil) and the Color Library manufacturer picker uses this same
+// shape, so the inline (×) clear control is built once here and reused everywhere rather than
+// each screen inventing its own. `onInput`/`onClear` are just the screen's own existing state-
+// setter call (e.g. `invSetSearch(this.value)` / `invSetSearch('')`) — this only standardizes the
+// shared shape/behavior around it: showing the × the moment there's a query (toggled live on
+// every keystroke via a direct style change, since these inputs deliberately only re-render their
+// results below them, not the input itself, to avoid losing cursor position while typing), and on
+// click, clearing the field's visible value, hiding the ×, and returning focus to the field — all
+// handled once here so no call site has to repeat it.
+function invSearchFieldHtml({ id, placeholder, value, onInput, onClear }) {
+  const clearId = id + '-clear';
+  const hasValue = !!(value && value.length > 0);
+  return `<div style="position:relative;">
+    <input type="text" id="${id}" placeholder="${psEscape(placeholder)}" value="${invAttr(value)}" style="padding-right:32px;"
+      oninput="${onInput}; document.getElementById('${clearId}').style.display = this.value ? 'flex' : 'none';">
+    <button type="button" id="${clearId}" class="icon-btn" aria-label="Clear search" title="Clear search"
+      style="display:${hasValue ? 'flex' : 'none'}; align-items:center; justify-content:center; position:absolute; right:2px; top:50%; transform:translateY(-50%); width:26px; height:26px; padding:0; color:var(--text-secondary); background:transparent; border:none;"
+      onmousedown="event.preventDefault()"
+      onclick="${onClear}; const f=document.getElementById('${id}'); f.value=''; f.focus(); this.style.display='none';">
+      <i class="fa-solid fa-xmark" style="font-size:12px;"></i>
+    </button>
+  </div>`;
 }
 
 function invOpenOrderForm(itemId, size) {
@@ -8353,7 +8378,7 @@ function invRenderLatex() {
         <button class="trip-btn ${invTierTab === 'misc' ? 'active' : ''}" onclick="invSetTierTab('misc')">Miscellaneous (${miscCount})</button>
       </div>
       <div class="settings-field" style="margin-bottom:0.6rem;">
-        <input type="text" id="inv-search" placeholder="Search colors or brands..." value="${psEscape(invSearchQuery)}" oninput="invSetSearch(this.value)">
+        ${invSearchFieldHtml({ id: 'inv-search', placeholder: 'Search colors or brands...', value: invSearchQuery, onInput: 'invSetSearch(this.value)', onClear: "invSetSearch('')" })}
       </div>
       <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem; cursor:pointer;">
         <input type="checkbox" ${invUseUpOnly ? 'checked' : ''} onchange="invSetUseUpOnly(this.checked)"> <i class="fa-solid fa-star" style="color:#d4a017;"></i> Use Up only
@@ -8484,7 +8509,7 @@ function clRenderSettingsSection() {
     html += `<div class="card">
       <div class="trip-toggle" id="cl-picker-brand-toggle" style="margin:0 0 0.6rem;"></div>
       <div class="settings-field" style="margin-bottom:0.6rem;">
-        <input type="text" id="cl-picker-search" placeholder="Search ${psEscape(clPickerBrand)} colors..." value="${psEscape(clPickerQuery)}" oninput="clSetPickerQuery(this.value)">
+        ${invSearchFieldHtml({ id: 'cl-picker-search', placeholder: `Search ${clPickerBrand} colors...`, value: clPickerQuery, onInput: 'clSetPickerQuery(this.value)', onClear: "clSetPickerQuery('')" })}
       </div>
       <div id="cl-picker-results"></div>
     </div>`;
@@ -9426,7 +9451,7 @@ function spRenderScreen() {
       ${SP_KINDS.map(k => `<button class="trip-btn ${spKindTab === k.id ? 'active' : ''}" onclick="spSetKindTab('${k.id}')">${k.label}</button>`).join('')}
     </div>
     <div class="settings-field" style="margin-bottom:0.6rem;">
-      <input type="text" placeholder="Search brand, color, size, pattern..." value="${invAttr(spSearchQuery)}" oninput="spSetSearch(this.value)">
+      ${invSearchFieldHtml({ id: 'sp-search', placeholder: 'Search brand, color, size, pattern...', value: spSearchQuery, onInput: 'spSetSearch(this.value)', onClear: "spSetSearch('')" })}
     </div>
     <button class="save-btn" onclick="spOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${psEscape(spKindLabel(spKindTab))}</button>
   </div>`;
@@ -9732,7 +9757,7 @@ function foilRenderLettersNumbers() {
       <button class="trip-btn ${foilCharTypeTab === 'numbers' ? 'active' : ''}" onclick="foilSetCharTypeTab('numbers')">Numbers</button>
     </div>
     <div class="settings-field" style="margin-bottom:0.6rem;">
-      <input type="text" placeholder="Search size, color, brand..." value="${invAttr(foilSearchQuery)}" oninput="foilSetSearch(this.value)">
+      ${invSearchFieldHtml({ id: 'foil-search', placeholder: 'Search size, color, brand...', value: foilSearchQuery, onInput: 'foilSetSearch(this.value)', onClear: "foilSetSearch('')" })}
     </div>
     <button class="save-btn" onclick="foilOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${foilCharTypeTab === 'letters' ? 'Letters' : 'Numbers'} group</button>
   </div>`;
