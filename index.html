@@ -6911,14 +6911,16 @@ function invCsvCell(v) {
   const s = String(v == null ? '' : v);
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
-// Only currently-stocked sizes on active colors — a placeholder slot nobody's ever priced isn't
-// something this spreadsheet needs to carry, matching invIsStocked's baseline-count filter.
+// Every size slot for every active color already in Inventory — this is a bulk way to populate
+// Cost per Bag and Balloons per Bag across the whole catalog, so it deliberately does NOT filter
+// by Stocked/Not Stocked, par, backstock, price, or perBag. Whether a size is worth pricing is
+// exactly the judgment call this spreadsheet exists to let someone make in bulk, offline — not
+// something the export should pre-decide by leaving rows out.
 function invExportInventoryCsv() {
   const lines = [['itemId', 'size', 'brand', 'color', 'costPerBag', 'perBag']];
   INVENTORY_ITEMS.filter(i => i.active !== false).forEach(item => {
     INV_SIZES.forEach(size => {
       const sd = item.sizes[size];
-      if (!invIsStocked(sd)) return;
       lines.push([item.id, size, item.brand || '', item.color || '', sd.price || 0, sd.perBag || '']);
     });
   });
