@@ -6164,26 +6164,21 @@ function invFinishBaselineCount() {
   window.fbSaveInventoryBaseline(invBaseline).catch(err => console.error('Inventory baseline save failed:', err));
   invRenderLatex();
 }
-// Progress is item+SIZE based, not per-color — a color with several stocked sizes isn't "done"
-// until each one has its own INITIAL_COUNT from this session. Restricted to active items (a
-// deactivated color isn't on the shelf to count) and, within each item, to sizes invIsStocked()
-// currently says this business actually carries — a never-touched placeholder slot for a size
-// this color doesn't come in was never something the count needed to require.
+// Progress is item+SIZE based, not per-color — a color with 5 size slots isn't "done" until all
+// 5 have their own INITIAL_COUNT from this session. Restricted to active items (a deactivated
+// color isn't on the shelf to count) — but not further restricted per size: whether a color is
+// something this business actually carries is already decided at the color level (Main vs.
+// Miscellaneous, or simply not being in Inventory at all), so every size slot on an active color
+// is real inventory to count, even if the true count turns out to be zero.
 function invBaselineProgress() {
   const activeItems = INVENTORY_ITEMS.filter(i => i.active !== false);
   const countedKeys = new Set();
   INVENTORY_TRANSACTIONS.forEach(t => {
     if (t.type === 'INITIAL_COUNT' && t.createdAt >= invBaseline.startedAt) countedKeys.add(t.itemId + '|' + t.size);
   });
-  let counted = 0, total = 0;
-  activeItems.forEach(item => {
-    INV_SIZES.forEach(size => {
-      if (!invIsStocked(item.sizes[size])) return;
-      total++;
-      if (countedKeys.has(item.id + '|' + size)) counted++;
-    });
-  });
-  return { counted, total };
+  let counted = 0;
+  activeItems.forEach(item => { INV_SIZES.forEach(size => { if (countedKeys.has(item.id + '|' + size)) counted++; }); });
+  return { counted, total: activeItems.length * INV_SIZES.length };
 }
 function invSizeCountedThisSession(itemId, size) {
   if (invBaseline.status !== 'in_progress') return false;
@@ -6913,9 +6908,9 @@ function invCsvCell(v) {
 }
 // Every size slot for every active color already in Inventory — this is a bulk way to populate
 // Cost per Bag and Balloons per Bag across the whole catalog, so it deliberately does NOT filter
-// by Stocked/Not Stocked, par, backstock, price, or perBag. Whether a size is worth pricing is
-// exactly the judgment call this spreadsheet exists to let someone make in bulk, offline — not
-// something the export should pre-decide by leaving rows out.
+// by par, backstock, price, or perBag. Whether a size is worth pricing is exactly the judgment
+// call this spreadsheet exists to let someone make in bulk, offline — not something the export
+// should pre-decide by leaving rows out.
 function invExportInventoryCsv() {
   const lines = [['itemId', 'size', 'brand', 'color', 'costPerBag', 'perBag']];
   INVENTORY_ITEMS.filter(i => i.active !== false).forEach(item => {
@@ -7125,17 +7120,6 @@ function invBlankSizeData() {
   const sizes = {};
   INV_SIZES.forEach(s => { sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100 }; });
   return sizes;
-}
-// Every item has a slot for all 5 sizes whether or not this business actually carries that color
-// in that size — an untouched slot (no par ever set, nothing ever on the shelf) isn't a real,
-// countable size. `stocked` is explicit once someone has set it either way; before that, it's
-// inferred from the one signal already in the data (a par ever set, or stock currently on hand) as
-// a reasonable starting guess — never a blanket "all 5 are stocked" default — and stays correctable
-// with one tap for as long as no one's made it explicit.
-function invIsStocked(sd) {
-  if (sd.stocked === true) return true;
-  if (sd.stocked === false) return false;
-  return (sd.par || 0) > 0 || (sd.backstock || 0) > 0;
 }
 function invFindItem(id) { return INVENTORY_ITEMS.find(i => i.id === id); }
 function invSaveItem(item) {
@@ -7830,15 +7814,6 @@ function invUpdateSizeField(itemId, size, field, value) {
   }
   item.sizes[size][field] = field === 'openStatus' ? value : (parseFloat(value) || 0);
   invSaveItem(item);
-}
-// Explicit, one-tap correction of invIsStocked()'s inference — the only way `stocked` ever becomes
-// a real boolean instead of a guess. Not a quantity, so it's a plain catalog save, not a ledger entry.
-function invSetSizeStocked(itemId, size, stocked) {
-  const item = invFindItem(itemId);
-  if (!item) return;
-  item.sizes[size].stocked = stocked;
-  invSaveItem(item);
-  invRenderColorsList();
 }
 // Size labels contain a literal " (5"/7", 11", etc.) — embedding one raw inside a
 // double-quoted HTML attribute (onchange="...('${size}'...)") breaks out of the attribute
@@ -8622,7 +8597,6 @@ function invColorCardHtml(item, upcomingMap) {
     ${INV_SIZES.map(size => `<div style="text-align:center; font-size:9px; font-weight:600; color:var(--text-tertiary);">${INV_SIZE_SHORT[size]}</div>`).join('')}
     ${INV_SIZES.map(size => {
       const sd = item.sizes[size];
-      if (!invIsStocked(sd)) return `<div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:1px 2px; color:var(--text-tertiary);">—</div>`;
       // Green draws the eye on purpose — it means "needs ordering" here, not "good to go."
       const needsOrder = (sd.backstock || 0) === 0;
       const bg = needsOrder ? 'var(--accent-light)' : 'var(--info-bg)';
@@ -8662,26 +8636,12 @@ function invColorCardHtml(item, upcomingMap) {
       const sd = item.sizes[size];
       const formKey = `${item.id}|${size}`;
 
-      const stocked = invIsStocked(sd);
-
       html += `<div class="ps-item-block" style="margin-bottom:0.75rem; padding-bottom:0.75rem;">`;
       html += `<div style="font-size:15px; font-weight:700; margin-bottom:0.5rem; margin-top:0.5rem;">${psEscape(size)}</div>`;
-      // Whether this color even comes in this size at all — a size never given a par or any stock
-      // is a guess (see invIsStocked), and needs to be a one-tap correction right where the count
-      // is happening, not a separate setup step someone has to remember to do first.
-      if (invMode === 'edit') {
-        html += `<div class="trip-toggle" style="margin:0 0 0.5rem;">
-          <button class="trip-btn ${stocked ? 'active' : ''}" onclick="invSetSizeStocked('${item.id}','${invAttr(size)}',true)">Stocked</button>
-          <button class="trip-btn ${!stocked ? 'active' : ''}" onclick="invSetSizeStocked('${item.id}','${invAttr(size)}',false)">Not stocked</button>
-        </div>`;
-      } else if (!stocked) {
-        html += `<div style="font-size:12px; color:var(--text-tertiary); margin-bottom:0.5rem;">Not stocked in this size</div>`;
-      }
       // The only two things a physical count needs to record. In Viewing mode (the safe default
       // for a routine "what do we have?" check) these are plain read-only text — no select/input
-      // for a stray tap to accidentally change; Editing mode swaps in the real controls. Neither
-      // is shown at all once a size is marked not stocked — there's nothing to count.
-      if (stocked && invMode === 'edit') {
+      // for a stray tap to accidentally change; Editing mode swaps in the real controls.
+      if (invMode === 'edit') {
         html += `<div class="row">
           <div class="settings-field" style="margin-bottom:0"><label>Open bin</label>
             <select onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','openStatus',this.value)">
@@ -8698,7 +8658,7 @@ function invColorCardHtml(item, upcomingMap) {
             ? `<div style="margin-top:0.4rem; font-size:11px; color:var(--accent); font-weight:600;"><i class="fa-solid fa-circle-check"></i> Counted</div>`
             : `<div style="margin-top:0.4rem;"><button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invConfirmBaselineCount('${item.id}','${invAttr(size)}')">Confirm count as shown</button></div>`;
         }
-      } else if (stocked) {
+      } else {
         html += `<div class="row">
           <div><div style="font-size:12px; color:var(--text-secondary); font-weight:500; margin-bottom:5px;">Open bin</div><div style="font-size:16px; font-weight:600;">${psEscape(sd.openStatus)}</div></div>
           <div><div style="font-size:12px; color:var(--text-secondary); font-weight:500; margin-bottom:5px;">Backstock (${invUnitLabel()})</div><div style="font-size:16px; font-weight:600;">${sd.backstock}</div></div>
