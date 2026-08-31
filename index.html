@@ -982,6 +982,16 @@
   window.fbSaveInventoryOrder = (order) => setDoc(doc(inventoryOrdersRef, order.id), order);
   window.fbDeleteInventoryOrder = (id) => deleteDoc(doc(inventoryOrdersRef, id));
 
+  // Specialty Latex (Twisting/Linking/Printed/Shapes) — a separate, flat catalog, deliberately
+  // its own collection rather than a differently-shaped row in inventoryItems, so nothing about
+  // it can ever affect Standard Latex's data or the code that assumes every inventoryItems doc
+  // has the 5 standard sizes. Quantity changes here are plain saves for now (no ledger yet) —
+  // see spUpdateField.
+  const specialtyLatexItemsRef = collection(db, 'businesses', BUSINESS_ID, 'specialtyLatexItems');
+  window.fbOnSnapshotSpecialtyLatexItems = (onNext, onError) => onSnapshot(specialtyLatexItemsRef, onNext, onError);
+  window.fbSaveSpecialtyLatexItem = (item) => setDoc(doc(specialtyLatexItemsRef, item.id), item);
+  window.fbDeleteSpecialtyLatexItem = (id) => deleteDoc(doc(specialtyLatexItemsRef, id));
+
   // The audit trail every inventory quantity change writes to — see invApplyInventoryTransactions.
   // Read-only from the classic script's point of view except through that one function; exposing
   // runTransaction + the two doc-ref builders lets the business logic (delta math, INITIAL_COUNT
@@ -1400,7 +1410,7 @@
   <div class="view" id="view-inventory">
     <div class="section-label" style="margin-top:0">Choose a category</div>
     <div class="tool-grid">
-      <div class="tool-tile" onclick="showView('inventory-latex')">
+      <div class="tool-tile" onclick="showView('inventory-latex-choice')">
         <div class="tool-tile-icon"><i class="fa-solid fa-circle"></i></div>
         <div class="tool-tile-title">Latex</div>
       </div>
@@ -1415,12 +1425,37 @@
     </div>
   </div><!-- end view-inventory -->
 
+  <!-- ═══════════════════════════════════════ LATEX CATEGORY PICKER -->
+  <!-- Sits between the Inventory category picker and the two actual Latex screens — Standard
+       Latex (the existing Brand/Color/5-size system, untouched) and Specialty Latex (Twisting,
+       Linking, Printed, Shapes — items that don't fit that model). -->
+  <div class="view" id="view-inventory-latex-choice">
+    <div class="section-label" style="margin-top:0">Choose a latex type</div>
+    <div class="tool-grid">
+      <div class="tool-tile" onclick="showView('inventory-latex')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-circle"></i></div>
+        <div class="tool-tile-title">Standard Latex</div>
+      </div>
+      <div class="tool-tile" onclick="showView('inventory-specialty')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-shapes"></i></div>
+        <div class="tool-tile-title">Specialty Latex</div>
+      </div>
+    </div>
+  </div><!-- end view-inventory-latex-choice -->
+
   <!-- ═══════════════════════════════════════ LATEX INVENTORY VIEW -->
   <!-- Built entirely in JS from INVENTORY_ITEMS + INVENTORY_ORDERS (both live-synced like
        Jobs) since the per-color, per-size grid and the pending-orders list are data-driven. -->
   <div class="view" id="view-inventory-latex">
     <div id="inv-latex-root"></div>
   </div><!-- end view-inventory-latex -->
+
+  <!-- ═══════════════════════════════════════ SPECIALTY LATEX INVENTORY VIEW -->
+  <!-- Twisting/Linking/Printed/Shapes — a separate, flat catalog (SPECIALTY_ITEMS), entirely
+       independent of INVENTORY_ITEMS so nothing here can affect Standard Latex. -->
+  <div class="view" id="view-inventory-specialty">
+    <div id="inv-specialty-root"></div>
+  </div><!-- end view-inventory-specialty -->
 
   <!-- ═══════════════════════════════════════ LETTER STYLING CALCULATOR VIEW -->
   <!-- Built entirely in JS from letState — sizing/pricing formulas reverse-engineered from
@@ -1904,7 +1939,9 @@ const TOOL_META = {
   quantity:   { title: 'Quantity Calculator',           icon: 'fa-solid fa-ruler',               showBack: true,  showGear: true  },
   formulas:   { title: 'Custom Recipes',                icon: 'fa-solid fa-flask',               showBack: true,  showGear: true  },
   inventory:  { title: 'Inventory',                     icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
-  'inventory-latex': { title: 'Latex Inventory',        icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
+  'inventory-latex-choice': { title: 'Latex Inventory', icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
+  'inventory-latex': { title: 'Standard Latex',         icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
+  'inventory-specialty': { title: 'Specialty Latex',    icon: 'fa-solid fa-shapes',              showBack: true,  showGear: true  },
   letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: true  },
   jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: true  },
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: true  },
@@ -8786,6 +8823,268 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
   return html;
 }
 
+// ═══════════════════════════════════════ SPECIALTY LATEX (Twisting / Linking / Printed / Shapes) ═══════════════════════════════════════
+//
+// A separate, flat catalog for latex that doesn't fit Standard Latex's Brand → Color → 5-size
+// model — deliberately its own Firestore collection and in-memory array (SPECIALTY_ITEMS), not a
+// differently-shaped row inside INVENTORY_ITEMS, so nothing here can affect Standard Latex or the
+// many places that assume every inventoryItems doc has exactly the 5 standard sizes. One flat
+// shape covers all four kinds (fields shown/hidden by kind in the form, not four schemas):
+//   { id, kind, brand, color, sizeType, pattern, descriptor, perBag, costPerBag, backstock,
+//     active, deletedAt }
+// Quantity changes (backstock) are plain saves for now, exactly like Standard Latex's own
+// price/par/perBag fields before the ledger existed — wiring Receive/Pull/Adjust/History through
+// a generalized version of invApplyInventoryTransactions is a deliberately separate, later pass
+// (see the architecture plan), not part of this one.
+let SPECIALTY_ITEMS = [];
+const SP_KINDS = [
+  { id: 'twisting', label: 'Twisting Balloons' },
+  { id: 'linking', label: 'Linking Balloons' },
+  { id: 'printed', label: 'Printed Latex' },
+  { id: 'shapes', label: 'Latex Shapes' },
+];
+// Common sizes per kind, as fast, consistent choices — "Custom" (added by spAddFormHtml) reveals
+// a free-text field alongside so an unusual product is never blocked, just slower to enter than
+// a common one.
+const SP_SIZE_OPTIONS = {
+  twisting: ['160', '260', '350', '646'],
+  linking: ['6"', '12"', '18"'],
+  printed: ['5"', '11"', '18"', '24"'],
+  shapes: ['5"', '12"'],
+};
+let spKindTab = 'twisting';
+let spExpandedItem = null;
+let spSearchQuery = '';
+let spAddOpen = false;
+let spAddDraft = null; // the in-progress add/edit form's values while open
+
+function spStartListeners() {
+  spRenderScreen(); // shell first, same pattern as invStartListeners — Firestore is async
+  window.fbOnSnapshotSpecialtyLatexItems(
+    (snapshot) => {
+      const all = snapshot.docs.map(d => d.data());
+      SPECIALTY_ITEMS = all.filter(i => !i.deletedAt);
+      spRenderScreen();
+    },
+    (err) => console.error('Specialty Latex sync error:', err)
+  );
+}
+function psNewSpecialtyItemId() { return 'splatex_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+function spFindItem(id) { return SPECIALTY_ITEMS.find(i => i.id === id); }
+function spSaveItem(item) {
+  window.fbSaveSpecialtyLatexItem(item).catch(err => {
+    console.error(err);
+    alert("Couldn't save that change — check your connection and try again.");
+  });
+}
+
+// Strongly encourages reusing an existing brand instead of accumulating spelling variants —
+// union of the manufacturer master list and every brand already used in the Color Library, so a
+// brand added there is immediately available here too. 'Generic/Unknown' and 'Other' are always
+// appended by the caller (spBrandOptions), not part of this raw list.
+function spKnownBrands() {
+  const brands = new Set(Object.keys(BRAND_COLOR_CATALOG));
+  COLOR_LIBRARY.forEach(e => { if (e.brand) brands.add(e.brand); });
+  return [...brands].sort();
+}
+function spBrandOptions() {
+  return [...spKnownBrands(), 'Generic/Unknown', 'Other'];
+}
+// Color stays plain text (no Color Library link yet — see architecture plan) but still gets
+// autocomplete suggestions from it via a native <datalist>, so reuse is one keystroke away
+// without ever requiring a Library entry to exist first.
+function spColorSuggestionsDatalist() {
+  const names = new Set(COLOR_LIBRARY.map(e => e.colorName).filter(Boolean));
+  SPECIALTY_ITEMS.forEach(i => { if (i.color) names.add(i.color); });
+  return `<datalist id="sp-color-suggestions">${[...names].sort().map(n => `<option value="${invAttr(n)}">`).join('')}</datalist>`;
+}
+
+function spSetKindTab(kind) { spKindTab = kind; spExpandedItem = null; spRenderScreen(); }
+function spSetSearch(q) { spSearchQuery = q; spRenderResults(); }
+function spToggleExpand(id) { spExpandedItem = spExpandedItem === id ? null : id; spRenderResults(); }
+
+function spFilteredItems() {
+  const q = spSearchQuery.trim().toLowerCase();
+  const items = SPECIALTY_ITEMS.filter(i => (i.kind || 'twisting') === spKindTab)
+    .sort((a, b) => (a.brand || '').localeCompare(b.brand || '') || (a.color || '').localeCompare(b.color || ''));
+  if (!q) return items;
+  return items.filter(i => [i.brand, i.color, i.sizeType, i.pattern, i.descriptor].some(f => (f || '').toLowerCase().includes(q)));
+}
+
+function spOpenAdd() {
+  spAddOpen = true;
+  spAddDraft = { kind: spKindTab, brand: '', brandOther: '', color: '', sizeType: '', sizeOther: '', pattern: '', descriptor: '', perBag: 100, costPerBag: 0, backstock: 0 };
+  spRenderScreen();
+}
+function spCancelAdd() { spAddOpen = false; spAddDraft = null; spRenderScreen(); }
+function spSetDraftField(field, value) {
+  if (!spAddDraft) return;
+  spAddDraft[field] = value;
+  if (field === 'kind') {
+    // Each kind has its own size list (see SP_SIZE_OPTIONS) — clearing sizeType/sizeOther here
+    // avoids silently submitting a size from the previous kind that isn't even shown as selected
+    // in the now-different dropdown. Pattern only shows for 'printed' — needs a re-render either way.
+    spAddDraft.sizeType = '';
+    spAddDraft.sizeOther = '';
+    spRenderScreen();
+  }
+}
+function spSubmitAdd() {
+  if (!spAddDraft) return;
+  const d = spAddDraft;
+  const brand = d.brand === 'Other' ? (d.brandOther || '').trim() : d.brand;
+  if (!brand) { alert('Pick a brand, or choose Other and type one in.'); return; }
+  const sizeType = d.sizeType === 'Custom' ? (d.sizeOther || '').trim() : d.sizeType;
+  if (!sizeType) { alert('Enter a size/type.'); return; }
+  const item = {
+    id: psNewSpecialtyItemId(),
+    kind: d.kind,
+    brand,
+    color: (d.color || '').trim(),
+    sizeType,
+    pattern: d.kind === 'printed' ? (d.pattern || '').trim() : '',
+    descriptor: (d.descriptor || '').trim(),
+    perBag: parseFloat(d.perBag) || 0,
+    costPerBag: parseFloat(d.costPerBag) || 0,
+    backstock: parseFloat(d.backstock) || 0,
+    active: true,
+  };
+  SPECIALTY_ITEMS.push(item);
+  spSaveItem(item);
+  spAddOpen = false;
+  spAddDraft = null;
+  spKindTab = item.kind;
+  spRenderScreen();
+}
+// Plain saves for now, matching how Standard Latex's own non-quantity fields (price/par/perBag)
+// work outside the ledger — backstock here is not yet routed through any transaction history.
+function spUpdateField(itemId, field, value) {
+  const item = spFindItem(itemId);
+  if (!item) return;
+  item[field] = (field === 'backstock' || field === 'perBag' || field === 'costPerBag') ? (parseFloat(value) || 0) : value;
+  spSaveItem(item);
+}
+function spDeleteItem(itemId) {
+  const item = spFindItem(itemId);
+  if (!item) return;
+  if (!confirm(`Delete this ${psEscape(item.color || item.brand)} item? This can't be undone from here.`)) return;
+  item.deletedAt = Date.now();
+  SPECIALTY_ITEMS = SPECIALTY_ITEMS.filter(i => i.id !== itemId);
+  spSaveItem(item);
+  spRenderResults();
+}
+
+function spKindLabel(kind) { return (SP_KINDS.find(k => k.id === kind) || {}).label || kind; }
+
+function spAddFormHtml() {
+  const d = spAddDraft;
+  const sizeOptions = (SP_SIZE_OPTIONS[d.kind] || []).concat(['Custom']);
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Add Specialty Latex item</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="spCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field"><label>Type</label>
+      <select onchange="spSetDraftField('kind', this.value)">
+        ${SP_KINDS.map(k => `<option value="${k.id}" ${k.id === d.kind ? 'selected' : ''}>${k.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Brand</label>
+        <select onchange="spSetDraftField('brand', this.value)">
+          <option value="" ${d.brand === '' ? 'selected' : ''}>— select —</option>
+          ${spBrandOptions().map(b => `<option value="${invAttr(b)}" ${b === d.brand ? 'selected' : ''}>${psEscape(b)}</option>`).join('')}
+        </select>
+        ${d.brand === 'Other' ? `<input type="text" style="margin-top:6px;" placeholder="Brand name" value="${invAttr(d.brandOther)}" oninput="spSetDraftField('brandOther', this.value)">` : ''}
+      </div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Color</label>
+        <input type="text" list="sp-color-suggestions" placeholder="e.g. Red" value="${invAttr(d.color)}" oninput="spSetDraftField('color', this.value)">
+        ${spColorSuggestionsDatalist()}
+      </div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Size/Type</label>
+        <select onchange="spSetDraftField('sizeType', this.value)">
+          <option value="" ${d.sizeType === '' ? 'selected' : ''}>— select —</option>
+          ${sizeOptions.map(s => `<option value="${invAttr(s)}" ${s === d.sizeType ? 'selected' : ''}>${psEscape(s)}</option>`).join('')}
+        </select>
+        ${d.sizeType === 'Custom' ? `<input type="text" style="margin-top:6px;" placeholder="Size/type" value="${invAttr(d.sizeOther)}" oninput="spSetDraftField('sizeOther', this.value)">` : ''}
+      </div>
+      ${d.kind === 'printed' ? `<div class="settings-field" style="margin-bottom:0"><label>Pattern/Print</label><input type="text" placeholder="e.g. Cow Print" value="${invAttr(d.pattern)}" oninput="spSetDraftField('pattern', this.value)"></div>` : ''}
+    </div>
+    <div class="settings-field"><label>Descriptor/Notes <span style="font-weight:400;">(optional — e.g. distinguishing two similar prints)</span></label>
+      <input type="text" value="${invAttr(d.descriptor)}" oninput="spSetDraftField('descriptor', this.value)">
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${d.perBag}" oninput="spSetDraftField('perBag', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Cost/bag</label><input type="number" step="0.01" min="0" value="${d.costPerBag}" oninput="spSetDraftField('costPerBag', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${d.backstock}" oninput="spSetDraftField('backstock', this.value)"></div>
+    </div>
+    <button class="save-btn" onclick="spSubmitAdd()">Save item</button>
+  </div>`;
+}
+
+function spItemCardHtml(item) {
+  const expanded = spExpandedItem === item.id;
+  const subtitle = [item.sizeType, item.pattern].filter(Boolean).join(' — ');
+  let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
+  html += `<div class="inv-color-row-header" onclick="spToggleExpand('${item.id}')">
+    <div class="inv-color-row-text">
+      <div class="inv-color-row-name">${psEscape(item.color || '(no color)')}${subtitle ? ` <span style="font-size:12px; font-weight:400; color:var(--text-secondary);">${psEscape(subtitle)}</span>` : ''}</div>
+      <div class="inv-color-row-brand">${psEscape(item.brand || 'Generic/Unknown')}</div>
+    </div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.backstock || 0) === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${(item.backstock || 0) === 0 ? 'var(--accent)' : 'var(--info-text)'};">${item.backstock || 0}</div>
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+  </div>`;
+  if (expanded) {
+    html += `<div class="ps-job-body">`;
+    if (item.descriptor) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">${psEscape(item.descriptor)}</div>`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${item.backstock}" onchange="spUpdateField('${item.id}','backstock',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${item.perBag || 100}" onchange="spUpdateField('${item.id}','perBag',this.value)"></div>
+    </div>`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Cost/bag</label><input type="number" step="0.01" min="0" value="${item.costPerBag}" onchange="spUpdateField('${item.id}','costPerBag',this.value)"></div>
+    </div>`;
+    html += `<div style="display:flex; justify-content:flex-end;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="spDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+    </div>`;
+    html += `</div>`; // ps-job-body
+  }
+  html += `</div>`; // inv-color-row
+  return html;
+}
+
+function spRenderResults() {
+  const root = document.getElementById('sp-results-root');
+  if (!root) return;
+  const items = spFilteredItems();
+  root.innerHTML = items.length === 0
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${psEscape(spKindLabel(spKindTab).toLowerCase())} yet.</div>`
+    : `<div class="inv-color-list">` + items.map(spItemCardHtml).join('') + `</div>`;
+}
+
+function spRenderScreen() {
+  const root = document.getElementById('inv-specialty-root');
+  if (!root) return;
+  let html = `<div class="card">
+    <div class="trip-toggle" style="margin:0 0 0.6rem;">
+      ${SP_KINDS.map(k => `<button class="trip-btn ${spKindTab === k.id ? 'active' : ''}" onclick="spSetKindTab('${k.id}')">${k.label}</button>`).join('')}
+    </div>
+    <div class="settings-field" style="margin-bottom:0.6rem;">
+      <input type="text" placeholder="Search brand, color, size, pattern..." value="${invAttr(spSearchQuery)}" oninput="spSetSearch(this.value)">
+    </div>
+    <button class="save-btn" onclick="spOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${psEscape(spKindLabel(spKindTab))}</button>
+  </div>`;
+  if (spAddOpen) html += spAddFormHtml();
+  html += `<div id="sp-results-root"></div>`;
+  root.innerHTML = html;
+  spRenderResults();
+}
+
 // ═══════════════════════════════════════ LETTER STYLING CALCULATOR VIEW ═══════════════════════════════════════
 //
 // Formulas reverse-engineered from the real Master Calculators spreadsheet, verified against
@@ -10408,9 +10707,14 @@ function setTopBar(v) {
 function goBack() {
   const inSettings = document.getElementById('view-settings').classList.contains('active');
   if (inSettings) { showView(lastToolView); return; }
-  // Latex is a level below the Inventory category picker, not directly off home.
+  // Latex is a level below the Inventory category picker, and Standard/Specialty are each a
+  // level below the Latex picker in turn.
+  const inLatexChoice = document.getElementById('view-inventory-latex-choice').classList.contains('active');
+  if (inLatexChoice) { showView('inventory'); return; }
   const inLatexInventory = document.getElementById('view-inventory-latex').classList.contains('active');
-  if (inLatexInventory) { showView('inventory'); return; }
+  if (inLatexInventory) { showView('inventory-latex-choice'); return; }
+  const inSpecialtyInventory = document.getElementById('view-inventory-specialty').classList.contains('active');
+  if (inSpecialtyInventory) { showView('inventory-latex-choice'); return; }
   // Guided Setup only ever launches from Business Setup — the topbar back arrow always returns
   // there (in-flow "Back" between questions is a separate control, handled by gsBack()).
   const inGuidedSetup = document.getElementById('view-guidedSetup').classList.contains('active');
@@ -10519,6 +10823,7 @@ function bootApp() {
   try { jccInit(); } catch (e) { console.error('jccInit failed:', e); }
   try { clInit(); } catch (e) { console.error('clInit failed:', e); }
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
+  try { spStartListeners(); } catch (e) { console.error('Specialty Latex listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { bsUpdateHomeBanner(); } catch (e) { console.error('bsUpdateHomeBanner failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
