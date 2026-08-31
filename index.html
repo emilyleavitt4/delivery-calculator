@@ -787,7 +787,7 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
-  import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot, writeBatch } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+  import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot, writeBatch, runTransaction } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
   import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
 
   const firebaseConfig = {
@@ -981,6 +981,26 @@
   window.fbOnSnapshotInventoryOrders = (onNext, onError) => onSnapshot(inventoryOrdersRef, onNext, onError);
   window.fbSaveInventoryOrder = (order) => setDoc(doc(inventoryOrdersRef, order.id), order);
   window.fbDeleteInventoryOrder = (id) => deleteDoc(doc(inventoryOrdersRef, id));
+
+  // The audit trail every inventory quantity change writes to — see invApplyInventoryTransactions.
+  // Read-only from the classic script's point of view except through that one function; exposing
+  // runTransaction + the two doc-ref builders lets the business logic (delta math, INITIAL_COUNT
+  // classification, actor resolution) live alongside the rest of the inv* functions instead of
+  // inside this module block, matching how every other Firestore op in this app is a thin wrapper.
+  const inventoryTransactionsRef = collection(db, 'businesses', BUSINESS_ID, 'inventoryTransactions');
+  window.fbOnSnapshotInventoryTransactions = (onNext, onError) => onSnapshot(inventoryTransactionsRef, onNext, onError);
+  window.fbRunTransaction = (updater) => runTransaction(db, updater);
+  window.fbInventoryItemRef = (id) => doc(inventoryItemsRef, id);
+  window.fbInventoryTransactionRef = (id) => doc(inventoryTransactionsRef, id);
+
+  // Business-wide "how do we count stock" setting (bags vs. individual balloons) and the physical
+  // inventory baseline session flag — both plain settings docs, reusing the generic helper.
+  window.fbLoadInventoryConfig = () => window.fbLoadSettingsDoc('inventoryConfig');
+  window.fbSaveInventoryConfig = (data) => window.fbSaveSettingsDoc('inventoryConfig', data);
+  window.fbOnSnapshotInventoryConfig = (onNext, onError) => window.fbOnSnapshotSettingsDoc('inventoryConfig', onNext, onError);
+  window.fbLoadInventoryBaseline = () => window.fbLoadSettingsDoc('inventoryBaseline');
+  window.fbSaveInventoryBaseline = (data) => window.fbSaveSettingsDoc('inventoryBaseline', data);
+  window.fbOnSnapshotInventoryBaseline = (onNext, onError) => window.fbOnSnapshotSettingsDoc('inventoryBaseline', onNext, onError);
 
   // Time Tracker — clock in/out shifts (whoever's clocking in just types their name; entries
   // are shared live across the team like Jobs) and saved stopwatch task timings.
@@ -2015,6 +2035,7 @@ function homeDragEnd(e) {
 const SETTINGS_SECTIONS = [
   { id: 'teamMembers', label: 'Team Members', group: 'people', containerId: 'tm-settings-root' },
   { id: 'importMappings', label: 'Import Mapping Rules', group: 'importMapping', containerId: 'im-root' },
+  { id: 'inventorySettings', label: 'Inventory Settings', group: 'catalogs', containerId: 'inv-settings-root', icon: 'fa-solid fa-sliders' },
   { id: 'colorLibrary', label: 'Color Library', group: 'catalogs', containerId: 'cl-settings-root', icon: 'fa-solid fa-swatchbook' },
   { id: 'materialCatalog', label: 'Material Catalog', group: 'catalogs', containerId: 'jcc-catalog-settings-root', icon: 'fa-solid fa-boxes-stacked' },
   { id: 'heliumReference', label: 'Helium Cost Reference', group: 'catalogs', containerId: 'he-settings-root', icon: 'fa-solid fa-wind' },
@@ -5664,9 +5685,11 @@ let INVENTORY_ITEMS = [];
 // restore it; see invDeleteColor/invClearGroup/invRestoreItem.
 let INVENTORY_ITEMS_TRASHED = [];
 let INVENTORY_ORDERS = [];
+let INVENTORY_TRANSACTIONS = []; // the audit trail — see invApplyInventoryTransactions
 let invExpandedItem = null;
 let invOrderFormKey = null; // `${itemId}|${size}` of the order form currently open, or null
 let invFlagComposerKey = null; // `${itemId}|${size}` of the flag-note composer currently open, or null
+let invHistoryOpenKey = null; // `${itemId}|${size}` of the history panel currently open, or null
 // 'view' (default, safe): Open bin/Backstock show as plain read-only text, so a normal "what do
 // we have?" check can't accidentally change a real count. 'edit': the same fields become the
 // actual select/input, for count days. Separate from the admin passcode on purpose — anyone on
@@ -6075,10 +6098,204 @@ function invStartListeners() {
     (snapshot) => { INVENTORY_ORDERS = snapshot.docs.map(d => d.data()); invRenderLatex(); },
     (err) => console.error('Inventory orders sync error:', err)
   );
+  window.fbOnSnapshotInventoryTransactions(
+    (snapshot) => { INVENTORY_TRANSACTIONS = snapshot.docs.map(d => d.data()); invRenderLatex(); },
+    (err) => console.error('Inventory transactions sync error:', err)
+  );
+  invConfigInit();
+  invBaselineInit();
 }
 
 function psNewInventoryItemId() { return 'invitem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 function psNewInventoryOrderId() { return 'invorder_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+function psNewInventoryTransactionId() { return 'invtxn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+
+// ═══════════════════════════════════════ INVENTORY TRANSACTION LEDGER ═══════════════════════════════════════
+//
+// The one place inventory quantity and its audit trail ever change together — see
+// invApplyInventoryTransactions. Nothing else should ever assign into item.sizes[size].backstock
+// directly; invUpdateSizeField and invMarkReceived (below) both route through this instead.
+
+// Business-wide "how do we count stock" setting — 'bags' (UBC's actual practice, and the default)
+// or 'balloons'. Live-subscribed like invMode, since it changes what every quantity label on
+// screen means and every device should agree on that immediately, not after a reload.
+let invTrackingUnit = 'bags';
+function invConfigInit() {
+  invRenderSettingsSection(); // first paint before Firestore resolves, same pattern as every other section
+  window.fbOnSnapshotInventoryConfig(
+    (snap) => {
+      invTrackingUnit = (snap.exists() && snap.data().trackingUnit === 'balloons') ? 'balloons' : 'bags';
+      invRenderLatex();
+      invRenderSettingsSection();
+    },
+    (err) => console.error('Inventory config sync error:', err)
+  );
+}
+function invSetTrackingUnit(unit) {
+  window.fbSaveInventoryConfig({ trackingUnit: unit }).catch(err => console.error('Inventory config save failed:', err));
+  invTrackingUnit = unit;
+  invRenderLatex();
+  invRenderSettingsSection();
+}
+function invUnitLabel() { return invTrackingUnit === 'balloons' ? 'balloons' : 'bags'; }
+
+// The physical-count baseline session — see plan doc for why this replaced inferring
+// INITIAL_COUNT from "no transaction exists yet" (today's backstock numbers are explicitly
+// non-authoritative, so an incidental first-touch shouldn't get to decide what "baseline" means).
+let invBaseline = { status: 'not_started', startedAt: null, completedAt: null };
+function invBaselineInit() {
+  window.fbOnSnapshotInventoryBaseline(
+    (snap) => {
+      if (snap.exists()) invBaseline = Object.assign({ status: 'not_started', startedAt: null, completedAt: null }, snap.data());
+      invRenderLatex();
+    },
+    (err) => console.error('Inventory baseline sync error:', err)
+  );
+}
+function invStartBaselineCount() {
+  if (!invAdminUnlocked) { alert('Unlock admin first.'); return; }
+  invBaseline = { status: 'in_progress', startedAt: Date.now(), completedAt: null };
+  window.fbSaveInventoryBaseline(invBaseline).catch(err => console.error('Inventory baseline save failed:', err));
+  invRenderLatex();
+}
+function invFinishBaselineCount() {
+  if (!invAdminUnlocked) { alert('Unlock admin first.'); return; }
+  invBaseline = Object.assign({}, invBaseline, { status: 'complete', completedAt: Date.now() });
+  window.fbSaveInventoryBaseline(invBaseline).catch(err => console.error('Inventory baseline save failed:', err));
+  invRenderLatex();
+}
+// Progress is item+SIZE based, not per-color — a color with several stocked sizes isn't "done"
+// until each one has its own INITIAL_COUNT from this session. Restricted to active items (a
+// deactivated color isn't on the shelf to count) and, within each item, to sizes invIsStocked()
+// currently says this business actually carries — a never-touched placeholder slot for a size
+// this color doesn't come in was never something the count needed to require.
+function invBaselineProgress() {
+  const activeItems = INVENTORY_ITEMS.filter(i => i.active !== false);
+  const countedKeys = new Set();
+  INVENTORY_TRANSACTIONS.forEach(t => {
+    if (t.type === 'INITIAL_COUNT' && t.createdAt >= invBaseline.startedAt) countedKeys.add(t.itemId + '|' + t.size);
+  });
+  let counted = 0, total = 0;
+  activeItems.forEach(item => {
+    INV_SIZES.forEach(size => {
+      if (!invIsStocked(item.sizes[size])) return;
+      total++;
+      if (countedKeys.has(item.id + '|' + size)) counted++;
+    });
+  });
+  return { counted, total };
+}
+function invSizeCountedThisSession(itemId, size) {
+  if (invBaseline.status !== 'in_progress') return false;
+  return INVENTORY_TRANSACTIONS.some(t => t.itemId === itemId && t.size === size && t.type === 'INITIAL_COUNT' && t.createdAt >= invBaseline.startedAt);
+}
+// The Backstock field's onchange only fires when the typed value actually differs from what was
+// already showing — so if a size already reads (say) 0 and the real physical count genuinely IS
+// 0, editing the field never fires at all, and that size would never show as counted. This is the
+// explicit alternative: a plain confirmation that creates a real (delta 0) transaction, so "I
+// checked it, the number standing is correct" is always a recordable, countable action.
+function invConfirmBaselineCount(itemId, size) {
+  invApplyInventoryTransactions([{ itemId, size, type: 'ADJUSTMENT', delta: 0 }]).catch(err => {
+    console.error('Confirm count failed:', err);
+    alert(err.message || "Couldn't save that — check your connection and try again.");
+  });
+}
+
+// Converts a balloon-denominated amount (what a future Production pull list will naturally
+// produce) into a delta in whatever unit this business actually tracks. Deliberately no fallback
+// default when perBag is missing in bags mode — package sizes vary too much (50/100/25/etc.) for
+// a guess to ever be safe; the caller must surface the missing-config error, never silently guess.
+function invBalloonsToDelta(perBag, balloonsUsed, trackingUnit) {
+  if (trackingUnit === 'balloons') return { delta: -balloonsUsed, balloonsUsed, perBagAtTime: perBag || null };
+  if (!perBag || perBag <= 0) {
+    const err = new Error('Balloons per Bag isn\'t set for this item/size — set it before recording a balloon-denominated pull.');
+    err.code = 'MISSING_PER_BAG';
+    throw err;
+  }
+  return { delta: -(balloonsUsed / perBag), balloonsUsed, perBagAtTime: perBag };
+}
+
+// Resolves the signed-in user to a display name (via TEAM_MEMBERS) plus the raw email, so history
+// stays legible ("Sheila") while still keeping the real, unspoofable identity for a genuine audit
+// trail. Falls back to the bare email if it doesn't match anyone on the roster.
+function invResolveActor() {
+  const email = (window.fbAuth && window.fbAuth.currentUser && window.fbAuth.currentUser.email) || '';
+  const member = TEAM_MEMBERS.find(m => (m.emails || []).some(e => e && e.toLowerCase() === email.toLowerCase()));
+  return { who: (member && member.name) || email || 'Unknown', whoEmail: email };
+}
+
+// The one atomic operation: read every affected item's CURRENT balance, compute new balances,
+// write the updated items and their transaction records together — all-or-nothing via
+// runTransaction, so two people acting on the same item+size at once can never lose an update
+// (unlike invMarkReceived's old plain read-then-setDoc). entries: [{ itemId, size, type, delta?,
+// balloonsUsed?, jobId?, jobName?, reference?, note?, alsoSetOpenStatus? }] — exactly one of
+// delta/balloonsUsed per entry; alsoSetOpenStatus is the one non-ledger field (Open Bin) that
+// invResetCounts needs to change in the SAME atomic write, so it never becomes a second,
+// un-audited mutation path racing against this one. Returns the created transaction docs, or
+// rejects (nothing partially applied) on any per-row problem (missing item, missing perBag, or a
+// Pull that isn't explicitly confirmed to go negative — see allowNegative). For a very large
+// entries array (e.g. resetting a whole catalog), call this once per chunk of items — Firestore
+// caps a single transaction at 500 operations (item reads/writes + transaction-doc writes
+// combined) — see invResetCounts for the chunking pattern.
+function invApplyInventoryTransactions(entries, { allowNegative = false } = {}) {
+  const actor = invResolveActor();
+  const trackingUnit = invTrackingUnit;
+  const itemIds = [...new Set(entries.map(e => e.itemId))];
+  return window.fbRunTransaction(async (transaction) => {
+    const itemSnaps = await Promise.all(itemIds.map(id => transaction.get(window.fbInventoryItemRef(id))));
+    const itemsById = new Map();
+    itemSnaps.forEach((snap, idx) => {
+      if (!snap.exists()) throw Object.assign(new Error('Item no longer exists.'), { code: 'MISSING_ITEM', itemId: itemIds[idx] });
+      itemsById.set(itemIds[idx], snap.data());
+    });
+
+    const txDocs = [];
+    entries.forEach(e => {
+      const item = itemsById.get(e.itemId);
+      const sd = item.sizes[e.size];
+      const previousBalance = sd.backstock || 0;
+      let delta, balloonsUsed = null, perBagAtTime = null;
+      if (typeof e.balloonsUsed === 'number') {
+        const converted = invBalloonsToDelta(sd.perBag, e.balloonsUsed, trackingUnit);
+        delta = converted.delta; balloonsUsed = converted.balloonsUsed; perBagAtTime = converted.perBagAtTime;
+      } else {
+        delta = e.delta;
+      }
+      const newBalance = previousBalance + delta;
+      // Only a DECREASE can trigger this — a positive delta (Receive, or an upward Adjustment)
+      // should never be blocked just because the balance was already negative from some earlier
+      // pull; that would make it impossible to ever correct a negative balance by receiving stock.
+      if (delta < 0 && newBalance < 0 && !allowNegative) {
+        throw Object.assign(new Error(`This would take ${item.color} ${e.size} negative (${newBalance}).`), { code: 'WOULD_GO_NEGATIVE', itemId: e.itemId, size: e.size, newBalance });
+      }
+      sd.backstock = newBalance;
+      if (e.alsoSetOpenStatus) sd.openStatus = e.alsoSetOpenStatus;
+      // First transaction ever recorded for this item+size (hasHistory not yet set) becomes its
+      // own INITIAL_COUNT UNLESS it's a genuine Receive/Pull, which are never a "count" — a real
+      // receipt/pull isn't retroactively a baseline just because nothing happened here before.
+      let type = e.type;
+      if (!sd.hasHistory && type === 'ADJUSTMENT') type = 'INITIAL_COUNT';
+      // While a baseline count session is running, every change is unconditionally the baseline —
+      // not an inference, an explicit session flag — see invBaseline.
+      if (invBaseline.status === 'in_progress' && type === 'ADJUSTMENT') type = 'INITIAL_COUNT';
+      sd.hasHistory = true;
+
+      txDocs.push({
+        id: psNewInventoryTransactionId(), itemId: e.itemId, size: e.size, color: item.color, brand: item.brand,
+        type, unit: trackingUnit, delta, previousBalance, newBalance,
+        balloonsUsed, perBagAtTime,
+        jobId: e.jobId || null, jobName: e.jobName || null,
+        reference: e.reference || '', note: e.note || '',
+        who: actor.who, whoEmail: actor.whoEmail,
+        createdAt: Date.now(),
+      });
+    });
+
+    itemsById.forEach((item, id) => transaction.set(window.fbInventoryItemRef(id), item));
+    txDocs.forEach(tx => transaction.set(window.fbInventoryTransactionRef(tx.id), tx));
+    return txDocs;
+  });
+}
 
 // One-time starter data parsed from the real Master Calculators spreadsheet (Inventory Tab),
 // grouped by brand — seeds both BRAND_COLOR_CATALOG below and real historical stock levels
@@ -6689,6 +6906,17 @@ function invBlankSizeData() {
   INV_SIZES.forEach(s => { sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100 }; });
   return sizes;
 }
+// Every item has a slot for all 5 sizes whether or not this business actually carries that color
+// in that size — an untouched slot (no par ever set, nothing ever on the shelf) isn't a real,
+// countable size. `stocked` is explicit once someone has set it either way; before that, it's
+// inferred from the one signal already in the data (a par ever set, or stock currently on hand) as
+// a reasonable starting guess — never a blanket "all 5 are stocked" default — and stays correctable
+// with one tap for as long as no one's made it explicit.
+function invIsStocked(sd) {
+  if (sd.stocked === true) return true;
+  if (sd.stocked === false) return false;
+  return (sd.par || 0) > 0 || (sd.backstock || 0) > 0;
+}
 function invFindItem(id) { return INVENTORY_ITEMS.find(i => i.id === id); }
 function invSaveItem(item) {
   window.fbSaveInventoryItem(item).catch(err => {
@@ -6999,7 +7227,16 @@ function invClearGroup(key) {
 // without touching the colors/catalog themselves. For starting a fresh count period. Admin-only
 // like invClearGroup, and still requires typing RESET since a reset count has no Recently
 // Deleted to fall back on — the old numbers are simply gone once this runs.
-function invResetCounts(key) {
+//
+// Routed entirely through invApplyInventoryTransactions (every size gets its own ADJUSTMENT
+// transaction, even ones already at 0 — an explicit bulk reset is exactly the kind of change
+// that deserves a record, not something to skip just because a given size didn't numerically
+// move) — this used to write backstock directly via invSaveItem, the one remaining mutation path
+// that bypassed the ledger entirely. Chunked by item (all of one item's sizes always stay
+// together in the same chunk) since a large catalog's full entry set can exceed Firestore's
+// 500-operations-per-transaction limit — each chunk is still atomic, just not the whole reset
+// as a single unit for very large groups.
+async function invResetCounts(key) {
   if (!invAdminUnlocked) { alert('Unlock admin first.'); return; }
 
   const upcomingMap = invComputeUpcoming();
@@ -7008,18 +7245,28 @@ function invResetCounts(key) {
   const group = groups.find(g => g.key === key);
   if (!group || group.items.length === 0) return;
 
-  const typed = prompt(`This resets backstock to 0 and Open Bin to Empty, for every size, on all ${group.items.length} color(s) in "${group.label}". The colors themselves aren't touched — just the counts, and there's no undo for this one.\n\nType RESET to confirm.`);
+  const typed = prompt(`This resets backstock to 0 and Open Bin to Empty, for every size, on all ${group.items.length} color(s) in "${group.label}" — recorded in each size's history like any other change. The colors themselves aren't touched.\n\nType RESET to confirm.`);
   if (typed === null) return;
   if (typed !== 'RESET') { alert('Not reset — you must type RESET exactly.'); return; }
 
-  group.items.forEach(item => {
-    INV_SIZES.forEach(size => {
-      item.sizes[size].backstock = 0;
-      item.sizes[size].openStatus = 'Empty';
-    });
-    invSaveItem(item);
-  });
-  invRenderColorsList();
+  const ITEMS_PER_CHUNK = 80; // 80 items × 5 sizes = 400 transaction docs + 80 item writes = 480 ops, under Firestore's 500 cap
+  try {
+    for (let i = 0; i < group.items.length; i += ITEMS_PER_CHUNK) {
+      const chunkItems = group.items.slice(i, i + ITEMS_PER_CHUNK);
+      const entries = [];
+      chunkItems.forEach(item => {
+        INV_SIZES.forEach(size => {
+          const current = item.sizes[size].backstock || 0;
+          entries.push({ itemId: item.id, size, type: 'ADJUSTMENT', delta: -current, note: 'Bulk reset', alsoSetOpenStatus: 'Empty' });
+        });
+      });
+      await invApplyInventoryTransactions(entries);
+    }
+    invRenderColorsList();
+  } catch (err) {
+    console.error('Reset counts failed:', err);
+    alert(err.message || "Couldn't reset those counts — check your connection and try again.");
+  }
 }
 
 function invToggleExpand(itemId) {
@@ -7103,11 +7350,275 @@ function invToggleActive(itemId) {
   else if (item.colorId) clRestore(item.colorId);
   else { item.active = item.active === false ? true : false; invSaveItem(item); }
 }
+// ─── Receive / Pull — multi-item batch entry ─────────────────────────────────────────────────
+//
+// One shared panel for both, since they're the same interaction shape end to end (search this
+// business's own stocked items — reusing invFilteredSortedItems'-style matching, not the
+// manufacturer-catalog autocomplete — tap a size to add it to a working list, edit quantity per
+// row, submit as one atomic batch) — modeled on the Color Library manufacturer picker's
+// search-then-tap-then-batch-submit shape (clPickerSelected/clRenderPicker/clAddSelectedColors).
+let invBatch = null; // { mode: 'receive'|'pull', search, rows: [{itemId,size,color,brand,qty}], reference, jobId }
+
+function invOpenBatch(mode) {
+  invBatch = { mode, search: '', rows: [], reference: '', jobId: '' };
+  invRenderBatchRoot();
+}
+function invCloseBatch() {
+  invBatch = null;
+  invRenderBatchRoot();
+}
+function invBatchSetSearch(value) {
+  if (!invBatch) return;
+  invBatch.search = value;
+  invRenderBatchSearchResults(); // only the results list — keeps focus in the search box
+}
+function invBatchToggleRow(itemId, size, color, brand) {
+  if (!invBatch) return;
+  const idx = invBatch.rows.findIndex(r => r.itemId === itemId && r.size === size);
+  if (idx >= 0) invBatch.rows.splice(idx, 1);
+  else invBatch.rows.push({ itemId, size, color, brand, qty: 1 });
+  invRenderBatchRoot();
+}
+function invBatchRemoveRow(itemId, size) {
+  if (!invBatch) return;
+  invBatch.rows = invBatch.rows.filter(r => !(r.itemId === itemId && r.size === size));
+  invRenderBatchRoot();
+}
+function invBatchSetQty(itemId, size, value) {
+  if (!invBatch) return;
+  const row = invBatch.rows.find(r => r.itemId === itemId && r.size === size);
+  if (row) row.qty = parseFloat(value) || 0;
+}
+
+function invRenderBatchRoot() {
+  const root = document.getElementById('inv-batch-root');
+  if (!root) return;
+  if (!invBatch) {
+    root.innerHTML = `<div style="display:flex; gap:10px;">
+      <button class="save-btn" style="width:auto; padding:10px 18px; flex:1;" onclick="invOpenBatch('receive')"><i class="fa-solid fa-plus"></i> Receive Inventory</button>
+      <button class="save-btn" style="width:auto; padding:10px 18px; flex:1; background:var(--text-secondary);" onclick="invOpenBatch('pull')"><i class="fa-solid fa-minus"></i> Pull Inventory</button>
+    </div>`;
+    return;
+  }
+  const isReceive = invBatch.mode === 'receive';
+  root.innerHTML = `<div class="card">
+    <div style="font-size:15px; font-weight:700; margin-bottom:0.6rem;">${isReceive ? 'Receive Inventory' : 'Pull Inventory'}</div>
+    <div class="settings-field" style="margin-bottom:0.4rem;">
+      <input type="text" id="inv-batch-search" placeholder="Search colors or brands..." value="${psEscape(invBatch.search)}" oninput="invBatchSetSearch(this.value)">
+    </div>
+    <div id="inv-batch-search-results" style="max-height:220px; overflow-y:auto; margin-bottom:0.6rem;"></div>
+    ${invBatch.rows.length ? `<div class="section-label" style="margin:0 0 0.4rem;">Items (${invBatch.rows.length})</div>
+    <div style="margin-bottom:0.6rem;">
+      ${invBatch.rows.map(r => `
+        <div style="display:flex; align-items:center; gap:8px; padding:0.4rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="flex:1; font-size:13px; min-width:0;">${psEscape(r.color)} <span style="color:var(--text-secondary);">${psEscape(r.brand)} — ${psEscape(r.size)}</span></div>
+          <input type="number" step="0.01" min="0" value="${r.qty}" style="width:70px; padding:6px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); font-size:14px;" onchange="invBatchSetQty('${r.itemId}','${invAttr(r.size)}', this.value)">
+          <button class="icon-btn" style="padding:4px;" onclick="invBatchRemoveRow('${r.itemId}','${invAttr(r.size)}')"><i class="fa-solid fa-xmark"></i></button>
+        </div>`).join('')}
+    </div>` : ''}
+    ${!isReceive ? `<div class="settings-field" style="margin-bottom:0.6rem;">
+      <label>Job (optional)</label>
+      <select onchange="invBatch.jobId = this.value">
+        <option value="">— no job —</option>
+        ${psSortedJobs().map(j => `<option value="${psEscape(j.id)}">${psEscape(j.jobName || 'Untitled job')}</option>`).join('')}
+      </select>
+    </div>` : ''}
+    <div class="settings-field" style="margin-bottom:0.6rem;">
+      <label>${isReceive ? 'Source / order reference (optional)' : 'Note (optional)'}</label>
+      <input type="text" value="${invAttr(invBatch.reference)}" placeholder="${isReceive ? 'e.g. Bargain Balloons order' : 'e.g. reason for the pull'}" onchange="invBatch.reference = this.value">
+    </div>
+    <div style="display:flex; gap:8px;">
+      <button class="save-btn" style="width:auto; padding:9px 18px; flex:1;" ${invBatch.rows.length === 0 ? 'disabled' : ''} onclick="invSubmitBatch()">Submit ${isReceive ? 'Receipt' : 'Pull'} (${invBatch.rows.length})</button>
+      <button class="icon-btn" style="width:auto; padding:9px 14px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invCloseBatch()">Cancel</button>
+    </div>
+  </div>`;
+  invRenderBatchSearchResults();
+}
+function invRenderBatchSearchResults() {
+  const container = document.getElementById('inv-batch-search-results');
+  if (!container || !invBatch) return;
+  const q = invBatch.search.trim().toLowerCase();
+  if (!q) { container.innerHTML = ''; return; }
+  const matches = INVENTORY_ITEMS.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q)).slice(0, 8);
+  if (matches.length === 0) { container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary); padding:0.4rem 0;">No matches.</div>`; return; }
+  container.innerHTML = matches.map(item => `
+    <div style="padding:0.4rem 0; border-bottom:0.5px solid var(--border);">
+      <div style="font-size:13px; font-weight:600;">${psEscape(item.color)} <span style="font-weight:400; color:var(--text-secondary);">${psEscape(item.brand || '')}</span></div>
+      <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">
+        ${INV_SIZES.map(size => {
+          const active = invBatch.rows.some(r => r.itemId === item.id && r.size === size);
+          return `<button class="icon-btn" style="width:auto; padding:4px 8px; font-size:11px; border-radius:999px; border:0.5px solid ${active ? 'var(--accent-border)' : 'var(--border-strong)'}; ${active ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchToggleRow('${item.id}','${invAttr(size)}','${invAttr(item.color)}','${invAttr(item.brand || '')}')">${INV_SIZE_SHORT[size]}</button>`;
+        }).join('')}
+      </div>
+    </div>`).join('');
+}
+// Tries without allowing negative first (the safe default); only on that specific rejection does
+// it warn-and-confirm rather than blocking outright — a hard block would stop real operational
+// work over what's often just an unrecorded receive, but silently allowing it would hide a real
+// discrepancy, hence "warn and require confirmation" per the plan.
+async function invSubmitBatch() {
+  if (!invBatch || invBatch.rows.length === 0) return;
+  const isReceive = invBatch.mode === 'receive';
+  const job = invBatch.jobId ? psFindJob(invBatch.jobId) : null;
+  const entries = invBatch.rows.map(r => ({
+    itemId: r.itemId, size: r.size,
+    type: isReceive ? 'RECEIVE' : 'PULL',
+    delta: isReceive ? Math.abs(r.qty) : -Math.abs(r.qty),
+    reference: isReceive ? (invBatch.reference || '') : '',
+    note: isReceive ? '' : (invBatch.reference || ''),
+    jobId: job ? job.id : null,
+    jobName: job ? (job.jobName || 'Untitled job') : null,
+  }));
+  try {
+    await invApplyInventoryTransactions(entries);
+    invBatch = null;
+    invRenderLatex();
+  } catch (err) {
+    if (err.code === 'WOULD_GO_NEGATIVE' && confirm(`${err.message} Continue anyway?`)) {
+      try {
+        await invApplyInventoryTransactions(entries, { allowNegative: true });
+        invBatch = null;
+        invRenderLatex();
+      } catch (err2) {
+        alert(err2.message || "Couldn't complete that — check your connection and try again.");
+      }
+    } else if (err.code !== 'WOULD_GO_NEGATIVE') {
+      alert(err.message || "Couldn't complete that — check your connection and try again.");
+    }
+  }
+}
+
+// ─── Adjust — a single-item physical-count correction ────────────────────────────────────────
+//
+// Deliberately smaller/secondary and search-first (vs. Receive/Pull's prominent multi-item
+// batch), since this is "I spot-checked one thing and it's off," not a routine workflow. The
+// actual Backstock field in each expanded card does the identical operation already (both route
+// through invApplyInventoryTransactions as an ADJUSTMENT) — this exists purely so someone doesn't
+// have to scroll to find one specific item first.
+let invAdjust = null; // { search, selected: {itemId, size} | null }
+function invOpenAdjust() {
+  invAdjust = { search: '', selected: null };
+  invRenderAdjustRoot();
+}
+function invCloseAdjust() {
+  invAdjust = null;
+  invRenderAdjustRoot();
+}
+function invAdjustSetSearch(value) {
+  if (!invAdjust) return;
+  invAdjust.search = value;
+  invRenderAdjustResults();
+}
+function invAdjustSelect(itemId, size) {
+  if (!invAdjust) return;
+  invAdjust.selected = { itemId, size };
+  invRenderAdjustRoot();
+}
+function invAdjustPreview(value) {
+  const preview = document.getElementById('inv-adjust-preview');
+  if (!preview || !invAdjust || !invAdjust.selected) return;
+  const item = invFindItem(invAdjust.selected.itemId);
+  const current = item.sizes[invAdjust.selected.size].backstock || 0;
+  const actual = parseFloat(value);
+  if (isNaN(actual)) { preview.innerHTML = ''; return; }
+  const delta = actual - current;
+  preview.innerHTML = `Adjustment: <b>${delta > 0 ? '+' : ''}${invFmtQty(delta)}</b> — New balance: <b>${invFmtQty(actual)}</b>`;
+}
+function invRenderAdjustRoot() {
+  const root = document.getElementById('inv-adjust-root');
+  if (!root) return;
+  if (!invAdjust) {
+    root.innerHTML = `<div style="text-align:center;"><button class="icon-btn" style="width:auto; padding:6px 10px; font-size:12px; color:var(--text-secondary);" onclick="invOpenAdjust()">Adjust Inventory</button></div>`;
+    return;
+  }
+  if (!invAdjust.selected) {
+    root.innerHTML = `<div class="card">
+      <div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">Adjust Inventory</div>
+      <div class="settings-field" style="margin-bottom:0.4rem;"><input type="text" id="inv-adjust-search" placeholder="Search colors or brands..." value="${psEscape(invAdjust.search)}" oninput="invAdjustSetSearch(this.value)"></div>
+      <div id="inv-adjust-results" style="max-height:220px; overflow-y:auto;"></div>
+      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; margin-top:0.5rem;" onclick="invCloseAdjust()">Cancel</button>
+    </div>`;
+    invRenderAdjustResults();
+  } else {
+    const item = invFindItem(invAdjust.selected.itemId);
+    const size = invAdjust.selected.size;
+    const current = item.sizes[size].backstock || 0;
+    root.innerHTML = `<div class="card">
+      <div style="font-size:14px; font-weight:700; margin-bottom:0.3rem;">Adjust Inventory</div>
+      <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.6rem;">${psEscape(item.color)} ${psEscape(item.brand || '')} — ${psEscape(size)}</div>
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.4rem;">BBT currently says: <b style="color:var(--text);">${invFmtQty(current)} ${invUnitLabel()}</b></div>
+      <div class="settings-field" style="margin-bottom:0.4rem;"><label>Actual quantity counted</label><input type="number" step="0.01" min="0" id="inv-adjust-actual" placeholder="e.g. ${current}" oninput="invAdjustPreview(this.value)"></div>
+      <div id="inv-adjust-preview" style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;"></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Reason (optional)</label><input type="text" id="inv-adjust-note" placeholder="e.g. Damaged/Popped"></div>
+      <div style="display:flex; gap:8px;">
+        <button class="save-btn" style="width:auto; padding:8px 16px; flex:1;" onclick="invSubmitAdjust()">Save correction</button>
+        <button class="icon-btn" style="width:auto; padding:8px 12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invCloseAdjust()">Cancel</button>
+      </div>
+    </div>`;
+  }
+}
+function invRenderAdjustResults() {
+  const container = document.getElementById('inv-adjust-results');
+  if (!container || !invAdjust) return;
+  const q = invAdjust.search.trim().toLowerCase();
+  if (!q) { container.innerHTML = ''; return; }
+  const matches = INVENTORY_ITEMS.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q)).slice(0, 8);
+  container.innerHTML = matches.length ? matches.map(item => `
+    <div style="padding:0.4rem 0; border-bottom:0.5px solid var(--border);">
+      <div style="font-size:13px; font-weight:600;">${psEscape(item.color)} <span style="font-weight:400; color:var(--text-secondary);">${psEscape(item.brand || '')}</span></div>
+      <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">
+        ${INV_SIZES.map(size => `<button class="icon-btn" style="width:auto; padding:4px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:999px;" onclick="invAdjustSelect('${item.id}','${invAttr(size)}')">${INV_SIZE_SHORT[size]}</button>`).join('')}
+      </div>
+    </div>`).join('') : `<div style="font-size:12px; color:var(--text-secondary); padding:0.4rem 0;">No matches.</div>`;
+}
+async function invSubmitAdjust() {
+  if (!invAdjust || !invAdjust.selected) return;
+  const { itemId, size } = invAdjust.selected;
+  const item = invFindItem(itemId);
+  const actual = parseFloat((document.getElementById('inv-adjust-actual') || {}).value);
+  if (isNaN(actual) || actual < 0) { alert('Enter the actual quantity counted.'); return; }
+  const current = item.sizes[size].backstock || 0;
+  const delta = actual - current;
+  if (delta === 0) { invCloseAdjust(); return; }
+  const note = (document.getElementById('inv-adjust-note') || {}).value || '';
+  try {
+    await invApplyInventoryTransactions([{ itemId, size, type: 'ADJUSTMENT', delta, note: note.trim() }]);
+    invAdjust = null;
+    invRenderLatex();
+  } catch (err) {
+    alert(err.message || "Couldn't save that correction — check your connection and try again.");
+  }
+}
+
 function invUpdateSizeField(itemId, size, field, value) {
   const item = invFindItem(itemId);
   if (!item) return;
+  // backstock is the one ledger-tracked quantity — route it through invApplyInventoryTransactions
+  // instead of a direct assignment, so walking the shelf and typing today's real count is what
+  // produces tomorrow's actual, correctly-labeled transaction history (see invBaseline).
+  // openStatus/price/par/perBag aren't quantities the ledger tracks, so they stay a plain save.
+  if (field === 'backstock') {
+    const newValue = parseFloat(value) || 0;
+    const delta = newValue - (item.sizes[size].backstock || 0);
+    if (delta === 0) return;
+    invApplyInventoryTransactions([{ itemId, size, type: 'ADJUSTMENT', delta }]).catch(err => {
+      console.error('Backstock update failed:', err);
+      alert(err.message || "Couldn't save that count — check your connection and try again.");
+      invRenderColorsList(); // revert the input back to the last known-good value
+    });
+    return;
+  }
   item.sizes[size][field] = field === 'openStatus' ? value : (parseFloat(value) || 0);
   invSaveItem(item);
+}
+// Explicit, one-tap correction of invIsStocked()'s inference — the only way `stocked` ever becomes
+// a real boolean instead of a guess. Not a quantity, so it's a plain catalog save, not a ledger entry.
+function invSetSizeStocked(itemId, size, stocked) {
+  const item = invFindItem(itemId);
+  if (!item) return;
+  item.sizes[size].stocked = stocked;
+  invSaveItem(item);
+  invRenderColorsList();
 }
 // Size labels contain a literal " (5"/7", 11", etc.) — embedding one raw inside a
 // double-quoted HTML attribute (onchange="...('${size}'...)") breaks out of the attribute
@@ -7154,6 +7665,37 @@ function invResolveFlag(itemId, size) {
   invSaveItem(item);
   invRenderColorsList();
 }
+function invToggleHistory(itemId, size) {
+  const key = `${itemId}|${size}`;
+  invHistoryOpenKey = (invHistoryOpenKey === key) ? null : key;
+  invRenderColorsList();
+}
+const INV_TXN_TYPE_LABEL = { INITIAL_COUNT: 'Initial Inventory Count', RECEIVE: 'Received Inventory', PULL: 'Pulled Inventory', ADJUSTMENT: 'Adjustment' };
+function invFmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(2); }
+// Reverse-chronological, human-readable — "if inventory looks wrong, trace exactly how BBT got
+// there." A Pull with a job attached leads with the job name (matching the mockup), everything
+// else leads with its type label; a balloon-denominated entry shows the conversion, not just the
+// resulting fraction, so "why is this -0.25" is never a mystery.
+function invHistoryHtml(itemId, size) {
+  const txns = INVENTORY_TRANSACTIONS.filter(t => t.itemId === itemId && t.size === size).sort((a, b) => b.createdAt - a.createdAt);
+  if (txns.length === 0) return `<div style="font-size:12px; color:var(--text-secondary); padding:0.5rem 0;">No history yet for this size.</div>`;
+  return txns.map(t => {
+    const date = new Date(t.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const sign = t.delta > 0 ? '+' : '';
+    const usageNote = (t.balloonsUsed != null && t.perBagAtTime != null) ? ` (${t.balloonsUsed} balloons ÷ ${t.perBagAtTime}/bag)` : '';
+    return `<div style="padding:0.5rem 0; border-bottom:0.5px solid var(--border); font-size:12px;">
+      <div style="display:flex; justify-content:space-between; align-items:baseline;">
+        <span style="font-weight:700;">${t.jobName ? psEscape(t.jobName) : psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</span>
+        <span style="color:var(--text-tertiary); font-size:11px;">${date}</span>
+      </div>
+      ${t.jobName ? `<div style="color:var(--text-secondary);">${psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</div>` : ''}
+      <div>${sign}${invFmtQty(t.delta)} ${invUnitLabel()}${usageNote} — Balance: ${invFmtQty(t.newBalance)}</div>
+      ${t.reference ? `<div style="color:var(--text-secondary);">Reference: ${psEscape(t.reference)}</div>` : ''}
+      ${t.note ? `<div style="color:var(--text-secondary);">${psEscape(t.note)}</div>` : ''}
+      ${t.who ? `<div style="color:var(--text-tertiary); font-size:11px; margin-top:2px;">${psEscape(t.who)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
 function invSubmitOrder(itemId, size) {
   const qty = parseFloat(document.getElementById('inv-order-qty').value) || 0;
   const vendor = document.getElementById('inv-order-vendor').value.trim();
@@ -7166,19 +7708,23 @@ function invSubmitOrder(itemId, size) {
     alert("Couldn't save that order — check your connection and try again.");
   });
 }
-// Marking an order received is the ONLY thing that touches backstock automatically —
-// crediting the ordered qty straight to that size's shelf count, no manual re-entry.
+// Crediting the ordered qty straight to that size's shelf count — routed through the same
+// ledger service as every other backstock change (this used to be a plain read-then-setDoc, a
+// real race if two people marked different orders for the same item/size at once; runTransaction
+// closes that).
 function invMarkReceived(orderId) {
   const order = INVENTORY_ORDERS.find(o => o.id === orderId);
   if (!order) return;
-  const item = invFindItem(order.itemId);
-  if (item) {
-    item.sizes[order.size].backstock = (item.sizes[order.size].backstock || 0) + order.qty;
-    invSaveItem(item);
-  }
-  order.status = 'received';
-  order.receivedDate = new Date().toLocaleDateString();
-  window.fbSaveInventoryOrder(order).catch(err => console.error(err));
+  invApplyInventoryTransactions([{ itemId: order.itemId, size: order.size, type: 'RECEIVE', delta: order.qty, reference: order.vendor }])
+    .then(() => {
+      order.status = 'received';
+      order.receivedDate = new Date().toLocaleDateString();
+      return window.fbSaveInventoryOrder(order).catch(err => console.error('Order status update failed after receiving:', err));
+    })
+    .catch(err => {
+      console.error('Mark received failed:', err);
+      alert(err.message || "Couldn't credit that order — check your connection and try again.");
+    });
 }
 function invMarkBackordered(orderId) {
   const order = INVENTORY_ORDERS.find(o => o.id === orderId);
@@ -7224,6 +7770,42 @@ function invRenderLatex() {
       <button class="save-btn" style="width:auto; padding:9px 16px; flex-shrink:0; ${editing ? 'background:var(--text-secondary);' : ''}" onclick="invSetMode('${editing ? 'view' : 'edit'}')">${editing ? 'Done counting' : 'Start Editing'}</button>
     </div>
   </div>`;
+
+  // Receive/Pull are quantity changes, so — same as the Backstock field itself — they only make
+  // sense in Editing mode; a mount point rather than inline HTML since the panel has its own
+  // multi-step state (search → build a list → submit) that shouldn't force-rebuild the whole
+  // Inventory screen on every keystroke. See invRenderBatchRoot.
+  if (invMode === 'edit') {
+    html += `<div id="inv-batch-root" style="margin-bottom:1rem;"></div>`;
+    html += `<div id="inv-adjust-root" style="margin-bottom:1rem;"></div>`;
+  }
+
+  // Baseline physical-count session — explicit and visible to everyone (so the team can see
+  // progress), but only admin can Start/Finish it — see invBaseline. While running, every
+  // backstock edit anywhere unconditionally logs as INITIAL_COUNT (invApplyInventoryTransactions),
+  // not inferred from "nothing happened here before."
+  if (invBaseline.status === 'in_progress') {
+    const progress = invBaselineProgress();
+    html += `<div class="card" style="background:var(--info-bg); border-color:var(--info-text);">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+        <div>
+          <div style="font-size:15px; font-weight:700; color:var(--info-text);"><i class="fa-solid fa-clipboard-list"></i> Physical inventory count in progress</div>
+          <div style="font-size:12px; color:var(--text-secondary);">${progress.counted} of ${progress.total} sizes counted so far.</div>
+        </div>
+        ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:8px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); flex-shrink:0;" onclick="invFinishBaselineCount()">Finish Count</button>` : ''}
+      </div>
+    </div>`;
+  } else if (invAdminUnlocked) {
+    html += `<div class="card">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+        <div>
+          <div style="font-size:14px; font-weight:700;">${invBaseline.status === 'complete' ? 'Starting a new physical count?' : 'Starting your physical inventory count?'}</div>
+          <div style="font-size:12px; color:var(--text-secondary);">Every count entered while this is running becomes an official Initial Inventory Count.</div>
+        </div>
+        <button class="save-btn" style="width:auto; padding:8px 16px; flex-shrink:0;" onclick="invStartBaselineCount()">Start Count</button>
+      </div>
+    </div>`;
+  }
 
   // Pending orders — the "what's in flight" list, so nothing gets lost between pressing
   // order and it actually landing in backstock. Sorted by color name, collapsible like the
@@ -7346,11 +7928,27 @@ function invRenderLatex() {
 
   root.innerHTML = html;
   invRenderColorsList();
+  if (invMode === 'edit') { invRenderBatchRoot(); invRenderAdjustRoot(); }
 }
 
 // ═══ Color Library management (Settings) — deciding which colors this business offers at all,
 // as opposed to Inventory's stock levels for them. Self-contained, like Import Mapping Rules and
 // Production Templates: its own collapsible header, rendered into a static Settings container. ═══
+// Its own section (not folded into Color Library's) since the setting governs the whole
+// Inventory ledger — Receive/Pull/Adjust/History too — not just Color Library's own screen,
+// even though backstock/perBag happen to be edited there. Already behind the admin passcode
+// simply by being in Settings.
+function invRenderSettingsSection() {
+  const root = document.getElementById('inv-settings-root');
+  if (!root) return;
+  root.innerHTML = `<div class="card">
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">How this business counts on-hand stock — changes what Backstock, Receive, Pull, and Adjust all mean.</div>
+    <div class="trip-toggle" style="margin:0;">
+      <button class="trip-btn ${invTrackingUnit === 'bags' ? 'active' : ''}" onclick="invSetTrackingUnit('bags')">Bags</button>
+      <button class="trip-btn ${invTrackingUnit === 'balloons' ? 'active' : ''}" onclick="invSetTrackingUnit('balloons')">Individual Balloons</button>
+    </div>
+  </div>`;
+}
 function clRenderSettingsSection() {
   const root = document.getElementById('cl-settings-root');
   if (!root) return;
@@ -7795,6 +8393,7 @@ function invColorCardHtml(item, upcomingMap) {
     ${INV_SIZES.map(size => `<div style="text-align:center; font-size:9px; font-weight:600; color:var(--text-tertiary);">${INV_SIZE_SHORT[size]}</div>`).join('')}
     ${INV_SIZES.map(size => {
       const sd = item.sizes[size];
+      if (!invIsStocked(sd)) return `<div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:1px 2px; color:var(--text-tertiary);">—</div>`;
       // Green draws the eye on purpose — it means "needs ordering" here, not "good to go."
       const needsOrder = (sd.backstock || 0) === 0;
       const bg = needsOrder ? 'var(--accent-light)' : 'var(--info-bg)';
@@ -7834,24 +8433,46 @@ function invColorCardHtml(item, upcomingMap) {
       const sd = item.sizes[size];
       const formKey = `${item.id}|${size}`;
 
+      const stocked = invIsStocked(sd);
+
       html += `<div class="ps-item-block" style="margin-bottom:0.75rem; padding-bottom:0.75rem;">`;
       html += `<div style="font-size:15px; font-weight:700; margin-bottom:0.5rem; margin-top:0.5rem;">${psEscape(size)}</div>`;
+      // Whether this color even comes in this size at all — a size never given a par or any stock
+      // is a guess (see invIsStocked), and needs to be a one-tap correction right where the count
+      // is happening, not a separate setup step someone has to remember to do first.
+      if (invMode === 'edit') {
+        html += `<div class="trip-toggle" style="margin:0 0 0.5rem;">
+          <button class="trip-btn ${stocked ? 'active' : ''}" onclick="invSetSizeStocked('${item.id}','${invAttr(size)}',true)">Stocked</button>
+          <button class="trip-btn ${!stocked ? 'active' : ''}" onclick="invSetSizeStocked('${item.id}','${invAttr(size)}',false)">Not stocked</button>
+        </div>`;
+      } else if (!stocked) {
+        html += `<div style="font-size:12px; color:var(--text-tertiary); margin-bottom:0.5rem;">Not stocked in this size</div>`;
+      }
       // The only two things a physical count needs to record. In Viewing mode (the safe default
       // for a routine "what do we have?" check) these are plain read-only text — no select/input
-      // for a stray tap to accidentally change; Editing mode swaps in the real controls.
-      if (invMode === 'edit') {
+      // for a stray tap to accidentally change; Editing mode swaps in the real controls. Neither
+      // is shown at all once a size is marked not stocked — there's nothing to count.
+      if (stocked && invMode === 'edit') {
         html += `<div class="row">
           <div class="settings-field" style="margin-bottom:0"><label>Open bin</label>
             <select onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','openStatus',this.value)">
               ${INV_OPEN_STATUSES.map(s => `<option value="${s}" ${s === sd.openStatus ? 'selected' : ''}>${s}</option>`).join('')}
             </select>
           </div>
-          <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','backstock',this.value)"></div>
+          <div class="settings-field" style="margin-bottom:0"><label>Backstock (${invUnitLabel()})</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','backstock',this.value)"></div>
         </div>`;
-      } else {
+        // Editing the field only records a count if the typed value actually differs from what
+        // was showing — a genuinely-correct-as-is size (including a real zero) needs an explicit
+        // way to be marked counted, since no change event fires when nothing was typed.
+        if (invBaseline.status === 'in_progress') {
+          html += invSizeCountedThisSession(item.id, size)
+            ? `<div style="margin-top:0.4rem; font-size:11px; color:var(--accent); font-weight:600;"><i class="fa-solid fa-circle-check"></i> Counted</div>`
+            : `<div style="margin-top:0.4rem;"><button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invConfirmBaselineCount('${item.id}','${invAttr(size)}')">Confirm count as shown</button></div>`;
+        }
+      } else if (stocked) {
         html += `<div class="row">
           <div><div style="font-size:12px; color:var(--text-secondary); font-weight:500; margin-bottom:5px;">Open bin</div><div style="font-size:16px; font-weight:600;">${psEscape(sd.openStatus)}</div></div>
-          <div><div style="font-size:12px; color:var(--text-secondary); font-weight:500; margin-bottom:5px;">Backstock (bags)</div><div style="font-size:16px; font-weight:600;">${sd.backstock}</div></div>
+          <div><div style="font-size:12px; color:var(--text-secondary); font-weight:500; margin-bottom:5px;">Backstock (${invUnitLabel()})</div><div style="font-size:16px; font-weight:600;">${sd.backstock}</div></div>
         </div>`;
       }
       // Flagging works the same in either mode — noticing something's off shouldn't require
@@ -7875,6 +8496,13 @@ function invColorCardHtml(item, upcomingMap) {
       } else {
         html += `<div style="margin-top:0.4rem;"><button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary);" onclick="invOpenFlagComposer('${item.id}','${invAttr(size)}')"><i class="fa-regular fa-flag"></i> Flag this</button></div>`;
       }
+      // History stays out of the way like Google Sheets' version history — a secondary link, not
+      // front-and-center, but reachable from wherever you're already looking at this size.
+      const historyKey = `${item.id}|${size}`;
+      html += `<div style="margin-top:0.3rem;"><button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary);" onclick="invToggleHistory('${item.id}','${invAttr(size)}')"><i class="fa-solid fa-clock-rotate-left"></i> ${invHistoryOpenKey === historyKey ? 'Hide history' : 'View history'}</button></div>`;
+      if (invHistoryOpenKey === historyKey) {
+        html += `<div style="margin-top:0.4rem; max-height:280px; overflow-y:auto;">${invHistoryHtml(item.id, size)}</div>`;
+      }
       // Pricing, restock math, and ordering are a manager's job, not a counter's — gated behind
       // the same admin passcode as the pricing fields themselves, so the counting view stays down
       // to just the fields above instead of showing info nobody taking a physical count needs.
@@ -7885,7 +8513,7 @@ function invColorCardHtml(item, upcomingMap) {
         html += `<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin:0.75rem 0;">
           <div class="settings-field" style="margin-bottom:0"><label>Price/bag</label><input type="number" step="0.01" min="0" value="${sd.price}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','price',this.value)"></div>
           <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${sd.perBag || 100}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','perBag',this.value)"></div>
-          <div class="settings-field" style="margin-bottom:0"><label>Par (bags)</label><input type="number" min="0" value="${sd.par}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','par',this.value)"></div>
+          <div class="settings-field" style="margin-bottom:0"><label>Par (${invUnitLabel()})</label><input type="number" min="0" value="${sd.par}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','par',this.value)"></div>
         </div>`;
         html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Upcoming (from open jobs): ${upcoming} balloons${pendingQty ? ` · Pending order: ${pendingQty} bags` : ''}</div>`;
         html += `<div style="margin-bottom:0.5rem;">
@@ -7902,7 +8530,7 @@ function invColorCardHtml(item, upcomingMap) {
           html += `<div style="margin-top:0.75rem;">
             ${need.restockBags > 0 ? `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Defaulted to the ${need.urgentBags > 0 ? 'urgent' : 'total'} amount (${defaultQty}) — bump it up to ${need.totalBags} to also cover your normal restock, if budget/availability allows.</div>` : ''}
             <div class="row">
-              <div class="settings-field" style="margin-bottom:0"><label>Quantity (bags)</label><input type="number" id="inv-order-qty" min="1" value="${defaultQty}"></div>
+              <div class="settings-field" style="margin-bottom:0"><label>Quantity (${invUnitLabel()})</label><input type="number" id="inv-order-qty" min="1" value="${defaultQty}"></div>
               <div class="settings-field" style="margin-bottom:0"><label>Ordered from</label><input type="text" id="inv-order-vendor" placeholder="e.g. Loftus"></div>
             </div>
             <div class="settings-field"><label>Order date</label><input type="text" id="inv-order-date" placeholder="e.g. 3/14"></div>
