@@ -5731,6 +5731,14 @@ const INV_SIZE_SHORT = { '5"/7"': '5"', '11"': '11"', '17"/18"': '18"', '24"': '
 // Maps a Production balloon size to the inventory size group it belongs to.
 const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '18"': '17"/18"', '24"': '24"', '36"': '30"/36"' };
 const INV_OPEN_STATUSES = ['Full', 'Partial', 'Empty'];
+// Compact letter + color for the quick-view glance — Full uses the same reassuring green as
+// "in stock" elsewhere, Empty is deliberately muted (the backstock number's own red/green already
+// carries the urgency signal), Partial sits neutrally between the two.
+const INV_OPEN_STATUS_BADGE = {
+  Full: { letter: 'F', color: 'var(--accent)' },
+  Partial: { letter: 'P', color: 'var(--info-text)' },
+  Empty: { letter: 'E', color: 'var(--text-tertiary)' },
+};
 
 let INVENTORY_ITEMS = [];
 // Items with `deletedAt` set — split out of INVENTORY_ITEMS at the one place it's populated (see
@@ -5753,6 +5761,7 @@ let invHistoryOpenKey = null; // `${itemId}|${size}` of the history panel curren
 // in Editing mode together — see invModeInit/invSetMode.
 let invMode = 'view';
 let invSearchQuery = '';
+let invUseUpOnly = false; // "⭐ Use Up only" filter — a color someone's flagged to intentionally work through
 let invTierTab = 'main'; // 'main' or 'misc' — which colors show at all; a hard filter, applied before search/sort
 // 'custom' (default — matches walking the physical shelf), 'tier' (alphabetical), 'brand', or 'size'.
 let invGroupBy = 'custom';
@@ -6282,12 +6291,18 @@ function invResolveActor() {
 // delta/balloonsUsed per entry; alsoSetOpenStatus is the one non-ledger field (Open Bin) that
 // invResetCounts needs to change in the SAME atomic write, so it never becomes a second,
 // un-audited mutation path racing against this one. Returns the created transaction docs, or
-// rejects (nothing partially applied) on any per-row problem (missing item, missing perBag, or a
-// Pull that isn't explicitly confirmed to go negative — see allowNegative). For a very large
+// rejects (nothing partially applied) on any per-row problem — missing item, missing perBag, or
+// a delta that would take a balance negative, which is an unconditional hard block (no override
+// anywhere). For a very large
 // entries array (e.g. resetting a whole catalog), call this once per chunk of items — Firestore
 // caps a single transaction at 500 operations (item reads/writes + transaction-doc writes
 // combined) — see invResetCounts for the chunking pattern.
-function invApplyInventoryTransactions(entries, { allowNegative = false } = {}) {
+// Backstock can never go negative — no override, anywhere. The one previous escape hatch
+// (invSubmitBatch's "Continue anyway?" confirm, retrying with allowNegative:true) has been
+// removed, so this hard floor is now unconditional for every caller: if a pull would take a
+// balance below zero, the fix is to correct the recorded count via Adjust first, not to force
+// a negative number through.
+function invApplyInventoryTransactions(entries) {
   const actor = invResolveActor();
   const trackingUnit = invTrackingUnit;
   const itemIds = [...new Set(entries.map(e => e.itemId))];
@@ -6315,7 +6330,7 @@ function invApplyInventoryTransactions(entries, { allowNegative = false } = {}) 
       // Only a DECREASE can trigger this — a positive delta (Receive, or an upward Adjustment)
       // should never be blocked just because the balance was already negative from some earlier
       // pull; that would make it impossible to ever correct a negative balance by receiving stock.
-      if (delta < 0 && newBalance < 0 && !allowNegative) {
+      if (delta < 0 && newBalance < 0) {
         throw Object.assign(new Error(`This would take ${item.color} ${e.size} negative (${newBalance}).`), { code: 'WOULD_GO_NEGATIVE', itemId: e.itemId, size: e.size, newBalance });
       }
       sd.backstock = newBalance;
@@ -6575,10 +6590,17 @@ function clMigrateFromInventory() {
   if (libraryChanged) clSaveLibrary().catch(() => {});
 }
 
+// Matches by colorName OR an existing alias (both case/whitespace-insensitive), scoped to the
+// same brand — so typing an alias as if it were a new color name resolves to the real entry
+// instead of silently creating a duplicate. (Previously this only ever checked colorName.)
 function clFindEntry(brand, colorName) {
   const b = (brand || '').trim().toLowerCase();
   const c = (colorName || '').trim().toLowerCase();
-  return COLOR_LIBRARY.find(e => e.colorName.trim().toLowerCase() === c && (e.brand || '').trim().toLowerCase() === b);
+  return COLOR_LIBRARY.find(e => {
+    if ((e.brand || '').trim().toLowerCase() !== b) return false;
+    if (e.colorName.trim().toLowerCase() === c) return true;
+    return (e.aliases || []).some(a => a.trim().toLowerCase() === c);
+  });
 }
 function clFindOrCreate(brand, colorName) {
   const existing = clFindEntry(brand, colorName);
@@ -7183,6 +7205,30 @@ function invSaveItem(item) {
     alert("Couldn't save that change — check your connection and try again.");
   });
 }
+// Shared plain-save setter for color-level metadata (notes, storageLocation, colorGroup) — none
+// of these are quantities, so a plain save is correct, same as price/par/perBag already are.
+function invUpdateItemField(itemId, field, value) {
+  const item = invFindItem(itemId);
+  if (!item) return;
+  item[field] = typeof value === 'string' ? value.trim() : value;
+  invSaveItem(item);
+}
+// Lightweight, self-growing suggestions — no separate location-management screen, just whatever's
+// already been typed on any other color.
+function invLocationSuggestions() {
+  return [...new Set(INVENTORY_ITEMS.map(i => i.storageLocation).filter(Boolean))].sort();
+}
+// One mutually-exclusive primary group per color, for organizing the big Main/Misc list into
+// collapsible sections (Reds/Blues/etc.) — deliberately NOT a tagging system. Warm/Cool/Sheen-style
+// non-exclusive descriptors are a genuinely different, separate concept (an item could be both
+// "Warm" and "Sheen") and are not part of this field; if that's ever built, it'd be its own
+// independent array (e.g. `tags`), added without touching or migrating colorGroup at all.
+const INV_COLOR_GROUPS = ['Reds', 'Oranges', 'Yellows', 'Greens', 'Blues', 'Purples', 'Pinks', 'Neutrals'];
+function invColorGroupSuggestions() {
+  const set = new Set(INV_COLOR_GROUPS);
+  INVENTORY_ITEMS.forEach(i => { if (i.colorGroup) set.add(i.colorGroup); });
+  return [...set];
+}
 
 // ═══════════════════════════════════════ INVENTORY REQUIREMENTS (Step 10) ═══════════════════════════════════════
 //
@@ -7398,7 +7444,8 @@ function invPickMasterCatalogSuggestion(color, brand) {
 // separate axis from this sort, set via invGroupBy.
 function invFilteredSortedItems() {
   const q = invSearchQuery.trim().toLowerCase();
-  const items = invSortedItems().filter(i => (i.tier || 'main') === invTierTab);
+  let items = invSortedItems().filter(i => (i.tier || 'main') === invTierTab);
+  if (invUseUpOnly) items = items.filter(i => i.useUp);
   if (!q) return items;
   return items.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q));
 }
@@ -7407,6 +7454,22 @@ function invFilteredSortedItems() {
 // whichever size is picked; otherwise one flat alphabetical list for whichever tab (Main/Misc)
 // is currently showing, since Main-vs-Misc is now the invTierTab filter above, not a group split.
 function invGroupedItems(items, upcomingMap) {
+  // The tab labeled "Color" used to just re-show the Main/Misc split (the 'tier' fallback below,
+  // now dead code left in place harmlessly) — this is the real color-family grouping it always
+  // should have been: bucket by colorGroup exactly like 'brand' buckets by item.brand, so the
+  // existing collapse/expand machinery (invCollapsedGroups/invToggleGroup) needs no changes.
+  if (invGroupBy === 'colorGroup') {
+    const byGroup = {};
+    items.forEach(i => {
+      const key = i.colorGroup || '(Ungrouped)';
+      (byGroup[key] = byGroup[key] || []).push(i);
+    });
+    return Object.keys(byGroup).sort((a, b) => {
+      if (a === '(Ungrouped)') return 1;
+      if (b === '(Ungrouped)') return -1;
+      return a.localeCompare(b);
+    }).map(key => ({ key: 'colorGroup:' + key, label: key, items: byGroup[key] }));
+  }
   if (invGroupBy === 'brand') {
     const byBrand = {};
     items.forEach(i => {
@@ -7439,6 +7502,17 @@ function invSetTierTab(tab) {
 }
 function invSetSearch(val) {
   invSearchQuery = val;
+  invRenderColorsList();
+}
+function invSetUseUpOnly(val) {
+  invUseUpOnly = val;
+  invRenderColorsList();
+}
+function invToggleUseUp(itemId) {
+  const item = invFindItem(itemId);
+  if (!item) return;
+  item.useUp = !item.useUp;
+  invSaveItem(item);
   invRenderColorsList();
 }
 function invSetGroupBy(mode) {
@@ -7541,13 +7615,27 @@ function invAddColor() {
   if (!color) { alert('Enter a color name first.'); return; }
   const libraryEntry = clFindOrCreate(brand, color);
   clSaveLibrary().catch(() => {});
+  nameEl.value = ''; brandEl.value = '';
+  document.getElementById('inv-new-color-suggest').style.display = 'none';
+
+  // clFindOrCreate above already deduped the Library entry itself, but that alone doesn't stop a
+  // second, separate Inventory row from being created for the same color — check for an existing
+  // active item pointing at this same Library entry first, same find-and-open pattern already
+  // used for Foil's duplicate-group detection, rather than minting a duplicate.
+  const existingItem = INVENTORY_ITEMS.find(i => i.colorId === libraryEntry.id);
+  if (existingItem) {
+    alert(`"${existingItem.color}" already exists in Inventory — opening it.`);
+    invExpandedItem = existingItem.id;
+    invTierTab = existingItem.tier || 'main';
+    invRenderLatex();
+    return;
+  }
+
   // One-off manual additions default to Misc — Main is for your established, consistent lineup.
   // Since setting Main/Misc is admin-gated (see invColorCardHtml), a non-admin adding a color
   // couldn't otherwise get it out of Misc to even SEE it if the Main tab were left selected —
   // switch to the Misc tab too, so the newly-added (and auto-expanded) color is actually visible.
   const item = { id: psNewInventoryItemId(), color, brand, tier: 'misc', active: true, colorId: libraryEntry.id, sizes: invBlankSizeData() };
-  nameEl.value = ''; brandEl.value = '';
-  document.getElementById('inv-new-color-suggest').style.display = 'none';
   invExpandedItem = item.id;
   invTierTab = 'misc';
   invSaveItem(item);
@@ -7711,10 +7799,9 @@ function invRenderBatchSearchResults() {
       </div>
     </div>`).join('');
 }
-// Tries without allowing negative first (the safe default); only on that specific rejection does
-// it warn-and-confirm rather than blocking outright — a hard block would stop real operational
-// work over what's often just an unrecorded receive, but silently allowing it would hide a real
-// discrepancy, hence "warn and require confirmation" per the plan.
+// A Pull that would take a size negative is hard-blocked, same as every other mutation path —
+// no "continue anyway" override. If the real shelf count doesn't match what's recorded, the fix
+// is to correct it via Adjust first, not to force the pull through.
 async function invSubmitBatch() {
   if (!invBatch || invBatch.rows.length === 0) return;
   const isReceive = invBatch.mode === 'receive';
@@ -7733,17 +7820,7 @@ async function invSubmitBatch() {
     invBatch = null;
     invRenderLatex();
   } catch (err) {
-    if (err.code === 'WOULD_GO_NEGATIVE' && confirm(`${err.message} Continue anyway?`)) {
-      try {
-        await invApplyInventoryTransactions(entries, { allowNegative: true });
-        invBatch = null;
-        invRenderLatex();
-      } catch (err2) {
-        alert(err2.message || "Couldn't complete that — check your connection and try again.");
-      }
-    } else if (err.code !== 'WOULD_GO_NEGATIVE') {
-      alert(err.message || "Couldn't complete that — check your connection and try again.");
-    }
+    alert(err.message || "Couldn't complete that — check your connection and try again.");
   }
 }
 
@@ -7875,7 +7952,7 @@ function invUpdateSizeField(itemId, size, field, value) {
 // and corrupts the handler. This escapes it for safe use inside such attributes specifically
 // (not for visible text, where a literal quote is harmless).
 function invAttr(str) {
-  return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  return String(str == null ? '' : str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function invOpenOrderForm(itemId, size) {
@@ -7903,7 +7980,7 @@ function invSubmitFlag(itemId, size) {
   item.sizes[size].flag = { note, flaggedAt: Date.now() };
   invSaveItem(item);
   invFlagComposerKey = null;
-  invRenderColorsList();
+  invRenderLatex(); // full re-render — the new Flagged sizes section lives outside #inv-colors-results
 }
 // Admin-only so a flag can't get quietly dismissed by whoever finds it easiest to clear — it's
 // meant to reach whoever manages the catalog, not just disappear the moment someone taps it.
@@ -7913,7 +7990,27 @@ function invResolveFlag(itemId, size) {
   if (!item) return;
   delete item.sizes[size].flag;
   invSaveItem(item);
-  invRenderColorsList();
+  invRenderLatex(); // full re-render — the new Flagged sizes section lives outside #inv-colors-results
+}
+// All currently-flagged sizes across every color, newest first — the smallest useful fix for
+// "I don't know what happens after a flag is submitted": no new storage, no statuses, no
+// notifications, just the same existing per-size flag data surfaced in one place instead of only
+// being visible if you happen to reopen that exact color.
+function invAllFlaggedSizes() {
+  const flagged = [];
+  INVENTORY_ITEMS.forEach(item => {
+    INV_SIZES.forEach(size => {
+      if (item.sizes[size].flag) flagged.push({ item, size, flag: item.sizes[size].flag });
+    });
+  });
+  return flagged.sort((a, b) => b.flag.flaggedAt - a.flag.flaggedAt);
+}
+function invJumpToFlaggedItem(itemId) {
+  const item = invFindItem(itemId);
+  if (!item) return;
+  invExpandedItem = itemId;
+  invTierTab = item.tier || 'main';
+  invRenderLatex();
 }
 function invToggleHistory(itemId, size) {
   const key = `${itemId}|${size}`;
@@ -8113,9 +8210,12 @@ function invRenderLatex() {
       <div class="settings-field" style="margin-bottom:0.6rem;">
         <input type="text" id="inv-search" placeholder="Search colors or brands..." value="${psEscape(invSearchQuery)}" oninput="invSetSearch(this.value)">
       </div>
+      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem; cursor:pointer;">
+        <input type="checkbox" ${invUseUpOnly ? 'checked' : ''} onchange="invSetUseUpOnly(this.checked)"> <i class="fa-solid fa-star" style="color:#d4a017;"></i> Use Up only
+      </label>
       <div class="trip-toggle" style="margin:0;">
         <button class="trip-btn ${invGroupBy === 'custom' ? 'active' : ''}" onclick="invSetGroupBy('custom')">My Order</button>
-        <button class="trip-btn ${invGroupBy === 'tier' ? 'active' : ''}" onclick="invSetGroupBy('tier')">Color</button>
+        <button class="trip-btn ${invGroupBy === 'colorGroup' ? 'active' : ''}" onclick="invSetGroupBy('colorGroup')">Color</button>
         <button class="trip-btn ${invGroupBy === 'brand' ? 'active' : ''}" onclick="invSetGroupBy('brand')">Brand</button>
         <button class="trip-btn ${invGroupBy === 'size' ? 'active' : ''}" onclick="invSetGroupBy('size')">Size</button>
       </div>
@@ -8155,6 +8255,26 @@ function invRenderLatex() {
             <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invRestoreItem('${item.id}')">Restore</button>
             <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="invPermanentlyDeleteItem('${item.id}')">Delete forever</button>
           </div>
+        </div>`).join('')}
+    </div>`;
+  }
+
+  // The smallest useful fix for "I don't know what happens after a flag is submitted" — every
+  // flag was already visible to everyone inline on its own size's card, but that's the only place
+  // it ever surfaced; this just aggregates the same data into one list so nothing gets missed
+  // because no one happened to reopen that specific color. No new storage, no statuses, no
+  // notifications — Resolve here is the exact same invResolveFlag already used inline.
+  const flaggedSizes = invAllFlaggedSizes();
+  if (flaggedSizes.length > 0) {
+    html += `<div class="section-label">Flagged sizes (${flaggedSizes.length})</div>
+    <div class="card">
+      ${flaggedSizes.map(({ item, size, flag }) => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border); cursor:pointer;" onclick="invJumpToFlaggedItem('${item.id}')">
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:600;"><i class="fa-solid fa-flag" style="color:var(--warning-text);"></i> ${psEscape(item.color)} — ${psEscape(size)}</div>
+            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(flag.note)}</div>
+          </div>
+          ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); flex-shrink:0;" onclick="event.stopPropagation(); invResolveFlag('${item.id}','${invAttr(size)}')">Resolve</button>` : ''}
         </div>`).join('')}
     </div>`;
   }
@@ -8671,6 +8791,25 @@ function invLibraryOnlyHtml() {
   return html;
 }
 
+// Lets Tab/Shift+Tab move straight between a color's 5 Backstock fields — type, Tab, type — for
+// fast physical counting, without touching tabindex anywhere (a positive tabindex is a real
+// accessibility anti-pattern: it's globally order-dependent and breaks the moment anything else
+// on the page gets one). Instead this only intercepts Tab while focus is already inside one of
+// the 5 known Backstock inputs, and only between them — tabbing out past either end (idx out of
+// range) is never preventDefault()'d, so it falls straight through to completely native behavior
+// into whatever's next/previous in the DOM (Open Bin, Flag, admin fields, etc.), exactly as
+// before. No other key is touched, and no other control on the page is affected.
+function invBackstockTabKey(e, idx) {
+  if (e.key !== 'Tab') return;
+  const targetIdx = idx + (e.shiftKey ? -1 : 1);
+  if (targetIdx < 0 || targetIdx >= INV_SIZES.length) return;
+  const container = e.target.closest('.ps-job-body');
+  const nextField = container && container.querySelector(`.inv-backstock-input[data-size-idx="${targetIdx}"]`);
+  if (!nextField) return;
+  e.preventDefault();
+  nextField.focus(); // triggers the input's own onfocus="this.select()" — ready to type over
+}
+
 // Renders one color's card — collapsed header (name, brand, size/quantity glance) and, when
 // expanded, the Main/Misc toggle plus each size's editable fields and order action.
 // orderInfo (only set for My Order): { rank, total } — this color's 1-based position in the
@@ -8684,7 +8823,9 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
   // below it — keeps the collapsed row a single compact line instead of growing every card
   // taller. Color follows the actual bag count, not the separate Open Bin status field (the two
   // can disagree — someone may have counted bags without updating Open Bin yet) — pale blue at
-  // 0, soft green once there's anything in stock.
+  // 0, soft green once there's anything in stock. A small F/P/E letter underneath surfaces Open
+  // Bin too, so "0 bags, Full bin" and "0 bags, Empty bin" — very different real situations —
+  // no longer look identical from the collapsed row alone.
   const sizeSummary = `<div style="display:grid; grid-template-columns:repeat(${INV_SIZES.length}, minmax(24px, 1fr)); gap:3px; flex-shrink:0;">
     ${INV_SIZES.map(size => `<div style="text-align:center; font-size:9px; font-weight:600; color:var(--text-tertiary);">${INV_SIZE_SHORT[size]}</div>`).join('')}
     ${INV_SIZES.map(size => {
@@ -8694,6 +8835,10 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
       const bg = needsOrder ? 'var(--accent-light)' : 'var(--info-bg)';
       const color = needsOrder ? 'var(--accent)' : 'var(--info-text)';
       return `<div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:1px 2px; background:${bg}; color:${color};">${sd.backstock || 0}</div>`;
+    }).join('')}
+    ${INV_SIZES.map(size => {
+      const badge = INV_OPEN_STATUS_BADGE[item.sizes[size].openStatus] || INV_OPEN_STATUS_BADGE.Empty;
+      return `<div style="text-align:center; font-size:9px; font-weight:700; margin-top:1px; color:${badge.color};">${badge.letter}</div>`;
     }).join('')}
   </div>`;
 
@@ -8711,7 +8856,7 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
   html += `<div class="inv-color-row-header"${invRearrangeMode ? '' : ` onclick="invToggleExpand('${item.id}')"`}>
     ${orderRankInput}
     <div class="inv-color-row-text">
-      <div class="inv-color-row-name">${psEscape(item.color)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px; margin-left:2px;">INACTIVE</span>'}</div>
+      <div class="inv-color-row-name"><i class="fa-${item.useUp ? 'solid' : 'regular'} fa-star" style="color:${item.useUp ? '#d4a017' : 'var(--text-tertiary)'}; font-size:13px; margin-right:3px; cursor:pointer;" onclick="event.stopPropagation(); invToggleUseUp('${item.id}')" title="${item.useUp ? 'Use Up — click to unmark' : 'Mark as Use Up'}"></i>${psEscape(item.color)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px; margin-left:2px;">INACTIVE</span>'}</div>
       <div class="inv-color-row-brand">${psEscape(item.brand || 'No brand')}</div>
     </div>
     ${invRearrangeMode ? '' : sizeSummary}
@@ -8733,9 +8878,29 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
         <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invToggleActive('${item.id}')">${isActive ? 'Deactivate' : 'Reactivate'}</button>
         <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invDeleteColor('${item.id}')"><i class="fa-solid fa-trash"></i></button>
       </div>`;
+      html += `<div class="settings-field" style="margin-top:0.5rem; margin-bottom:0;"><label>Color Group <span style="font-weight:400;">(optional — for collapsible sections under the Color tab)</span></label>
+        <input type="text" list="inv-color-group-suggestions" value="${invAttr(item.colorGroup)}" placeholder="e.g. Reds" onchange="invUpdateItemField('${item.id}','colorGroup',this.value)">
+        <datalist id="inv-color-group-suggestions">${invColorGroupSuggestions().map(g => `<option value="${invAttr(g)}">`).join('')}</datalist>
+      </div>`;
       html += invAliasEditorHtml(item.colorId);
     }
-    INV_SIZES.forEach(size => {
+    if (invMode === 'edit') {
+      html += `<div class="row" style="margin-top:0.75rem;">
+        <div class="settings-field" style="margin-bottom:0"><label>Notes <span style="font-weight:400;">(optional)</span></label><textarea rows="2" placeholder="e.g. Darker than Brand X" onchange="invUpdateItemField('${item.id}','notes',this.value)">${psEscape(item.notes || '')}</textarea></div>
+      </div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Storage location <span style="font-weight:400;">(optional)</span></label>
+          <input type="text" list="inv-location-suggestions" value="${invAttr(item.storageLocation)}" placeholder="e.g. Backstock Shelf" onchange="invUpdateItemField('${item.id}','storageLocation',this.value)">
+          <datalist id="inv-location-suggestions">${invLocationSuggestions().map(l => `<option value="${invAttr(l)}">`).join('')}</datalist>
+        </div>
+      </div>`;
+    } else if (item.notes || item.storageLocation) {
+      html += `<div style="margin-top:0.75rem; font-size:12px; color:var(--text-secondary);">
+        ${item.notes ? `<div style="margin-bottom:4px;">${psEscape(item.notes)}</div>` : ''}
+        ${item.storageLocation ? `<div><i class="fa-solid fa-location-dot"></i> ${psEscape(item.storageLocation)}</div>` : ''}
+      </div>`;
+    }
+    INV_SIZES.forEach((size, sizeIdx) => {
       const sd = item.sizes[size];
       const formKey = `${item.id}|${size}`;
 
@@ -8751,7 +8916,7 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
               ${INV_OPEN_STATUSES.map(s => `<option value="${s}" ${s === sd.openStatus ? 'selected' : ''}>${s}</option>`).join('')}
             </select>
           </div>
-          <div class="settings-field" style="margin-bottom:0"><label>Backstock (${invUnitLabel()})</label><input type="number" min="0" value="${sd.backstock}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','backstock',this.value)"></div>
+          <div class="settings-field" style="margin-bottom:0"><label>Backstock (${invUnitLabel()})</label><input type="number" min="0" class="inv-backstock-input" data-size-idx="${sizeIdx}" value="${sd.backstock}" onfocus="this.select()" onwheel="this.blur()" onkeydown="invBackstockTabKey(event, ${sizeIdx})" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','backstock',this.value)"></div>
         </div>`;
         // Editing the field only records a count if the typed value actually differs from what
         // was showing — a genuinely-correct-as-is size (including a real zero) needs an explicit
