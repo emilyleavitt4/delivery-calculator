@@ -6260,18 +6260,27 @@ function invConfirmBaselineCount(itemId, size) {
   });
 }
 
-// Converts a balloon-denominated amount (what a future Production pull list will naturally
-// produce) into a delta in whatever unit this business actually tracks. Deliberately no fallback
-// default when perBag is missing in bags mode — package sizes vary too much (50/100/25/etc.) for
-// a guess to ever be safe; the caller must surface the missing-config error, never silently guess.
-function invBalloonsToDelta(perBag, balloonsUsed, trackingUnit) {
-  if (trackingUnit === 'balloons') return { delta: -balloonsUsed, balloonsUsed, perBagAtTime: perBag || null };
-  if (!perBag || perBag <= 0) {
-    const err = new Error('Balloons per Bag isn\'t set for this item/size — set it before recording a balloon-denominated pull.');
-    err.code = 'MISSING_PER_BAG';
+// Converts balloon-denominated usage (what a future Production pull list will naturally produce)
+// into whole Standard-Package-equivalent units, accumulating any leftover in a per-item+size
+// remainder pool instead of ever producing a fractional Backstock value. Example: Standard
+// Package Qty 100, remainder 40, pull 80 more -> total usage 120 -> 1 package consumed, remainder
+// 20 carries forward to next time. Deliberately no fallback default when the Standard Package Qty
+// (stored in the `perBag` field — same field, new name) is missing in bags mode — package sizes
+// vary too much (50/100/25/etc.) for a guess to ever be safe; the caller must surface the missing-
+// config error, never silently guess. 'balloons' tracking-unit mode has no packaging concept at
+// all — usage applies 1:1 and the remainder is left untouched (inert until/unless the business
+// switches back to bags mode, at which point it becomes relevant again).
+function invBalloonsToStandardUnits(existingRemainder, balloonsUsed, standardQty, trackingUnit) {
+  if (trackingUnit === 'balloons') return { unitsConsumed: balloonsUsed, newRemainder: existingRemainder || 0 };
+  if (!standardQty || standardQty <= 0) {
+    const err = new Error('Standard Package Qty isn\'t set for this item/size — set it before recording a balloon-denominated pull.');
+    err.code = 'MISSING_STANDARD_QTY';
     throw err;
   }
-  return { delta: -(balloonsUsed / perBag), balloonsUsed, perBagAtTime: perBag };
+  const totalUsage = (existingRemainder || 0) + balloonsUsed;
+  const unitsConsumed = Math.floor(totalUsage / standardQty);
+  const newRemainder = Math.max(0, totalUsage - unitsConsumed * standardQty);
+  return { unitsConsumed, newRemainder };
 }
 
 // Resolves the signed-in user to a display name (via TEAM_MEMBERS) plus the raw email, so history
@@ -6287,10 +6296,12 @@ function invResolveActor() {
 // write the updated items and their transaction records together — all-or-nothing via
 // runTransaction, so two people acting on the same item+size at once can never lose an update
 // (unlike invMarkReceived's old plain read-then-setDoc). entries: [{ itemId, size, type, delta?,
-// balloonsUsed?, jobId?, jobName?, reference?, note?, alsoSetOpenStatus? }] — exactly one of
-// delta/balloonsUsed per entry; alsoSetOpenStatus is the one non-ledger field (Open Bin) that
-// invResetCounts needs to change in the SAME atomic write, so it never becomes a second,
-// un-audited mutation path racing against this one. Returns the created transaction docs, or
+// balloonsUsed?, jobId?, jobName?, reference?, note?, alsoSetOpenStatus?, alsoSetPerBag? }] —
+// exactly one of delta/balloonsUsed per entry; alsoSetOpenStatus/alsoSetPerBag are the non-ledger
+// fields (Open Bin, Standard Package Qty) that invResetCounts/invSubmitPerBagReconcile need to
+// change in the SAME atomic write as a real ledger entry, so a Standard Package Qty change during
+// reconciliation can never race against — or get silently clobbered by — a separate plain save of
+// the item document. Returns the created transaction docs, or
 // rejects (nothing partially applied) on any per-row problem — missing item, missing perBag, or
 // a delta that would take a balance negative, which is an unconditional hard block (no override
 // anywhere). For a very large
@@ -6319,10 +6330,16 @@ function invApplyInventoryTransactions(entries) {
       const item = itemsById.get(e.itemId);
       const sd = item.sizes[e.size];
       const previousBalance = sd.backstock || 0;
-      let delta, balloonsUsed = null, perBagAtTime = null;
+      let delta, balloonsUsed = null, perBagAtTime = null, remainderBefore = null, remainderAfter = null;
       if (typeof e.balloonsUsed === 'number') {
-        const converted = invBalloonsToDelta(sd.perBag, e.balloonsUsed, trackingUnit);
-        delta = converted.delta; balloonsUsed = converted.balloonsUsed; perBagAtTime = converted.perBagAtTime;
+        const existingRemainder = sd.usageRemainder || 0;
+        const converted = invBalloonsToStandardUnits(existingRemainder, e.balloonsUsed, sd.perBag, trackingUnit);
+        delta = -converted.unitsConsumed;
+        balloonsUsed = e.balloonsUsed;
+        perBagAtTime = sd.perBag || null;
+        remainderBefore = existingRemainder;
+        remainderAfter = converted.newRemainder;
+        sd.usageRemainder = converted.newRemainder;
       } else {
         delta = e.delta;
       }
@@ -6335,6 +6352,7 @@ function invApplyInventoryTransactions(entries) {
       }
       sd.backstock = newBalance;
       if (e.alsoSetOpenStatus) sd.openStatus = e.alsoSetOpenStatus;
+      if (typeof e.alsoSetPerBag === 'number') sd.perBag = e.alsoSetPerBag;
       // First transaction ever recorded for this item+size (hasHistory not yet set) becomes its
       // own INITIAL_COUNT UNLESS it's a genuine Receive/Pull, which are never a "count" — a real
       // receipt/pull isn't retroactively a baseline just because nothing happened here before.
@@ -6344,11 +6362,23 @@ function invApplyInventoryTransactions(entries) {
       // not an inference, an explicit session flag — see invBaseline.
       if (invBaseline.status === 'in_progress' && type === 'ADJUSTMENT') type = 'INITIAL_COUNT';
       sd.hasHistory = true;
+      // A direct (non-balloon-denominated) ADJUSTMENT/INITIAL_COUNT is a human asserting the true
+      // current Backstock — that supersedes any in-flight partial-usage bookkeeping, so it resets
+      // the accumulator. This is also exactly what a Standard Package Qty reconciliation submits
+      // (see invReconcileStandardQty), so the remainder-clearing that requires happens here
+      // automatically rather than needing special-case code in that flow. RECEIVE and a direct
+      // (non-balloon) PULL never touch the remainder — they add/remove whole units and have
+      // nothing to reconcile.
+      if (balloonsUsed === null && (type === 'ADJUSTMENT' || type === 'INITIAL_COUNT') && sd.usageRemainder) {
+        remainderBefore = sd.usageRemainder;
+        remainderAfter = 0;
+        sd.usageRemainder = 0;
+      }
 
       txDocs.push({
         id: psNewInventoryTransactionId(), itemId: e.itemId, size: e.size, color: item.color, brand: item.brand,
         type, unit: trackingUnit, delta, previousBalance, newBalance,
-        balloonsUsed, perBagAtTime,
+        balloonsUsed, perBagAtTime, remainderBefore, remainderAfter,
         jobId: e.jobId || null, jobName: e.jobName || null,
         reference: e.reference || '', note: e.note || '',
         who: actor.who, whoEmail: actor.whoEmail,
@@ -7079,7 +7109,7 @@ function invCsvProceedToPreview() {
     }
     if (perBagRaw !== '') {
       const n = Number(perBagRaw);
-      if (!Number.isFinite(n) || n <= 0) return Object.assign(base, { status: 'error', reason: `Invalid Balloons per Bag "${perBagRaw}"` });
+      if (!Number.isFinite(n) || n <= 0) return Object.assign(base, { status: 'error', reason: `Invalid Standard Package Qty "${perBagRaw}"` });
       newPerBag = n;
     }
     const changed = Math.abs((newCost || 0) - (sd.price || 0)) > 0.001 || (newPerBag || 0) !== (sd.perBag || 0);
@@ -7158,7 +7188,7 @@ function invCsvRenderImport() {
           <th style="text-align:left; padding:6px 8px;">Item</th>
           <th style="text-align:left; padding:6px 8px;">Size</th>
           <th style="text-align:left; padding:6px 8px;">Cost/Bag</th>
-          <th style="text-align:left; padding:6px 8px;">Balloons/Bag</th>
+          <th style="text-align:left; padding:6px 8px;">Standard Pkg Qty</th>
           <th style="text-align:left; padding:6px 8px;">Status</th>
         </tr></thead><tbody>`;
     s.rows.forEach(r => {
@@ -7190,12 +7220,13 @@ function invCsvRenderImport() {
   root.innerHTML = html;
 }
 
-// perBag defaults to 100 (a common count for standard round latex) — it varies by brand and
-// size in reality, so it's editable per size just like price; existing seed data doesn't have
-// a real value from the spreadsheet, so it starts at the same default until corrected.
+// perBag (Standard Package Qty) defaults to 100 (a common count for standard round latex) — it
+// varies by brand and size in reality, so it's editable per size just like price; existing seed
+// data doesn't have a real value from the spreadsheet, so it starts at the same default until
+// corrected. usageRemainder starts at 0 — nothing pending until a balloon-denominated pull exists.
 function invBlankSizeData() {
   const sizes = {};
-  INV_SIZES.forEach(s => { sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100 }; });
+  INV_SIZES.forEach(s => { sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100, usageRemainder: 0 }; });
   return sizes;
 }
 function invFindItem(id) { return INVENTORY_ITEMS.find(i => i.id === id); }
@@ -7345,13 +7376,21 @@ function invPendingOrderedQty(itemId, size) {
 // individual BALLOONS (computed from job math) — perBag is what lets the two be compared on
 // the same footing, since bag counts vary by brand and size.
 function invNeedBreakdown(sd, upcoming, pendingBags) {
-  const perBag = sd.perBag || 100;
+  const perBag = sd.perBag;
+  if (!perBag || perBag <= 0) {
+    // No fallback guess here either — same "never assume 100" rule invBalloonsToStandardUnits
+    // already follows. This runs inline during render, so it can't throw like that function does;
+    // instead it returns a clearly-flagged "can't compute this" result (zeroed, not a guess) and
+    // leaves it to the caller to show "Standard Package Qty not set" rather than treating 0 as a
+    // real "you're fully stocked" answer.
+    return { urgentBags: 0, restockBags: 0, totalBags: 0, configMissing: true };
+  }
   const balloonsAvailable = ((sd.backstock || 0) + pendingBags) * perBag;
   const urgentBalloons = Math.max(0, upcoming - balloonsAvailable);
   const urgentBags = Math.ceil(urgentBalloons / perBag);
   const leftoverBagsAfterJobs = Math.floor(Math.max(0, balloonsAvailable - upcoming) / perBag);
   const restockBags = Math.max(0, (sd.par || 0) - leftoverBagsAfterJobs);
-  return { urgentBags, restockBags, totalBags: urgentBags + restockBags };
+  return { urgentBags, restockBags, totalBags: urgentBags + restockBags, configMissing: false };
 }
 function invSortedItems() {
   return [...INVENTORY_ITEMS].sort((a, b) => a.color.localeCompare(b.color) || (a.brand || '').localeCompare(b.brand || ''));
@@ -7723,7 +7762,7 @@ function invBatchToggleRow(itemId, size, color, brand) {
   if (!invBatch) return;
   const idx = invBatch.rows.findIndex(r => r.itemId === itemId && r.size === size);
   if (idx >= 0) invBatch.rows.splice(idx, 1);
-  else invBatch.rows.push({ itemId, size, color, brand, qty: 1 });
+  else invBatch.rows.push({ itemId, size, color, brand, qty: 1, qtyUnit: 'bags' });
   invRenderBatchRoot();
 }
 function invBatchRemoveRow(itemId, size) {
@@ -7735,6 +7774,15 @@ function invBatchSetQty(itemId, size, value) {
   if (!invBatch) return;
   const row = invBatch.rows.find(r => r.itemId === itemId && r.size === size);
   if (row) row.qty = parseFloat(value) || 0;
+}
+// Receive-only: lets a row be entered as a balloon count instead of a Standard Package count —
+// "I bought four 25-count bags" shouldn't require doing the division by hand. Pull stays
+// bags-only; this doesn't apply there.
+function invBatchSetQtyUnit(itemId, size, unit) {
+  if (!invBatch) return;
+  const row = invBatch.rows.find(r => r.itemId === itemId && r.size === size);
+  if (row) row.qtyUnit = unit;
+  invRenderBatchRoot();
 }
 
 function invRenderBatchRoot() {
@@ -7756,12 +7804,30 @@ function invRenderBatchRoot() {
     <div id="inv-batch-search-results" style="max-height:220px; overflow-y:auto; margin-bottom:0.6rem;"></div>
     ${invBatch.rows.length ? `<div class="section-label" style="margin:0 0 0.4rem;">Items (${invBatch.rows.length})</div>
     <div style="margin-bottom:0.6rem;">
-      ${invBatch.rows.map(r => `
-        <div style="display:flex; align-items:center; gap:8px; padding:0.4rem 0; border-bottom:0.5px solid var(--border);">
-          <div style="flex:1; font-size:13px; min-width:0;">${psEscape(r.color)} <span style="color:var(--text-secondary);">${psEscape(r.brand)} — ${psEscape(r.size)}</span></div>
-          <input type="number" step="0.01" min="0" value="${r.qty}" style="width:70px; padding:6px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); font-size:14px;" onchange="invBatchSetQty('${r.itemId}','${invAttr(r.size)}', this.value)">
-          <button class="icon-btn" style="padding:4px;" onclick="invBatchRemoveRow('${r.itemId}','${invAttr(r.size)}')"><i class="fa-solid fa-xmark"></i></button>
-        </div>`).join('')}
+      ${invBatch.rows.map(r => {
+        const rowItem = invFindItem(r.itemId);
+        const rowPerBag = rowItem ? rowItem.sizes[r.size].perBag : null;
+        const inBalloons = isReceive && r.qtyUnit === 'balloons';
+        let conversionNote = '';
+        if (inBalloons) {
+          if (!rowPerBag || rowPerBag <= 0) conversionNote = `<div style="color:var(--warning-text); font-size:11px;">Standard Package Qty not set for this size</div>`;
+          else if (r.qty % rowPerBag !== 0) conversionNote = `<div style="color:var(--warning-text); font-size:11px;">Not a whole number of ${rowPerBag}-count packages</div>`;
+          else conversionNote = `<div style="color:var(--text-secondary); font-size:11px;">= ${r.qty / rowPerBag} standard package${(r.qty / rowPerBag) === 1 ? '' : 's'}</div>`;
+        }
+        return `
+        <div style="padding:0.4rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div style="flex:1; font-size:13px; min-width:0;">${psEscape(r.color)} <span style="color:var(--text-secondary);">${psEscape(r.brand)} — ${psEscape(r.size)}</span></div>
+            <input type="number" step="0.01" min="0" value="${r.qty}" style="width:70px; padding:6px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); font-size:14px;" onchange="invBatchSetQty('${r.itemId}','${invAttr(r.size)}', this.value)">
+            <button class="icon-btn" style="padding:4px;" onclick="invBatchRemoveRow('${r.itemId}','${invAttr(r.size)}')"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          ${isReceive ? `<div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
+            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${!inBalloons ? 'var(--accent-border)' : 'var(--border-strong)'}; ${!inBalloons ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','bags')">Packages</button>
+            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${inBalloons ? 'var(--accent-border)' : 'var(--border-strong)'}; ${inBalloons ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','balloons')">Balloons</button>
+            ${conversionNote}
+          </div>` : ''}
+        </div>`;
+      }).join('')}
     </div>` : ''}
     ${!isReceive ? `<div class="settings-field" style="margin-bottom:0.6rem;">
       <label>Job (optional)</label>
@@ -7806,15 +7872,34 @@ async function invSubmitBatch() {
   if (!invBatch || invBatch.rows.length === 0) return;
   const isReceive = invBatch.mode === 'receive';
   const job = invBatch.jobId ? psFindJob(invBatch.jobId) : null;
-  const entries = invBatch.rows.map(r => ({
-    itemId: r.itemId, size: r.size,
-    type: isReceive ? 'RECEIVE' : 'PULL',
-    delta: isReceive ? Math.abs(r.qty) : -Math.abs(r.qty),
-    reference: isReceive ? (invBatch.reference || '') : '',
-    note: isReceive ? '' : (invBatch.reference || ''),
-    jobId: job ? job.id : null,
-    jobName: job ? (job.jobName || 'Untitled job') : null,
-  }));
+  // A row entered in balloons must convert to an exact whole number of Standard Packages before
+  // it becomes a real Receive — no receive-side remainder pool, per the approved design (that
+  // pool exists only for Production usage). Reject the whole submit rather than partially apply
+  // some rows and silently skip others.
+  const rowQtys = {};
+  for (const r of invBatch.rows) {
+    if (isReceive && r.qtyUnit === 'balloons') {
+      const rowItem = invFindItem(r.itemId);
+      const perBag = rowItem ? rowItem.sizes[r.size].perBag : null;
+      if (!perBag || perBag <= 0) { alert(`Standard Package Qty isn't set for ${r.color} ${r.size} — set it before receiving in balloons.`); return; }
+      if (r.qty % perBag !== 0) { alert(`${r.qty} balloons isn't a whole number of ${perBag}-count standard packages for ${r.color} ${r.size} — try ${Math.floor(r.qty / perBag) * perBag} or ${Math.ceil(r.qty / perBag) * perBag}.`); return; }
+      rowQtys[`${r.itemId}|${r.size}`] = r.qty / perBag;
+    } else {
+      rowQtys[`${r.itemId}|${r.size}`] = r.qty;
+    }
+  }
+  const entries = invBatch.rows.map(r => {
+    const qty = rowQtys[`${r.itemId}|${r.size}`];
+    return {
+      itemId: r.itemId, size: r.size,
+      type: isReceive ? 'RECEIVE' : 'PULL',
+      delta: isReceive ? Math.abs(qty) : -Math.abs(qty),
+      reference: isReceive ? (invBatch.reference || '') : '',
+      note: isReceive ? '' : (invBatch.reference || ''),
+      jobId: job ? job.id : null,
+      jobName: job ? (job.jobName || 'Untitled job') : null,
+    };
+  });
   try {
     await invApplyInventoryTransactions(entries);
     invBatch = null;
@@ -7932,7 +8017,9 @@ function invUpdateSizeField(itemId, size, field, value) {
   // backstock is the one ledger-tracked quantity — route it through invApplyInventoryTransactions
   // instead of a direct assignment, so walking the shelf and typing today's real count is what
   // produces tomorrow's actual, correctly-labeled transaction history (see invBaseline).
-  // openStatus/price/par/perBag aren't quantities the ledger tracks, so they stay a plain save.
+  // openStatus/price aren't quantities the ledger tracks, so they stay a plain save. perBag
+  // (Standard Package Qty) is also a plain save UNLESS there's a pending usage remainder — see
+  // below, where changing it becomes a required reconciliation instead.
   if (field === 'backstock') {
     const newValue = parseFloat(value) || 0;
     const delta = newValue - (item.sizes[size].backstock || 0);
@@ -7944,8 +8031,61 @@ function invUpdateSizeField(itemId, size, field, value) {
     });
     return;
   }
+  if (field === 'perBag') {
+    const newPerBag = parseFloat(value) || 0;
+    const sd = item.sizes[size];
+    if ((sd.usageRemainder || 0) !== 0) {
+      // A pending usage remainder means real, already-used balloons haven't been reflected in
+      // Backstock yet — reinterpreting them under a new Standard Package Qty would either lose
+      // or misstate that pending usage. Block the plain save and require a reconciliation
+      // (invSubmitPerBagReconcile) instead of silently clearing or reinterpreting it.
+      invPerBagReconcileKey = `${itemId}|${size}`;
+      invPerBagReconcileDraft = { newPerBag, actualBackstock: sd.backstock || 0 };
+      invRenderColorsList(); // reverts the input's shown value back to the stored one, shows the composer
+      return;
+    }
+    item.sizes[size].perBag = newPerBag;
+    invSaveItem(item);
+    return;
+  }
   item.sizes[size][field] = field === 'openStatus' ? value : (parseFloat(value) || 0);
   invSaveItem(item);
+}
+// The reconciliation flow a Standard Package Qty change requires whenever a pending usage
+// remainder exists — asserts the actual current Backstock (a normal, real ADJUSTMENT through the
+// ledger, which resets the remainder to 0 as a side effect of being a direct/absolute count) and
+// applies the new Standard Package Qty atomically alongside it, so the two can never race or
+// leave the item in a half-updated state.
+let invPerBagReconcileKey = null; // `${itemId}|${size}` of the reconciliation currently open, or null
+let invPerBagReconcileDraft = null; // { newPerBag, actualBackstock }
+function invCancelPerBagReconcile() {
+  invPerBagReconcileKey = null;
+  invPerBagReconcileDraft = null;
+  invRenderColorsList();
+}
+function invSetPerBagReconcileActual(value) {
+  if (!invPerBagReconcileDraft) return;
+  invPerBagReconcileDraft.actualBackstock = parseFloat(value) || 0;
+}
+async function invSubmitPerBagReconcile(itemId, size) {
+  const item = invFindItem(itemId);
+  if (!item || !invPerBagReconcileDraft) return;
+  const sd = item.sizes[size];
+  const actual = invPerBagReconcileDraft.actualBackstock;
+  if (isNaN(actual) || actual < 0) { alert('Enter the actual current Backstock count.'); return; }
+  const delta = actual - (sd.backstock || 0);
+  try {
+    await invApplyInventoryTransactions([{
+      itemId, size, type: 'ADJUSTMENT', delta,
+      note: `Reconciliation for Standard Package Qty change (${sd.perBag || '—'} → ${invPerBagReconcileDraft.newPerBag})`,
+      alsoSetPerBag: invPerBagReconcileDraft.newPerBag,
+    }]);
+    invPerBagReconcileKey = null;
+    invPerBagReconcileDraft = null;
+    invRenderColorsList();
+  } catch (err) {
+    alert(err.message || "Couldn't reconcile that — check your connection and try again.");
+  }
 }
 // Size labels contain a literal " (5"/7", 11", etc.) — embedding one raw inside a
 // double-quoted HTML attribute (onchange="...('${size}'...)") breaks out of the attribute
@@ -8021,15 +8161,19 @@ const INV_TXN_TYPE_LABEL = { INITIAL_COUNT: 'Initial Inventory Count', RECEIVE: 
 function invFmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(2); }
 // Reverse-chronological, human-readable — "if inventory looks wrong, trace exactly how BBT got
 // there." A Pull with a job attached leads with the job name (matching the mockup), everything
-// else leads with its type label; a balloon-denominated entry shows the conversion, not just the
-// resulting fraction, so "why is this -0.25" is never a mystery.
+// else leads with its type label; a balloon-denominated entry shows the original balloon count,
+// the Standard Package Qty at the time, and how the usage remainder pool moved, so "why didn't
+// Backstock change" or "why did it drop by exactly 1" is never a mystery.
 function invHistoryHtml(itemId, size) {
   const txns = INVENTORY_TRANSACTIONS.filter(t => t.itemId === itemId && t.size === size).sort((a, b) => b.createdAt - a.createdAt);
   if (txns.length === 0) return `<div style="font-size:12px; color:var(--text-secondary); padding:0.5rem 0;">No history yet for this size.</div>`;
   return txns.map(t => {
     const date = new Date(t.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     const sign = t.delta > 0 ? '+' : '';
-    const usageNote = (t.balloonsUsed != null && t.perBagAtTime != null) ? ` (${t.balloonsUsed} balloons ÷ ${t.perBagAtTime}/bag)` : '';
+    const usageNote = (t.balloonsUsed != null && t.perBagAtTime != null) ? ` (${t.balloonsUsed} balloons used, ${t.perBagAtTime}/standard package)` : '';
+    const remainderNote = (t.remainderBefore != null && t.remainderAfter != null)
+      ? `<div style="color:var(--text-secondary);">Pending usage: ${t.remainderBefore} → ${t.remainderAfter} balloon${t.remainderAfter === 1 ? '' : 's'}</div>`
+      : '';
     return `<div style="padding:0.5rem 0; border-bottom:0.5px solid var(--border); font-size:12px;">
       <div style="display:flex; justify-content:space-between; align-items:baseline;">
         <span style="font-weight:700;">${t.jobName ? psEscape(t.jobName) : psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</span>
@@ -8037,6 +8181,7 @@ function invHistoryHtml(itemId, size) {
       </div>
       ${t.jobName ? `<div style="color:var(--text-secondary);">${psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</div>` : ''}
       <div>${sign}${invFmtQty(t.delta)} ${invUnitLabel()}${usageNote} — Balance: ${invFmtQty(t.newBalance)}</div>
+      ${remainderNote}
       ${t.reference ? `<div style="color:var(--text-secondary);">Reference: ${psEscape(t.reference)}</div>` : ''}
       ${t.note ? `<div style="color:var(--text-secondary);">${psEscape(t.note)}</div>` : ''}
       ${t.who ? `<div style="color:var(--text-tertiary); font-size:11px; margin-top:2px;">${psEscape(t.who)}</div>` : ''}
@@ -8319,7 +8464,7 @@ function invRenderSettingsSection() {
     </div>
   </div>
   <div class="card" style="margin-top:0.75rem;">
-    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">Bulk-update Cost per Bag and Balloons per Bag from a spreadsheet instead of editing each color one at a time. Export, edit the two number columns, then import — matched strictly by item and size, so nothing new ever gets created here.</div>
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">Bulk-update Cost per Bag and Standard Package Qty from a spreadsheet instead of editing each color one at a time. Export, edit the two number columns, then import — matched strictly by item and size, so nothing new ever gets created here.</div>
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="invExportInventoryCsv()"><i class="fa-solid fa-file-arrow-down"></i> Export Inventory Setup CSV</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="invCsvOpenImport()"><i class="fa-solid fa-file-arrow-up"></i> Import Inventory Setup CSV</button>
@@ -8932,6 +9077,13 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
           <div><div style="font-size:12px; color:var(--text-secondary); font-weight:500; margin-bottom:5px;">Backstock (${invUnitLabel()})</div><div style="font-size:16px; font-weight:600;">${sd.backstock}</div></div>
         </div>`;
       }
+      // A nonzero remainder means real balloons have already been used but haven't crossed a full
+      // Standard Package boundary yet, so Backstock legitimately hasn't moved — worth surfacing so
+      // that looks like "pending," not "nothing happened." Visible in either mode, since it's
+      // informational, not something to edit directly.
+      if (invTrackingUnit === 'bags' && sd.usageRemainder) {
+        html += `<div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Pending usage: ${sd.usageRemainder} balloon${sd.usageRemainder === 1 ? '' : 's'} not yet reflected in Backstock</div>`;
+      }
       // Flagging works the same in either mode — noticing something's off shouldn't require
       // switching the whole team into Editing just to say so. Visible to everyone; only
       // resolving it is admin-gated, so a flag can't get quietly dismissed by whoever finds it.
@@ -8969,14 +9121,30 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
         const need = invNeedBreakdown(sd, upcoming, pendingQty);
         html += `<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin:0.75rem 0;">
           <div class="settings-field" style="margin-bottom:0"><label>Price/bag</label><input type="number" step="0.01" min="0" value="${sd.price}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','price',this.value)"></div>
-          <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${sd.perBag || 100}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','perBag',this.value)"></div>
+          <div class="settings-field" style="margin-bottom:0"><label>Standard Package Qty</label><input type="number" min="1" value="${sd.perBag || ''}" placeholder="e.g. 100" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','perBag',this.value)"></div>
           <div class="settings-field" style="margin-bottom:0"><label>Par (${invUnitLabel()})</label><input type="number" min="0" value="${sd.par}" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','par',this.value)"></div>
         </div>`;
+        // Changing Standard Package Qty while balloons are already pending in the usage remainder
+        // would either lose that pending usage or misstate it under the new quantity — this
+        // requires an explicit reconciliation (a real ADJUSTMENT asserting the true current
+        // Backstock) rather than silently clearing or reinterpreting the remainder.
+        if (invPerBagReconcileKey === formKey) {
+          html += `<div style="background:var(--warning-bg); border:0.5px solid var(--warning-text); border-radius:var(--radius-sm); padding:0.6rem 0.75rem; margin-bottom:0.75rem;">
+            <div style="font-weight:700; color:var(--warning-text); margin-bottom:4px; font-size:13px;">Reconcile before changing Standard Package Qty</div>
+            <div style="font-size:12px; color:var(--text); margin-bottom:0.5rem;">This size has ${sd.usageRemainder} balloon${sd.usageRemainder === 1 ? '' : 's'} of pending usage not yet reflected in Backstock (under the current qty of ${sd.perBag || '—'}). Confirm the actual Backstock count now — changing to ${invPerBagReconcileDraft.newPerBag} will apply together with that count, and the pending usage will be cleared.</div>
+            <div class="settings-field" style="margin-bottom:0.5rem;"><label>Actual Backstock (${invUnitLabel()}) right now</label><input type="number" min="0" value="${invPerBagReconcileDraft.actualBackstock}" oninput="invSetPerBagReconcileActual(this.value)"></div>
+            <div style="display:flex; gap:8px;">
+              <button class="save-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invSubmitPerBagReconcile('${item.id}','${invAttr(size)}')">Confirm & apply</button>
+              <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invCancelPerBagReconcile()">Cancel</button>
+            </div>
+          </div>`;
+        }
         html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Upcoming (from open jobs): ${upcoming} balloons${pendingQty ? ` · Pending order: ${pendingQty} bags` : ''}</div>`;
         html += `<div style="margin-bottom:0.5rem;">
-          ${need.urgentBags > 0 ? `<div style="font-weight:700; font-size:14px; color:var(--warning-text);">Needed now for jobs: ${need.urgentBags} bag${need.urgentBags === 1 ? '' : 's'}</div>` : ''}
-          ${need.restockBags > 0 ? `<div style="font-size:13px; color:var(--text-secondary);">Plus ${need.restockBags} bag${need.restockBags === 1 ? '' : 's'} to restock to your normal par</div>` : ''}
-          ${need.totalBags === 0 ? `<div style="font-weight:700; font-size:14px;">Stocked</div>` : ''}
+          ${need.configMissing ? `<div style="font-size:13px; color:var(--warning-text);">Standard Package Qty isn't set — enter it above to see restock recommendations.</div>` : ''}
+          ${!need.configMissing && need.urgentBags > 0 ? `<div style="font-weight:700; font-size:14px; color:var(--warning-text);">Needed now for jobs: ${need.urgentBags} bag${need.urgentBags === 1 ? '' : 's'}</div>` : ''}
+          ${!need.configMissing && need.restockBags > 0 ? `<div style="font-size:13px; color:var(--text-secondary);">Plus ${need.restockBags} bag${need.restockBags === 1 ? '' : 's'} to restock to your normal par</div>` : ''}
+          ${!need.configMissing && need.totalBags === 0 ? `<div style="font-weight:700; font-size:14px;">Stocked</div>` : ''}
         </div>`;
         html += `<div style="display:flex; justify-content:flex-end;">
           <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenOrderForm('${item.id}','${invAttr(size)}')"><i class="fa-solid fa-cart-plus"></i> Order</button>
