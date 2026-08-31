@@ -8426,7 +8426,10 @@ function invRenderColorsList() {
         </span>
       </div>`;
       if (!collapsed) {
-        html += `<div class="inv-color-list">` + g.items.map(item => invColorCardHtml(item, upcomingMap)).join('') + `</div>`;
+        // The inline rank input only makes sense for My Order's actual shelf position — and only
+        // for an admin, since it edits the same shared order the drag toggle already gates.
+        const showRank = invGroupBy === 'custom' && invAdminUnlocked;
+        html += `<div class="inv-color-list">` + g.items.map((item, idx) => invColorCardHtml(item, upcomingMap, showRank ? { rank: idx + 1, total: g.items.length } : null)).join('') + `</div>`;
       }
     });
   }
@@ -8510,6 +8513,38 @@ function invRowDragEnd(e) {
   invRenderColorsList();
 }
 
+// Numeric alternative to invRowDragEnd's drag-and-drop, for jumping a color straight to a
+// position instead of walking it there one row at a time — dragging ~60 colors from position 42
+// to 3 is tedious, typing "3" isn't. Reuses invCustomOrder exactly as the drag path does; this
+// isn't a second ordering system, just a second way to edit the same one. rawValue is the new
+// 1-based position *within whatever's currently visible* (this tier, this search) — out-of-range
+// values clamp to the nearest end rather than being rejected, and a non-numeric value is simply
+// ignored (the re-render below snaps the input back to showing the real, unchanged rank).
+function invSetOrderRank(itemId, rawValue) {
+  const showRank = invGroupBy === 'custom' && invAdminUnlocked;
+  if (!showRank) return;
+  const groups = invGroupedItems(invFilteredSortedItems(), invComputeUpcoming());
+  const group = groups.find(g => g.key === 'custom:' + invTierTab);
+  const visibleIds = group ? group.items.map(i => i.id) : [];
+  const fromIdx = visibleIds.indexOf(itemId);
+  const n = parseInt(rawValue, 10);
+  if (fromIdx === -1 || !Number.isFinite(n)) { invRenderColorsList(); return; }
+  const toIdx = Math.max(0, Math.min(visibleIds.length - 1, n - 1));
+  if (toIdx === fromIdx) { invRenderColorsList(); return; }
+  visibleIds.splice(fromIdx, 1);
+  visibleIds.splice(toIdx, 0, itemId);
+
+  // Re-thread the reordered visible subset back into the full shared shelf order in place, so a
+  // color hidden by search or sitting in the other tier keeps its position relative to whichever
+  // visible colors it was already next to — only the visible colors' relative order changes.
+  const full = invCustomOrdered(INVENTORY_ITEMS).map(i => i.id);
+  const visibleIdSet = new Set(visibleIds);
+  let vi = 0;
+  invCustomOrder = full.map(id => visibleIdSet.has(id) ? visibleIds[vi++] : id);
+  invSaveCustomOrder();
+  invRenderColorsList();
+}
+
 // Editable aliases for one Color Library entry (e.g. "Sage" → Eucalyptus) — shown inside an
 // Inventory color's expanded card. Aliases are only ever added here, by an explicit click; never
 // generated automatically, so a broad family name like "Blue" never becomes an alias by accident.
@@ -8583,7 +8618,9 @@ function invLibraryOnlyHtml() {
 
 // Renders one color's card — collapsed header (name, brand, size/quantity glance) and, when
 // expanded, the Main/Misc toggle plus each size's editable fields and order action.
-function invColorCardHtml(item, upcomingMap) {
+// orderInfo (only set for My Order): { rank, total } — this color's 1-based position in the
+// currently-visible shelf order, for the inline rank input next to its name.
+function invColorCardHtml(item, upcomingMap, orderInfo) {
   const expanded = invExpandedItem === item.id && !invRearrangeMode; // can't stay open mid-drag
   const tier = item.tier || 'main';
   const isActive = item.active !== false;
@@ -8605,8 +8642,19 @@ function invColorCardHtml(item, upcomingMap) {
     }).join('')}
   </div>`;
 
+  // Numeric alternative to dragging — jump straight to a position instead of walking a color
+  // there one row at a time. Works alongside drag (still useful for a small nearby move) rather
+  // than replacing it; stops the click/pointerdown from bubbling up so typing in it never toggles
+  // the card open or gets mistaken for a drag start, in either mode.
+  const orderRankInput = orderInfo ? `<input type="number" min="1" max="${orderInfo.total}" value="${orderInfo.rank}"
+    class="inv-order-rank-input"
+    style="width:38px; flex-shrink:0; text-align:center; font-size:13px; font-weight:700; padding:4px 2px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);"
+    onclick="event.stopPropagation()" onpointerdown="event.stopPropagation()"
+    onchange="invSetOrderRank('${item.id}', this.value)">` : '';
+
   let html = `<div class="inv-color-row${invRearrangeMode ? ' editing' : ''}"${isActive ? '' : ' style="opacity:0.55;"'} data-item-id="${item.id}">`;
   html += `<div class="inv-color-row-header"${invRearrangeMode ? '' : ` onclick="invToggleExpand('${item.id}')"`}>
+    ${orderRankInput}
     <div class="inv-color-row-text">
       <div class="inv-color-row-name">${psEscape(item.color)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px; margin-left:2px;">INACTIVE</span>'}</div>
       <div class="inv-color-row-brand">${psEscape(item.brand || 'No brand')}</div>
