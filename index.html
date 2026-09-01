@@ -8287,6 +8287,26 @@ function invSearchFieldHtml({ id, placeholder, value, onInput, onClear }) {
   </div>`;
 }
 
+// Shared Brand select + "Other" free-text reveal — used by Specialty Latex and Foil Letters &
+// Numbers (and available to Decorator Shapes/Themed Foils once those are built), so this one
+// place owns both the markup and the "Other" resolution logic instead of two (soon three+)
+// independently-maintained copies. `options` is that caller's own brand list (already including
+// Generic/Unknown and Other, e.g. spBrandOptions()/foilBrandOptions()) — this helper doesn't
+// decide what belongs on the list, only how the select+reveal behaves once given one.
+function brandSelectorHtml({ options, brand, brandOther, onBrandChange, onOtherInput }) {
+  return `<select onchange="${onBrandChange}">
+      <option value="" ${brand === '' ? 'selected' : ''}>— select —</option>
+      ${options.map(b => `<option value="${invAttr(b)}" ${b === brand ? 'selected' : ''}>${psEscape(b)}</option>`).join('')}
+    </select>
+    ${brand === 'Other' ? `<input type="text" style="margin-top:6px;" placeholder="Brand name" value="${invAttr(brandOther)}" oninput="${onOtherInput}">` : ''}`;
+}
+// The one place "Other" + typed text becomes the actual stored brand — never the literal string
+// "Other". If `brand` isn't 'Other', `brandOther` is ignored entirely, so a stale value left over
+// from a previous "Other" selection can never leak into the saved record.
+function resolveBrandValue(brand, brandOther) {
+  return brand === 'Other' ? (brandOther || '').trim() : brand;
+}
+
 function invOpenOrderForm(itemId, size) {
   invOrderFormKey = `${itemId}|${size}`;
   invRenderColorsList();
@@ -10024,12 +10044,16 @@ function spSetDraftField(field, value) {
     spAddDraft.sizeType = '';
     spAddDraft.sizeOther = '';
     spRenderScreen();
+  } else if (field === 'brand' || field === 'sizeType') {
+    // Selecting "Other"/"Custom" needs to reveal its free-text input, which only exists in the
+    // freshly-rendered HTML — without this, the field silently can't be filled in at all.
+    spRenderScreen();
   }
 }
 function spSubmitAdd() {
   if (!spAddDraft) return;
   const d = spAddDraft;
-  const brand = d.brand === 'Other' ? (d.brandOther || '').trim() : d.brand;
+  const brand = resolveBrandValue(d.brand, d.brandOther);
   if (!brand) { alert('Pick a brand, or choose Other and type one in.'); return; }
   const sizeType = d.sizeType === 'Custom' ? (d.sizeOther || '').trim() : d.sizeType;
   if (!sizeType) { alert('Enter a size/type.'); return; }
@@ -10089,11 +10113,7 @@ function spAddFormHtml() {
     <div class="row">
       <div class="settings-field" style="margin-bottom:0">
         <label>Brand</label>
-        <select onchange="spSetDraftField('brand', this.value)">
-          <option value="" ${d.brand === '' ? 'selected' : ''}>— select —</option>
-          ${spBrandOptions().map(b => `<option value="${invAttr(b)}" ${b === d.brand ? 'selected' : ''}>${psEscape(b)}</option>`).join('')}
-        </select>
-        ${d.brand === 'Other' ? `<input type="text" style="margin-top:6px;" placeholder="Brand name" value="${invAttr(d.brandOther)}" oninput="spSetDraftField('brandOther', this.value)">` : ''}
+        ${brandSelectorHtml({ options: spBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "spSetDraftField('brand', this.value)", onOtherInput: "spSetDraftField('brandOther', this.value)" })}
       </div>
       <div class="settings-field" style="margin-bottom:0">
         <label>Color</label>
@@ -10291,6 +10311,7 @@ function foilSetDraftField(field, value) {
   if (!foilAddDraft) return;
   foilAddDraft[field] = value;
   if (field === 'charType') foilRenderScreen(); // form title/character count depends on this
+  else if (field === 'brand') foilRenderScreen(); // "Other" needs to reveal its free-text input
 }
 function foilSubmitAdd() {
   if (!foilAddDraft) return;
@@ -10300,7 +10321,7 @@ function foilSubmitAdd() {
   if (!size) { alert('Enter a size.'); return; }
   if (!color) { alert('Enter a color.'); return; }
   if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
-  const brand = d.brand === 'Other' ? (d.brandOther || '').trim() : d.brand;
+  const brand = resolveBrandValue(d.brand, d.brandOther);
   if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
 
   const dup = foilFindDuplicateGroup(d.charType, size, color, brand);
@@ -10411,11 +10432,7 @@ function foilAddFormHtml() {
     </div>
     <div class="settings-field">
       <label>Brand</label>
-      <select onchange="foilSetDraftField('brand', this.value)">
-        <option value="" ${d.brand === '' ? 'selected' : ''}>— select —</option>
-        ${foilBrandOptions().map(b => `<option value="${invAttr(b)}" ${b === d.brand ? 'selected' : ''}>${psEscape(b)}</option>`).join('')}
-      </select>
-      ${d.brand === 'Other' ? `<input type="text" style="margin-top:6px;" placeholder="Brand name" value="${invAttr(d.brandOther)}" oninput="foilSetDraftField('brandOther', this.value)">` : ''}
+      ${brandSelectorHtml({ options: foilBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "foilSetDraftField('brand', this.value)", onOtherInput: "foilSetDraftField('brandOther', this.value)" })}
     </div>
     <div class="row">
       <div class="settings-field" style="margin-bottom:0"><label>Cost per foil <span style="font-weight:400;">(optional)</span></label><input type="number" step="0.01" min="0" placeholder="e.g. 2.50" value="${invAttr(d.costPerFoil)}" oninput="foilSetDraftField('costPerFoil', this.value)"></div>
