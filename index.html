@@ -1452,7 +1452,7 @@
         <div class="tool-tile-title">Latex</div>
       </div>
       <div class="tool-tile" onclick="showView('inventory-foil')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-ghost"></i></div>
+        <div class="tool-tile-icon"><i class="fa-solid fa-star"></i></div>
         <div class="tool-tile-title">Foil</div>
       </div>
       <div class="tool-tile soon">
@@ -1988,7 +1988,7 @@ const TOOL_META = {
   'inventory-latex-choice': { title: 'Latex Inventory', icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
   'inventory-latex': { title: 'Standard Latex',         icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
   'inventory-specialty': { title: 'Specialty Latex',    icon: 'fa-solid fa-shapes',              showBack: true,  showGear: true  },
-  'inventory-foil': { title: 'Foil Inventory',          icon: 'fa-solid fa-ghost',               showBack: true,  showGear: true  },
+  'inventory-foil': { title: 'Foil Inventory',          icon: 'fa-solid fa-star',                showBack: true,  showGear: true  },
   letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: true  },
   jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: true  },
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: true  },
@@ -2910,7 +2910,12 @@ function psBlankJob(overrides) {
     rentalItems: [],   // { id, name, qty, pulled, packed, returned } — shown in Production's Rentals section
     serviceItems: [],  // { id, name, qty } — logistics-affecting, not a build item; no dedicated view yet
     fees: [],          // { id, name, qty } — attached to the event record only
-    attachments: []    // { id, title, category, visibility, displayLocations, fileName, fileType, storagePath, url, uploadedAt } — see psAttachmentsSectionHtml
+    attachments: [],   // { id, title, category, visibility, displayLocations, fileName, fileType, storagePath, url, uploadedAt } — see psAttachmentsSectionHtml
+    // { [rowKey]: true } — which Pull-section checkboxes are checked, keyed by a composite
+    // string built from a production line's own permanent id (see psPullCheckRowHtml). Sparse —
+    // an unchecked row simply has no key, matching this file's other sparse-map fields. Old jobs
+    // without this just read as `{}`; this never touches job.status or any workflow/lifecycle field.
+    pullChecklist: {}
   }, overrides || {});
 }
 
@@ -3238,6 +3243,18 @@ function psToggleRentalStatus(jobId, itemId, field, checked) {
   const item = job.rentalItems.find(i => i.id === itemId);
   if (!item) return;
   item[field] = checked;
+  psSaveJob(job);
+}
+// The Pull section's checkbox rows aren't their own array elements (they're generated per size /
+// per color-split / topper / pull-note from each productionItems[] line), so unlike rentals'
+// pulled/packed/returned booleans, checked state lives in one flat sparse map keyed by a composite
+// string built from the line's own permanent id — see psPullCheckRowHtml. Deleting the key on
+// uncheck keeps the persisted map from growing unbounded across a job's whole history.
+function psTogglePullCheck(jobId, key, checked) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  if (!job.pullChecklist) job.pullChecklist = {};
+  if (checked) job.pullChecklist[key] = true; else delete job.pullChecklist[key];
   psSaveJob(job);
 }
 
@@ -4161,6 +4178,24 @@ function psSaveEditItem(jobId, idx) {
   psSaveJob(job);
 }
 
+// A key embedded as a '...'-delimited JS-string argument inside a double-quoted HTML attribute
+// needs BOTH: `'` backslash-escaped (JS-string safety — the browser HTML-decodes the attribute
+// value into JS source text before parsing it, so invAttr's `&#39;` would decode back into a raw
+// `'` and terminate the string early) and `"` HTML-entity-escaped (attribute safety — sizes in
+// SIZE_ORDER always contain a literal `"`). invAttr() alone is wrong here: it's correct for a
+// plain attribute value like value="...", but its own `'` → `&#39;` handling actively breaks a
+// single-quoted JS-string argument, which is exactly the shape every onclick/onchange handler in
+// this file uses. Confirmed by testing with a color named containing an apostrophe.
+function psJsKeyAttr(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+// One Pull-section checkbox row, checked state read from/written to job.pullChecklist[key] —
+// see psTogglePullCheck. `key` is caller-built from the owning line's own permanent id so it
+// stays stable across re-renders regardless of array position.
+function psPullCheckRowHtml(job, key, text) {
+  const checked = !!(job.pullChecklist && job.pullChecklist[key]);
+  return `<div class="ps-check-row${checked ? ' done' : ''}"><input type="checkbox" ${checked ? 'checked' : ''} onchange="this.closest('.ps-check-row').classList.toggle('done', this.checked); psTogglePullCheck('${job.id}','${psJsKeyAttr(key)}',this.checked)"><label>${text}</label></div>`;
+}
 function psProductionBodyHtml(job) {
   let html = '';
 
@@ -4184,21 +4219,21 @@ function psProductionBodyHtml(job) {
             const n = Math.round(totals[size] * (cd.pct / 100));
             if (n <= 0) return;
             const text = nColors > 1 ? `${n} – ${size} (${psEscape(cd.name)})` : `${n} – ${size}`;
-            html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>${text}</label></div>`;
+            html += psPullCheckRowHtml(job, `${line.id}|size|${size}|${cd.name}`, text);
           });
         } else {
           const perColor = psColorCount(totals[size], nColors);
           const text = nColors > 1 ? `${perColor} – ${size} of each color` : `${perColor} – ${size}`;
-          html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>${text}</label></div>`;
+          html += psPullCheckRowHtml(job, `${line.id}|size|${size}`, text);
         }
       });
       if (line.topperNote) {
-        html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>Topper: ${psEscape(line.topperNote)}</label></div>`;
+        html += psPullCheckRowHtml(job, `${line.id}|topper`, `Topper: ${psEscape(line.topperNote)}`);
       }
       // Template-owned supplementary pull note (e.g. non-balloon pull items) — alongside the
       // calculated balloon counts above, never replacing them.
       if (r.pullListNotes) {
-        html += `<div class="ps-check-row"><input type="checkbox" onclick="this.closest('.ps-check-row').classList.toggle('done', this.checked)"><label>${psEscape(r.pullListNotes)}</label></div>`;
+        html += psPullCheckRowHtml(job, `${line.id}|pullnote`, psEscape(r.pullListNotes));
       }
     });
     html += `<div class="ps-pack-note">Pack extras of each size/color.</div>`;
@@ -5769,13 +5804,13 @@ const INV_SIZE_SHORT = { '5"/7"': '5"', '11"': '11"', '17"/18"': '18"', '24"': '
 // Maps a Production balloon size to the inventory size group it belongs to.
 const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '18"': '17"/18"', '24"': '24"', '36"': '30"/36"' };
 const INV_OPEN_STATUSES = ['Full', 'Partial', 'Empty'];
-// Compact letter + color for the quick-view glance — Full uses the same reassuring green as
-// "in stock" elsewhere, Empty is deliberately muted (the backstock number's own red/green already
-// carries the urgency signal), Partial sits neutrally between the two.
+// Compact letter + color chip for the quick-view glance — same green/blue convention as the
+// backstock number boxes right above it: green draws the eye on purpose (it means "needs
+// refilling," not "good to go"), blue means fully stocked, gold/yellow sits between the two.
 const INV_OPEN_STATUS_BADGE = {
-  Full: { letter: 'F', color: 'var(--accent)' },
-  Partial: { letter: 'P', color: 'var(--info-text)' },
-  Empty: { letter: 'E', color: 'var(--text-tertiary)' },
+  Empty: { letter: 'E', bg: 'var(--accent-light)', color: 'var(--accent)' },
+  Partial: { letter: 'P', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
+  Full: { letter: 'F', bg: 'var(--info-bg)', color: 'var(--info-text)' },
 };
 
 let INVENTORY_ITEMS = [];
@@ -5799,7 +5834,7 @@ let invHistoryOpenKey = null; // `${itemId}|${size}` of the history panel curren
 // in Editing mode together — see invModeInit/invSetMode.
 let invMode = 'view';
 let invSearchQuery = '';
-let invUseUpOnly = false; // "⭐ Use Up only" filter — a color someone's flagged to intentionally work through
+let invUseUpOnly = false; // "⭐ Prioritized Stock" filter — a color someone's flagged to intentionally work through
 let invTierTab = 'main'; // 'main' or 'misc' — which colors show at all; a hard filter, applied before search/sort
 // 'custom' (default — matches walking the physical shelf), 'tier' (alphabetical), 'brand', or 'size'.
 let invGroupBy = 'custom';
@@ -6078,6 +6113,15 @@ function invLockAdmin() {
 }
 let invCollapsedGroups = new Set(); // group keys currently collapsed
 let invPendingCollapsed = false;
+// Collapsed by default — houses everything occasional/setup (Start Count, Rearrange shelf order,
+// Add a color, Recently deleted) so it never visually competes with daily search/filter/count
+// controls. Forced open at render time (not stored) whenever there are zero colors yet, so the
+// empty-state message's "add one below" stays literally true without needing its own wording.
+let invManageCollapsed = true;
+function invToggleManageCollapsed() {
+  invManageCollapsed = !invManageCollapsed;
+  invRenderLatex();
+}
 let invImportCollapsed = false;
 // Manufacturer color picker (replaces the old bulk "Import [Brand]" buttons) — pick a brand,
 // search its catalog, check the colors you actually want, add just those to the Color Library.
@@ -8414,10 +8458,10 @@ function invRenderLatex() {
     html += `<div id="inv-adjust-root" style="margin-bottom:1rem;"></div>`;
   }
 
-  // Baseline physical-count session — explicit and visible to everyone (so the team can see
-  // progress), but only admin can Start/Finish it — see invBaseline. While running, every
-  // backstock edit anywhere unconditionally logs as INITIAL_COUNT (invApplyInventoryTransactions),
-  // not inferred from "nothing happened here before."
+  // Baseline physical-count session — the in-progress banner is operational (it changes what
+  // every backstock edit anywhere logs as, see invApplyInventoryTransactions) so it stays visible
+  // to everyone up here regardless of admin state. The "want to start one?" prompt is the
+  // occasional/setup half of this feature and lives in Manage instead — see below.
   if (invBaseline.status === 'in_progress') {
     const progress = invBaselineProgress();
     html += `<div class="card" style="background:var(--info-bg); border-color:var(--info-text);">
@@ -8429,21 +8473,64 @@ function invRenderLatex() {
         ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:8px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); flex-shrink:0;" onclick="invFinishBaselineCount()">Finish Count</button>` : ''}
       </div>
     </div>`;
-  } else if (invAdminUnlocked) {
-    html += `<div class="card">
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-        <div>
-          <div style="font-size:14px; font-weight:700;">${invBaseline.status === 'complete' ? 'Starting a new physical count?' : 'Starting your physical inventory count?'}</div>
-          <div style="font-size:12px; color:var(--text-secondary);">Every count entered while this is running becomes an official Initial Inventory Count.</div>
-        </div>
-        <button class="save-btn" style="width:auto; padding:8px 16px; flex-shrink:0;" onclick="invStartBaselineCount()">Start Count</button>
-      </div>
+  }
+
+  // Flagged sizes — attention-required, so it stays above the color list (not just above the fold
+  // of "occasional" stuff). Hidden entirely when empty, same as before, so it only ever occupies
+  // space when there's actually something to look at. Resolve here is the exact same
+  // invResolveFlag already used inline on the size's own card.
+  const flaggedSizes = invAllFlaggedSizes();
+  if (flaggedSizes.length > 0) {
+    html += `<div class="section-label">Flagged sizes (${flaggedSizes.length})</div>
+    <div class="card">
+      ${flaggedSizes.map(({ item, size, flag }) => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border); cursor:pointer;" onclick="invJumpToFlaggedItem('${item.id}')">
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:600;"><i class="fa-solid fa-flag" style="color:var(--warning-text);"></i> ${psEscape(item.color)} — ${psEscape(size)}</div>
+            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(flag.note)}</div>
+          </div>
+          ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); flex-shrink:0;" onclick="event.stopPropagation(); invResolveFlag('${item.id}','${invAttr(size)}')">Resolve</button>` : ''}
+        </div>`).join('')}
     </div>`;
   }
 
-  // Pending orders — the "what's in flight" list, so nothing gets lost between pressing
-  // order and it actually landing in backstock. Sorted by color name, collapsible like the
-  // color groups below, and rendered as a dense list (not one card per order) to stay compact.
+  // Find & Filter — a compact toolbar, not a boxed panel: this is the daily-use cluster (search,
+  // tier, group-by, Prioritized Stock), so it deliberately carries no .card background/border/
+  // padding and no explanatory copy, just tight vertical rhythm between the controls themselves.
+  if (INVENTORY_ITEMS.length === 0) {
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — add one below, or add colors from a manufacturer under Settings → Color Library.</div>`;
+  } else {
+    const mainCount = INVENTORY_ITEMS.filter(i => (i.tier || 'main') === 'main').length;
+    const miscCount = INVENTORY_ITEMS.filter(i => (i.tier || 'main') === 'misc').length;
+    html += `<div style="margin-bottom:0.6rem;">
+      <div class="trip-toggle" style="margin:0 0 0.4rem;">
+        <button class="trip-btn ${invTierTab === 'main' ? 'active' : ''}" onclick="invSetTierTab('main')">Main (${mainCount})</button>
+        <button class="trip-btn ${invTierTab === 'misc' ? 'active' : ''}" onclick="invSetTierTab('misc')">Miscellaneous (${miscCount})</button>
+      </div>
+      <div class="settings-field" style="margin-bottom:0.4rem;">
+        ${invSearchFieldHtml({ id: 'inv-search', placeholder: 'Search colors or brands...', value: invSearchQuery, onInput: 'invSetSearch(this.value)', onClear: "invSetSearch('')" })}
+      </div>
+      <div class="trip-toggle" style="margin:0 0 0.4rem;">
+        <button class="trip-btn ${invGroupBy === 'custom' ? 'active' : ''}" onclick="invSetGroupBy('custom')">My Order</button>
+        <button class="trip-btn ${invGroupBy === 'colorGroup' ? 'active' : ''}" onclick="invSetGroupBy('colorGroup')">Color</button>
+        <button class="trip-btn ${invGroupBy === 'brand' ? 'active' : ''}" onclick="invSetGroupBy('brand')">Brand</button>
+        <button class="trip-btn ${invGroupBy === 'size' ? 'active' : ''}" onclick="invSetGroupBy('size')">Size</button>
+      </div>
+      ${invGroupBy === 'size' ? `<div class="settings-field" style="margin:0 0 0.4rem;">
+        <select onchange="invSetSizeSort(this.value)">
+          ${INV_SIZES.map(s => `<option value="${s}" ${s === invSizeSortSize ? 'selected' : ''}>${s}</option>`).join('')}
+        </select>
+      </div>` : ''}
+      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); cursor:pointer;">
+        <input type="checkbox" ${invUseUpOnly ? 'checked' : ''} onchange="invSetUseUpOnly(this.checked)"> <i class="fa-solid fa-star" style="color:#d4a017;"></i> Prioritized Stock
+      </label>
+    </div>`;
+  }
+  html += `<div id="inv-colors-results"></div>`;
+
+  // Pending orders — moved below the color list (it's a secondary, check-when-you-think-of-it
+  // list, not something that needs to sit above daily search/filter/count controls), collapsed
+  // by default same as before.
   const pending = INVENTORY_ORDERS
     .filter(o => o.status === 'ordered' || o.status === 'backordered')
     .sort((a, b) => {
@@ -8483,105 +8570,74 @@ function invRenderLatex() {
     }
   }
 
-  html += `<div class="section-label">Colors</div>`;
-  if (INVENTORY_ITEMS.length === 0) {
-    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No colors yet — add one below, or add colors from a manufacturer under Settings → Color Library.</div>`;
-  } else {
-    const mainCount = INVENTORY_ITEMS.filter(i => (i.tier || 'main') === 'main').length;
-    const miscCount = INVENTORY_ITEMS.filter(i => (i.tier || 'main') === 'misc').length;
-    html += `<div class="card">
-      <div class="trip-toggle" style="margin:0 0 0.6rem;">
-        <button class="trip-btn ${invTierTab === 'main' ? 'active' : ''}" onclick="invSetTierTab('main')">Main (${mainCount})</button>
-        <button class="trip-btn ${invTierTab === 'misc' ? 'active' : ''}" onclick="invSetTierTab('misc')">Miscellaneous (${miscCount})</button>
-      </div>
-      <div class="settings-field" style="margin-bottom:0.6rem;">
-        ${invSearchFieldHtml({ id: 'inv-search', placeholder: 'Search colors or brands...', value: invSearchQuery, onInput: 'invSetSearch(this.value)', onClear: "invSetSearch('')" })}
-      </div>
-      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem; cursor:pointer;">
-        <input type="checkbox" ${invUseUpOnly ? 'checked' : ''} onchange="invSetUseUpOnly(this.checked)"> <i class="fa-solid fa-star" style="color:#d4a017;"></i> Use Up only
-      </label>
-      <div class="trip-toggle" style="margin:0;">
-        <button class="trip-btn ${invGroupBy === 'custom' ? 'active' : ''}" onclick="invSetGroupBy('custom')">My Order</button>
-        <button class="trip-btn ${invGroupBy === 'colorGroup' ? 'active' : ''}" onclick="invSetGroupBy('colorGroup')">Color</button>
-        <button class="trip-btn ${invGroupBy === 'brand' ? 'active' : ''}" onclick="invSetGroupBy('brand')">Brand</button>
-        <button class="trip-btn ${invGroupBy === 'size' ? 'active' : ''}" onclick="invSetGroupBy('size')">Size</button>
-      </div>
-      ${invGroupBy === 'size' ? `<div class="settings-field" style="margin:0.6rem 0 0;">
-        <select onchange="invSetSizeSort(this.value)">
-          ${INV_SIZES.map(s => `<option value="${s}" ${s === invSizeSortSize ? 'selected' : ''}>${s}</option>`).join('')}
-        </select>
-      </div>` : ''}
-      ${invGroupBy === 'custom' && invAdminUnlocked ? `<div style="margin-top:0.6rem;">
+  // Manage — everything occasional/setup lives here, collapsed by default so it never competes
+  // with daily controls: Start Count, Rearrange shelf order, Add a color, Recently deleted. The
+  // lock/unlock control sits on the header itself (not inside the collapsed body) specifically so
+  // unlocking never has to be chained through an open-then-expand interaction — locking/unlocking
+  // and expanding/collapsing are two fully independent clicks. Forced open when there are zero
+  // colors yet, so the empty-state message above ("add one below") stays true immediately.
+  const manageOpen = !invManageCollapsed || INVENTORY_ITEMS.length === 0;
+  html += `<div class="inv-group-header">
+    <span style="cursor:pointer;" onclick="invToggleManageCollapsed()">Manage <i class="fa-solid fa-chevron-${manageOpen ? 'up' : 'down'}"></i></span>
+    <span style="cursor:pointer; text-transform:none; letter-spacing:normal; font-weight:600;" onclick="${invAdminUnlocked ? 'invLockAdmin()' : 'invUnlockAdmin()'}"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Admin' : 'Unlock'}</span>
+  </div>`;
+  if (manageOpen) {
+    if (invAdminUnlocked && invBaseline.status !== 'in_progress') {
+      html += `<div class="card">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+          <div>
+            <div style="font-size:14px; font-weight:700;">${invBaseline.status === 'complete' ? 'Starting a new physical count?' : 'Starting your physical inventory count?'}</div>
+            <div style="font-size:12px; color:var(--text-secondary);">Every count entered while this is running becomes an official Initial Inventory Count.</div>
+          </div>
+          <button class="save-btn" style="width:auto; padding:8px 16px; flex-shrink:0;" onclick="invStartBaselineCount()">Start Count</button>
+        </div>
+      </div>`;
+    }
+
+    if (invGroupBy === 'custom' && invAdminUnlocked) {
+      html += `<div class="card">
         <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invToggleRearrangeMode()"><i class="fa-solid fa-${invRearrangeMode ? 'check' : 'arrow-up-down'}"></i> ${invRearrangeMode ? 'Done arranging' : 'Rearrange shelf order'}</button>
         ${invRearrangeMode ? `<div style="font-size:11px; color:var(--text-secondary); margin-top:6px;">Drag a color by its grip icon to match your shelf — this order is shared with the whole team.</div>` : ''}
-      </div>` : ''}
-      <div style="display:flex; align-items:center; justify-content:space-between; margin-top:0.75rem; padding-top:0.6rem; border-top:0.5px solid var(--border);">
-        <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Admin unlocked' : 'Admin locked'}</div>
-        ${invAdminUnlocked
-          ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="invLockAdmin()">Lock</button>`
-          : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="invUnlockAdmin()">Unlock</button>`}
-      </div>
-    </div>`;
-  }
-  html += `<div id="inv-colors-results"></div>`;
+      </div>`;
+    }
 
-  // A real safety net, not just a confirmation dialog — every color/color-group delete in this
-  // screen is a soft delete now (see invDeleteColor/invClearGroup), so anything moved here can
-  // always come back. Admin-only and hidden entirely when empty, so it never clutters the
-  // counting view — it's a recovery tool, not something a routine count needs to see.
-  if (invAdminUnlocked && INVENTORY_ITEMS_TRASHED.length > 0) {
-    html += `<div class="section-label">Recently deleted (${INVENTORY_ITEMS_TRASHED.length})</div>
+    html += `<div class="section-label">Add a color</div>
     <div class="card">
-      ${INVENTORY_ITEMS_TRASHED.map(item => `
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
-          <div style="min-width:0;">
-            <div style="font-size:13px; font-weight:600;">${psEscape(item.color)}</div>
-            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'No brand')}</div>
-          </div>
-          <div style="display:flex; gap:6px; flex-shrink:0;">
-            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invRestoreItem('${item.id}')">Restore</button>
-            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="invPermanentlyDeleteItem('${item.id}')">Delete forever</button>
-          </div>
-        </div>`).join('')}
-    </div>`;
-  }
-
-  // The smallest useful fix for "I don't know what happens after a flag is submitted" — every
-  // flag was already visible to everyone inline on its own size's card, but that's the only place
-  // it ever surfaced; this just aggregates the same data into one list so nothing gets missed
-  // because no one happened to reopen that specific color. No new storage, no statuses, no
-  // notifications — Resolve here is the exact same invResolveFlag already used inline.
-  const flaggedSizes = invAllFlaggedSizes();
-  if (flaggedSizes.length > 0) {
-    html += `<div class="section-label">Flagged sizes (${flaggedSizes.length})</div>
-    <div class="card">
-      ${flaggedSizes.map(({ item, size, flag }) => `
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border); cursor:pointer;" onclick="invJumpToFlaggedItem('${item.id}')">
-          <div style="min-width:0;">
-            <div style="font-size:13px; font-weight:600;"><i class="fa-solid fa-flag" style="color:var(--warning-text);"></i> ${psEscape(item.color)} — ${psEscape(size)}</div>
-            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(flag.note)}</div>
-          </div>
-          ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); flex-shrink:0;" onclick="event.stopPropagation(); invResolveFlag('${item.id}','${invAttr(size)}')">Resolve</button>` : ''}
-        </div>`).join('')}
-    </div>`;
-  }
-
-  html += `<div class="section-label">Add a color</div>
-  <div class="card">
-    <div class="row">
-      <div class="settings-field" style="margin-bottom:0; position:relative;">
-        <label>Color</label>
-        <input type="text" id="inv-new-color" placeholder="e.g. White" autocomplete="off"
-          oninput="invShowMasterCatalogSuggestions()"
-          onfocus="invShowMasterCatalogSuggestions()"
-          onblur="invHideColorSuggestionsSoon('inv-new-color')">
-        <div id="inv-new-color-suggest" class="inv-color-suggest" style="display:none;"></div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0; position:relative;">
+          <label>Color</label>
+          <input type="text" id="inv-new-color" placeholder="e.g. White" autocomplete="off"
+            oninput="invShowMasterCatalogSuggestions()"
+            onfocus="invShowMasterCatalogSuggestions()"
+            onblur="invHideColorSuggestionsSoon('inv-new-color')">
+          <div id="inv-new-color-suggest" class="inv-color-suggest" style="display:none;"></div>
+        </div>
+        <div class="settings-field" style="margin-bottom:0"><label>Brand</label><input type="text" id="inv-new-brand" placeholder="e.g. Sempertex"></div>
       </div>
-      <div class="settings-field" style="margin-bottom:0"><label>Brand</label><input type="text" id="inv-new-brand" placeholder="e.g. Sempertex"></div>
-    </div>
-    <div style="font-size:11px; color:var(--text-secondary); margin:-0.5rem 0 0.6rem;">Matches a manufacturer's known colors as you type and fills in the brand — or just type your own and leave it as a general/custom color.</div>
-    <button class="save-btn" onclick="invAddColor()">Add color</button>
-  </div>`;
+      <div style="font-size:11px; color:var(--text-secondary); margin:-0.5rem 0 0.6rem;">Matches a manufacturer's known colors as you type and fills in the brand — or just type your own and leave it as a general/custom color.</div>
+      <button class="save-btn" onclick="invAddColor()">Add color</button>
+    </div>`;
+
+    // A real safety net, not just a confirmation dialog — every color/color-group delete in this
+    // screen is a soft delete now (see invDeleteColor/invClearGroup), so anything moved here can
+    // always come back. Admin-only and hidden entirely when empty.
+    if (invAdminUnlocked && INVENTORY_ITEMS_TRASHED.length > 0) {
+      html += `<div class="section-label">Recently deleted (${INVENTORY_ITEMS_TRASHED.length})</div>
+      <div class="card">
+        ${INVENTORY_ITEMS_TRASHED.map(item => `
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+            <div style="min-width:0;">
+              <div style="font-size:13px; font-weight:600;">${psEscape(item.color)}</div>
+              <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'No brand')}</div>
+            </div>
+            <div style="display:flex; gap:6px; flex-shrink:0;">
+              <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invRestoreItem('${item.id}')">Restore</button>
+              <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="invPermanentlyDeleteItem('${item.id}')">Delete forever</button>
+            </div>
+          </div>`).join('')}
+      </div>`;
+    }
+  }
 
   root.innerHTML = html;
   invRenderColorsList();
@@ -9651,9 +9707,9 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
   // below it — keeps the collapsed row a single compact line instead of growing every card
   // taller. Color follows the actual bag count, not the separate Open Bin status field (the two
   // can disagree — someone may have counted bags without updating Open Bin yet) — pale blue at
-  // 0, soft green once there's anything in stock. A small F/P/E letter underneath surfaces Open
-  // Bin too, so "0 bags, Full bin" and "0 bags, Empty bin" — very different real situations —
-  // no longer look identical from the collapsed row alone.
+  // 0, soft green once there's anything in stock. A small color-coded E/P/F chip underneath
+  // surfaces Open Bin too (see INV_OPEN_STATUS_BADGE), so "0 bags, Full bin" and "0 bags, Empty
+  // bin" — very different real situations — no longer look identical from the collapsed row alone.
   const sizeSummary = `<div style="display:grid; grid-template-columns:repeat(${INV_SIZES.length}, minmax(24px, 1fr)); gap:3px; flex-shrink:0;">
     ${INV_SIZES.map(size => `<div style="text-align:center; font-size:9px; font-weight:600; color:var(--text-tertiary);">${INV_SIZE_SHORT[size]}</div>`).join('')}
     ${INV_SIZES.map(size => {
@@ -9666,7 +9722,7 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
     }).join('')}
     ${INV_SIZES.map(size => {
       const badge = INV_OPEN_STATUS_BADGE[item.sizes[size].openStatus] || INV_OPEN_STATUS_BADGE.Empty;
-      return `<div style="text-align:center; font-size:9px; font-weight:700; margin-top:1px; color:${badge.color};">${badge.letter}</div>`;
+      return `<div style="text-align:center; font-size:9px; font-weight:700; margin-top:2px; border-radius:4px; padding:0 2px; background:${badge.bg}; color:${badge.color};">${badge.letter}</div>`;
     }).join('')}
   </div>`;
 
@@ -9684,7 +9740,7 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
   html += `<div class="inv-color-row-header"${invRearrangeMode ? '' : ` onclick="invToggleExpand('${item.id}')"`}>
     ${orderRankInput}
     <div class="inv-color-row-text">
-      <div class="inv-color-row-name"><i class="fa-${item.useUp ? 'solid' : 'regular'} fa-star" style="color:${item.useUp ? '#d4a017' : 'var(--text-tertiary)'}; font-size:13px; margin-right:3px; cursor:pointer;" onclick="event.stopPropagation(); invToggleUseUp('${item.id}')" title="${item.useUp ? 'Use Up — click to unmark' : 'Mark as Use Up'}"></i>${psEscape(item.color)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px; margin-left:2px;">INACTIVE</span>'}</div>
+      <div class="inv-color-row-name"><i class="fa-${item.useUp ? 'solid' : 'regular'} fa-star" style="color:${item.useUp ? '#d4a017' : 'var(--text-tertiary)'}; font-size:13px; margin-right:3px; cursor:pointer;" onclick="event.stopPropagation(); invToggleUseUp('${item.id}')" title="${item.useUp ? 'Prioritized — click to unmark' : 'Prioritize Stock'}"></i>${psEscape(item.color)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px; margin-left:2px;">INACTIVE</span>'}</div>
       <div class="inv-color-row-brand">${psEscape(item.brand || 'No brand')}</div>
     </div>
     ${invRearrangeMode ? '' : sizeSummary}
@@ -12461,6 +12517,26 @@ function psStaffingBodyHtml(job) {
 async function psHandleInvoiceUpload(fileInput) {
   const file = fileInput.files[0];
   if (!file) return;
+
+  // Guards the exact loss the audit flagged: IMPORT_REVIEW_DRAFT is a single-draft singleton, and
+  // Import Review auto-saves whatever's in it (irSaveDraft) — proceeding without asking would
+  // silently and permanently discard whatever review work is still unapproved. Cancel is always
+  // the non-destructive choice here, matching how confirm() dialogs read everywhere else in this
+  // app (OK commits to the stated action; Cancel backs out) — OK explicitly means "yes, discard."
+  if (IMPORT_REVIEW_DRAFT) {
+    const label = (IMPORT_REVIEW_DRAFT.event && IMPORT_REVIEW_DRAFT.event.jobName) ? ` for "${IMPORT_REVIEW_DRAFT.event.jobName}"` : '';
+    const discard = confirm(`You already have an unfinished import review${label}. Discard it and import this new invoice instead?`);
+    fileInput.value = '';
+    if (!discard) {
+      showView('importReview');
+      irRenderShell();
+      return;
+    }
+    IMPORT_REVIEW_DRAFT = null;
+    window.fbSaveImportReviewDraft({ draft: null }).catch(err => console.error('Clearing saved import draft failed:', err));
+    irRenderResumeBanner();
+  }
+
   const statusEl = document.getElementById('ps-import-status');
   statusEl.style.display = 'block';
   statusEl.className = '';
