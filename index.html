@@ -1001,6 +1001,34 @@
   window.fbSaveFoilItem = (item) => setDoc(doc(foilItemsRef, item.id), item);
   window.fbDeleteFoilItem = (id) => deleteDoc(doc(foilItemsRef, id));
 
+  // ═══ BBT Master Catalog — the first genuinely global (non-business-scoped) data in this app ═══
+  // Deliberately NOT under businesses/{BUSINESS_ID} — this is BBT-maintained reference data meant
+  // to be shared and read by every business, not owned by this one. Firestore Security Rules must
+  // gate writes to these two collections behind real BBT-admin authorization (a distinct
+  // allowlist), never the shared per-business admin passcode — see Settings → BBT Master Catalog
+  // for why the client-side gate there is explicitly labeled as a convenience, not real security.
+  const masterManufacturersRef = collection(db, 'masterManufacturers');
+  window.fbOnSnapshotMasterManufacturers = (onNext, onError) => onSnapshot(masterManufacturersRef, onNext, onError);
+  window.fbSaveMasterManufacturer = (m) => setDoc(doc(masterManufacturersRef, m.id), m);
+  window.fbDeleteMasterManufacturer = (id) => deleteDoc(doc(masterManufacturersRef, id));
+  // Firestore's own auto-id generation (a fresh, unique id minted client-side, no network round
+  // trip) rather than a custom generator — these ids are permanent global identities, so the
+  // more standard source is preferred. Never derived from name/brand text.
+  window.fbNewMasterManufacturerId = () => doc(masterManufacturersRef).id;
+
+  const masterColorCatalogRef = collection(db, 'masterColorCatalog');
+  window.fbOnSnapshotMasterColorCatalog = (onNext, onError) => onSnapshot(masterColorCatalogRef, onNext, onError);
+  window.fbSaveMasterColor = (c) => setDoc(doc(masterColorCatalogRef, c.id), c);
+  window.fbDeleteMasterColor = (id) => deleteDoc(doc(masterColorCatalogRef, id));
+  window.fbNewMasterColorId = () => doc(masterColorCatalogRef).id;
+  // Colors are the one master collection expected to reach real scale (hundreds+), unlike
+  // manufacturers — batched for the CSV import tool, same chunking precedent as invResetCounts.
+  window.fbBatchSaveMasterColors = (colors) => {
+    const batch = writeBatch(db);
+    colors.forEach(c => batch.set(doc(masterColorCatalogRef, c.id), c));
+    return batch.commit();
+  };
+
   // The audit trail every inventory quantity change writes to — see invApplyInventoryTransactions.
   // Read-only from the classic script's point of view except through that one function; exposing
   // runTransaction + the two doc-ref builders lets the business logic (delta math, INITIAL_COUNT
@@ -1568,6 +1596,7 @@
     <div class="settings-group-panel" data-settings-group="templatesFormulas" style="display:none"></div>
     <div class="settings-group-panel" data-settings-group="importMapping" style="display:none"></div>
     <div class="settings-group-panel" data-settings-group="attachments" style="display:none"></div>
+    <div class="settings-group-panel" data-settings-group="bbtMaster" style="display:none"></div>
 
     <!-- PRICING & CALCULATORS — Delivery Calculator's defaults (static, unchanged from before
          the grouped-navigation redesign). Letter Styling's own pricing stays edited from that
@@ -2097,6 +2126,12 @@ const SETTINGS_SECTIONS = [
   { id: 'productionTemplates', label: 'Production Templates', group: 'templatesFormulas', containerId: 'pt-root' },
   { id: 'balloonMath', label: 'Calculator Defaults — Balloon math', group: 'templatesFormulas', containerId: 'fr-formulas-root', standaloneLabel: true },
   { id: 'attachmentCategories', label: 'Attachment Categories', group: 'attachments', containerId: 'ac-settings-root' },
+  // BBT-global, not this business's own data — see the module-script comment above
+  // masterManufacturersRef/masterColorCatalogRef for why these two collections live outside
+  // businesses/{BUSINESS_ID} entirely, and mstRenderSettingsSection's own note on why the
+  // client-side gate here is a convenience, not the real security boundary.
+  { id: 'masterManufacturers', label: 'Master Manufacturers', group: 'bbtMaster', containerId: 'mst-mfr-root', icon: 'fa-solid fa-industry' },
+  { id: 'masterColors', label: 'Master Colors', group: 'bbtMaster', containerId: 'mst-color-root', icon: 'fa-solid fa-palette' },
 ];
 
 // Every group shown as its own tile on the Settings home grid — 'account' and 'pricing' hold
@@ -2114,6 +2149,9 @@ const SETTINGS_GROUPS = [
   { id: 'importMapping', label: 'Import & Mapping', icon: 'fa-solid fa-file-import' },
   { id: 'pricing', label: 'Pricing & Calculators', icon: 'fa-solid fa-calculator' },
   { id: 'attachments', label: 'Attachments', icon: 'fa-solid fa-paperclip' },
+  // Deliberately its own group, not folded into "Library and Catalogs" — this is BBT-shipped
+  // reference data (Manufacturers, Colors), not anything owned by this business.
+  { id: 'bbtMaster', label: 'BBT Master Catalog', icon: 'fa-solid fa-globe', subChoice: true },
 ];
 
 // Builds the Settings home grid (one tile per group) and slots each registered section's
@@ -5814,6 +5852,8 @@ function settingsRefreshAdminSections() {
   acRenderShell();
   heRenderSettingsSection();
   heRenderShell();
+  mstRenderManufacturersSection();
+  mstRenderColorsSection();
   invRenderColorsList();
   renderAdminPasscodeBlock();
   bsUpdateHomeBanner();
@@ -6049,7 +6089,26 @@ let clPickerSelected = new Set();
 let clCsvImportCollapsed = true;
 let clPickerExpandedId = null; // which "already have it" row's inline editor is open, if any
 let clLibraryOnlySectionCollapsed = true;
+// "Add from BBT Catalog" (Phase 3) — a separate browse/select picker over MASTER_COLORS, parallel
+// to the manufacturer-catalog picker above but keyed by Master ids, not name matching.
+let clMasterPickerCollapsed = true;
+let clMasterPickerManufacturerId = null; // selected Master manufacturer id — set on first render
+let clMasterPickerQuery = '';
+let clMasterPickerExpandedId = null; // which "already have it" row's inline editor is open, if any
+
+// ── Reconciliation / assimilation (Phase 4) ────────────────────────────────────────────────────
+// Entirely a preview/dry-run in this pass — rcPreviewResults is a separate, in-memory scratch
+// structure keyed by entryId, never mutating a real COLOR_LIBRARY entry. No commit/apply function
+// exists yet; nothing here can write masterColorId or an alias onto a real entry. Never runs
+// automatically — only ever computed by an explicit "Run reconciliation preview" button press.
+let rcCollapsed = true;
+let rcPreviewResults = null; // null until the preview has been run; array of { entryId, status, candidates: [masterColorId], reason, reviewAction: null|'link'|'keep-separate', chosenMasterColorId }
+let rcPreviewFilter = 'needs-review'; // 'all' | 'needs-review' | 'auto-link' | 'unmatched' | 'linked'
+let rcChoosePickerFor = null; // entryId currently showing its "Choose Different Match" search box
+let rcChoosePickerQuery = '';
 let clAliasBoxExpanded = new Set(); // colorIds whose "add an alias" box is currently open
+let clSubstitutePickerFor = null; // colorId currently showing its "add a substitute" search box, or null
+let clSubstitutePickerQuery = '';
 
 function invTogglePendingCollapsed() {
   invPendingCollapsed = !invPendingCollapsed;
@@ -6635,9 +6694,22 @@ function clFindEntry(brand, colorName) {
 function clFindOrCreate(brand, colorName) {
   const existing = clFindEntry(brand, colorName);
   if (existing) return existing;
-  const entry = { id: psNewColorId(), brand: (brand || '').trim(), colorName: (colorName || '').trim(), aliases: [], active: true };
+  // masterColorId/displayHexOverride/substituteIds are Phase 2's additive fields — null/empty by
+  // default on every new entry. Existing entries loaded from Firestore predate these fields
+  // entirely; every read site defaults them the same way (|| null / || []) rather than requiring
+  // a migration, matching how every other new optional field has been introduced this session.
+  const entry = { id: psNewColorId(), brand: (brand || '').trim(), colorName: (colorName || '').trim(), aliases: [], active: true, masterColorId: null, displayHexOverride: null, substituteIds: [] };
   COLOR_LIBRARY.push(entry);
   return entry;
+}
+// Business override, if set, always wins for display — else the linked Master color's own hex
+// (a live join via masterColorId, never copied onto the entry — a later Master hex correction
+// reaches every non-overriding business automatically) — else no swatch at all.
+function clResolveDisplayHex(entry) {
+  if (!entry) return null;
+  if (entry.displayHexOverride) return entry.displayHexOverride;
+  const master = entry.masterColorId ? (typeof mstFindColor === 'function' ? mstFindColor(entry.masterColorId) : null) : null;
+  return (master && master.hex) || null;
 }
 
 // Distinct active color names across the whole Library — the shared autocomplete's search
@@ -6718,6 +6790,51 @@ function clRemoveAlias(id, alias) {
   if (!entry) return;
   entry.aliases = (entry.aliases || []).filter(a => a !== alias);
   clSaveLibrary().catch(() => {});
+}
+
+// Substitutes/Dupes — a structured, bidirectional peer relationship between two Business Color
+// Library entries (never Master-level, and never ranked/scored — see the approved Phase 2 scope).
+// Both directions are only ever mutated together, through these two functions, so the two sides
+// can never drift out of sync — safe because COLOR_LIBRARY is saved as one whole array in one
+// write (clSaveLibrary), the same property clAddAlias/clRemoveAlias already lean on.
+function clAddSubstitute(idA, idB) {
+  if (idA === idB) { alert("A color can't be a substitute for itself."); return; }
+  const a = COLOR_LIBRARY.find(e => e.id === idA);
+  const b = COLOR_LIBRARY.find(e => e.id === idB);
+  if (!a || !b) return;
+  if (!a.substituteIds) a.substituteIds = [];
+  if (!b.substituteIds) b.substituteIds = [];
+  if (a.substituteIds.includes(idB)) return; // already linked — nothing to do
+  a.substituteIds.push(idB);
+  b.substituteIds.push(idA);
+  clSaveLibrary().catch(() => {});
+  clSubstitutePickerQuery = '';
+  clRefreshAliasViews();
+}
+function clRemoveSubstitute(idA, idB) {
+  const a = COLOR_LIBRARY.find(e => e.id === idA);
+  const b = COLOR_LIBRARY.find(e => e.id === idB);
+  if (a) a.substituteIds = (a.substituteIds || []).filter(x => x !== idB);
+  if (b) b.substituteIds = (b.substituteIds || []).filter(x => x !== idA);
+  clSaveLibrary().catch(() => {});
+  clRefreshAliasViews();
+}
+// A permanently-deleted entry's id can never resolve again — prune it out of every other entry's
+// substituteIds (both the live Library and the trash, since a trashed entry can itself still
+// reference other colors) so nothing dangles. A merely-archived or soft-trashed (Recently Deleted)
+// entry is left alone on purpose: its own reference is just inert until restored, not broken.
+function clPruneSubstituteReferences(id) {
+  let changed = false;
+  COLOR_LIBRARY.forEach(e => { if (e.substituteIds && e.substituteIds.includes(id)) { e.substituteIds = e.substituteIds.filter(x => x !== id); changed = true; } });
+  COLOR_LIBRARY_TRASH.forEach(e => { if (e.substituteIds && e.substituteIds.includes(id)) e.substituteIds = e.substituteIds.filter(x => x !== id); });
+  return changed;
+}
+function clSetDisplayHexOverride(id, value) {
+  const entry = COLOR_LIBRARY.find(e => e.id === id);
+  if (!entry) return;
+  entry.displayHexOverride = (value || '').trim() || null;
+  clSaveLibrary().catch(() => {});
+  clRefreshAliasViews();
 }
 
 // Adds manufacturer colors to the Library and — unless the caller opts out — also creates a
@@ -8514,6 +8631,32 @@ function clRenderSettingsSection() {
       <div id="cl-picker-results"></div>
     </div>`;
   }
+  html += `<div class="inv-group-header" onclick="clToggleMasterPicker()" style="margin-top:0.6rem;">
+    <span>Add from BBT Catalog</span>
+    <i class="fa-solid fa-chevron-${clMasterPickerCollapsed ? 'down' : 'up'}"></i>
+  </div>`;
+  if (!clMasterPickerCollapsed) {
+    html += `<div class="card">
+      <div class="trip-toggle" id="cl-master-picker-mfr-toggle" style="margin:0 0 0.6rem;"></div>
+      <div class="settings-field" style="margin-bottom:0.6rem;">
+        ${invSearchFieldHtml({ id: 'cl-master-picker-search', placeholder: 'Search colors...', value: clMasterPickerQuery, onInput: 'clSetMasterPickerQuery(this.value)', onClear: "clSetMasterPickerQuery('')" })}
+      </div>
+      <div id="cl-master-picker-results"></div>
+    </div>`;
+  }
+  if (invAdminUnlocked) {
+    html += `<div class="inv-group-header" onclick="rcToggleSection()" style="margin-top:0.6rem;">
+      <span>Reconcile with BBT Catalog <span style="text-transform:none; font-weight:400; font-style:italic; color:var(--text-secondary);">— dry-run preview</span></span>
+      <i class="fa-solid fa-chevron-${rcCollapsed ? 'down' : 'up'}"></i>
+    </div>`;
+    if (!rcCollapsed) {
+      html += `<div class="card">
+        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:0.6rem;">Compares your existing Color Library against the BBT Master Catalog and proposes links — brand-scoped, never guessing across manufacturers. This never runs on its own; nothing is saved until a future explicit step you haven't enabled yet.</div>
+        <button class="save-btn" onclick="rcRunPreview()"><i class="fa-solid fa-magnifying-glass"></i> ${rcPreviewResults ? 'Re-run reconciliation preview' : 'Run reconciliation preview'}</button>
+        <div id="rc-preview-root" style="margin-top:0.75rem;"></div>
+      </div>`;
+    }
+  }
   html += `<div class="inv-group-header" onclick="clToggleCsvImport()" style="margin-top:0.6rem;">
     <span>Add custom colors</span>
     <i class="fa-solid fa-chevron-${clCsvImportCollapsed ? 'down' : 'up'}"></i>
@@ -8554,7 +8697,14 @@ function clRenderSettingsSection() {
   root.innerHTML = html;
   clRenderBrandToggle();
   clRenderPicker();
+  clRenderMasterBrandToggle();
+  clRenderMasterPicker();
+  if (invAdminUnlocked && !rcCollapsed) rcRenderPreview();
   if (!clCsvImportCollapsed && impState && impState.spec.key === 'colorLibrary') impRender();
+}
+function clToggleMasterPicker() {
+  clMasterPickerCollapsed = !clMasterPickerCollapsed;
+  clRenderSettingsSection();
 }
 // Re-renders whichever of the two places a Color Library alias/archive edit could be visible —
 // Inventory's per-item cards (stocked colors) and Settings' "Color Library only" list
@@ -8645,6 +8795,7 @@ function clPermanentlyDeleteFromTrash(id) {
   if (typed !== 'DELETE') { alert('Not deleted — you must type DELETE exactly.'); return; }
   COLOR_LIBRARY_TRASH = COLOR_LIBRARY_TRASH.filter(e => e.id !== id);
   clSaveTrash();
+  if (clPruneSubstituteReferences(id)) clSaveLibrary().catch(() => {});
   clRenderSettingsSection();
 }
 // Selects (or clears) every currently-filtered, not-already-owned color at once — the "bulk"
@@ -8703,6 +8854,7 @@ function clRenderPicker() {
         </div>
         ${expanded ? `<div style="padding:0 2px 10px; border-bottom:0.5px solid var(--border); margin-bottom:6px;">
           ${invAliasEditorHtml(entry.id)}
+          ${clMasterFieldsHtml(entry.id)}
           <div style="display:flex; gap:8px; margin-top:0.4rem;">
             <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="${entry.active === false ? `clRestore('${entry.id}')` : `clArchive('${entry.id}')`}; clRefreshAliasViews();"><i class="fa-solid fa-${entry.active === false ? 'eye' : 'eye-slash'}"></i> ${entry.active === false ? 'Reactivate' : 'Deactivate'}</button>
             <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px; color:var(--warning-text);" onclick="clRemoveColorFromLibrary('${entry.id}')"><i class="fa-solid fa-trash"></i> Remove from Library</button>
@@ -8723,6 +8875,445 @@ function clRenderPicker() {
   const newScroll = document.getElementById('cl-picker-scroll');
   if (newScroll) newScroll.scrollTop = scrollTop;
 }
+
+// ═══════════════════ "Add from BBT Catalog" (Phase 3) ═══════════════════
+// A separate browse/select picker over MASTER_COLORS, parallel in shape to the manufacturer-
+// catalog picker above but keyed by Master ids (never by name matching, which is reconciliation's
+// job in Phase 4, not this one's). One color at a time rather than the checkbox multi-select above
+// — Master Catalog browsing is expected to be occasional, not a bulk one-time setup pass.
+function clRenderMasterBrandToggle() {
+  const container = document.getElementById('cl-master-picker-mfr-toggle');
+  if (!container) return;
+  const sorted = [...MASTER_MANUFACTURERS].filter(m => m.active !== false).sort((a, b) => a.name.localeCompare(b.name));
+  if (!clMasterPickerManufacturerId && sorted.length > 0) clMasterPickerManufacturerId = sorted[0].id;
+  container.innerHTML = sorted.map(m => `<button class="trip-btn ${clMasterPickerManufacturerId === m.id ? 'active' : ''}" onclick="clSetMasterPickerManufacturer('${m.id}')">${psEscape(m.name)}</button>`).join('');
+}
+function clSetMasterPickerManufacturer(id) {
+  clMasterPickerManufacturerId = id;
+  clRenderMasterBrandToggle();
+  clRenderMasterPicker();
+}
+function clSetMasterPickerQuery(value) {
+  clMasterPickerQuery = value;
+  clRenderMasterPicker();
+}
+function clToggleMasterPickerExpanded(id) {
+  clMasterPickerExpandedId = (clMasterPickerExpandedId === id) ? null : id;
+  clRenderMasterPicker();
+}
+// The one duplicate check this phase makes: keyed strictly on masterColorId, never on name/brand
+// text — matching an UNLINKED existing entry to a Master color by name is reconciliation's job
+// (Phase 4), explicitly out of scope here.
+function clFindEntryByMasterColorId(masterColorId) {
+  return COLOR_LIBRARY.find(e => e.masterColorId === masterColorId);
+}
+// Creates a normal, permanent business Color Library entry linked to a Master color. brand/
+// colorName are seeded from the Master record's CURRENT display names at this moment only — they
+// become ordinary business-owned working fields immediately after, exactly like a manually-typed
+// entry's fields. Nothing here (or anywhere else) keeps them in sync with later Master renames.
+function clAddFromMasterCatalog(masterColorId) {
+  const existing = clFindEntryByMasterColorId(masterColorId);
+  if (existing) {
+    clMasterPickerExpandedId = existing.id;
+    clRenderMasterPicker();
+    alert(`This color is already in your Color Library as "${existing.brand ? existing.brand + ' ' : ''}${existing.colorName}" — opening it.`);
+    return;
+  }
+  const master = MASTER_COLORS.find(c => c.id === masterColorId);
+  if (!master) return;
+  const mfr = mstFindManufacturer(master.manufacturerId);
+  const entry = {
+    id: psNewColorId(), brand: mfr ? mfr.name : '', colorName: master.colorName,
+    aliases: [], active: true,
+    masterColorId: master.id, displayHexOverride: null, substituteIds: [],
+  };
+  COLOR_LIBRARY.push(entry);
+  clSaveLibrary().catch(() => {
+    // Roll back on a real save failure — same convention as clAddColorsBulk — rather than leaving
+    // an entry that looks added locally but never actually persisted.
+    COLOR_LIBRARY = COLOR_LIBRARY.filter(e => e.id !== entry.id);
+    clRenderSettingsSection();
+    alert(`Couldn't add "${entry.colorName}" — check your connection and try again.`);
+  });
+  clMasterPickerExpandedId = entry.id;
+  clRenderSettingsSection();
+}
+function clRenderMasterPicker() {
+  const container = document.getElementById('cl-master-picker-results');
+  if (!container) return;
+  const prevScroll = document.getElementById('cl-master-picker-scroll');
+  const scrollTop = prevScroll ? prevScroll.scrollTop : 0;
+  if (MASTER_MANUFACTURERS.length === 0) {
+    container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary); padding:8px 0;">No BBT Master Catalog manufacturers yet.</div>`;
+    return;
+  }
+  const mfr = mstFindManufacturer(clMasterPickerManufacturerId);
+  const colors = MASTER_COLORS.filter(c => c.manufacturerId === clMasterPickerManufacturerId && c.active !== false);
+  const q = clMasterPickerQuery.trim().toLowerCase();
+  const matches = colors.filter(c => !q || c.colorName.toLowerCase().includes(q) || (c.aliases || []).some(a => a.toLowerCase().includes(q))).sort((a, b) => a.colorName.localeCompare(b.colorName));
+  let html = `<div style="font-size:11px; color:var(--text-secondary); margin-bottom:0.5rem;">${matches.length} color${matches.length === 1 ? '' : 's'}${q ? ' matching' : ''}</div>`;
+  if (colors.length === 0) {
+    html = `<div style="font-size:12px; color:var(--text-secondary); padding:8px 0;">${mfr ? psEscape(mfr.name) : 'This manufacturer'} doesn't have any Master Catalog colors yet.</div>`;
+    container.innerHTML = html;
+    return;
+  }
+  html += `<div id="cl-master-picker-scroll" style="max-height:320px; overflow-y:auto; display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:2px 12px;">`;
+  matches.forEach(master => {
+    const existing = clFindEntryByMasterColorId(master.id);
+    const hex = existing ? clResolveDisplayHex(existing) : master.hex;
+    if (existing) {
+      const expanded = clMasterPickerExpandedId === existing.id;
+      html += `<div style="grid-column:${expanded ? '1 / -1' : 'auto'};">
+        <div style="display:flex; align-items:center; gap:8px; padding:6px 2px; font-size:13px; color:var(--text-tertiary); cursor:pointer;" onclick="clToggleMasterPickerExpanded('${existing.id}')">
+          ${hex ? `<span style="display:inline-block; width:10px; height:10px; border-radius:50%; border:0.5px solid var(--border-strong); background:${invAttr(hex)}; flex-shrink:0;"></span>` : `<i class="fa-solid fa-check" style="width:14px; font-size:11px;"></i>`}
+          <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;" title="${psEscape(master.colorName)}">${psEscape(master.colorName)} <span style="font-size:11px;">— have it</span></span>
+          <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'}" style="font-size:10px;"></i>
+        </div>
+        ${expanded ? `<div style="padding:0 2px 10px; border-bottom:0.5px solid var(--border); margin-bottom:6px;">
+          ${invAliasEditorHtml(existing.id)}
+          ${clMasterFieldsHtml(existing.id)}
+          <div style="display:flex; gap:8px; margin-top:0.4rem;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="${existing.active === false ? `clRestore('${existing.id}')` : `clArchive('${existing.id}')`}; clRefreshAliasViews(); clRenderMasterPicker();"><i class="fa-solid fa-${existing.active === false ? 'eye' : 'eye-slash'}"></i> ${existing.active === false ? 'Reactivate' : 'Deactivate'}</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px; color:var(--warning-text);" onclick="clRemoveColorFromLibrary('${existing.id}'); clRenderMasterPicker();"><i class="fa-solid fa-trash"></i> Remove from Library</button>
+          </div>
+        </div>` : ''}
+      </div>`;
+    } else {
+      html += `<div style="display:flex; align-items:center; gap:8px; padding:6px 2px; font-size:13px;">
+        ${hex ? `<span style="display:inline-block; width:10px; height:10px; border-radius:50%; border:0.5px solid var(--border-strong); background:${invAttr(hex)}; flex-shrink:0;"></span>` : `<span style="width:10px; flex-shrink:0;"></span>`}
+        <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;" title="${psEscape(master.colorName)}">${psEscape(master.colorName)}</span>
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="clAddFromMasterCatalog('${master.id}')">Add</button>
+      </div>`;
+    }
+  });
+  if (matches.length === 0) html += `<div style="font-size:12px; color:var(--text-secondary);">No matching colors.</div>`;
+  html += `</div>`;
+  container.innerHTML = html;
+  const newScroll = document.getElementById('cl-master-picker-scroll');
+  if (newScroll) newScroll.scrollTop = scrollTop;
+}
+
+// ═══════════════════ Reconciliation / Assimilation (Phase 4) — dry-run/preview only ═══════════════════
+//
+// Matches every unlinked business Color Library entry against the BBT Master Catalog, brand-
+// scoped at every tier (never fuzzy-matching across manufacturers, per the approved rules).
+// Nothing here writes anything — rcRunPreview only populates the in-memory rcPreviewResults
+// scratch array. A future, separate "Apply" step (not built yet) is what would actually turn an
+// approved row's decision into a real masterColorId + alias write on the real entry.
+function rcNorm(s) { return (s || '').trim().toLowerCase(); }
+function rcNormLoose(s) { return rcNorm(s).replace(/[^a-z0-9]+/g, ''); }
+// Minimal Levenshtein distance — used only to route a close-but-not-exact name to Review, never
+// to auto-link (matching the approved "fuzzy/close → Review, never guess" rule).
+function rcLevenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+// A business entry's brand text resolves to a Master manufacturer by exact normalized name or one
+// of that manufacturer's own known aliases — never fuzzy. Zero or 2+ matches both mean "no single
+// manufacturer identified," which by the approved rule means no Master candidate can be considered
+// at all (matching never crosses manufacturers, so there's nothing to fall back to).
+function rcMatchManufacturers(brandText) {
+  const b = rcNorm(brandText);
+  if (!b) return [];
+  return MASTER_MANUFACTURERS.filter(m => m.active !== false && (rcNorm(m.name) === b || (m.aliases || []).some(a => rcNorm(a) === b)));
+}
+// Returns { status, candidates?: MasterColor[], reason? }. status is one of:
+//   'linked'                 — already has masterColorId set; not a reconciliation candidate
+//   'auto-exact'              — unique exact manufacturer + color name match
+//   'auto-alias'              — unique exact match against the Master color's OWN alias list
+//   'review-business-alias'   — the only evidence is a BUSINESS-created alias matching Master's name/alias
+//   'review-fuzzy'            — close but not exact (edit distance / substring on loosely-normalized names)
+//   'review-multiple'         — 2+ equally plausible candidates at any tier (never guess which one)
+//   'unmatched'               — no manufacturer identified, or no candidate found — stays a valid custom color
+function rcClassifyEntry(entry) {
+  if (entry.masterColorId) return { status: 'linked' };
+  const mfrs = rcMatchManufacturers(entry.brand);
+  if (mfrs.length === 0) return { status: 'unmatched' };
+  if (mfrs.length > 1) return { status: 'review-multiple', candidates: [], reason: 'Brand text matches more than one BBT Master manufacturer.' };
+  const mfr = mfrs[0];
+  const candidates = MASTER_COLORS.filter(c => c.manufacturerId === mfr.id && c.active !== false);
+  if (candidates.length === 0) return { status: 'unmatched' };
+
+  const nameNorm = rcNorm(entry.colorName);
+  const exactNameMatches = candidates.filter(c => rcNorm(c.colorName) === nameNorm);
+  if (exactNameMatches.length === 1) return { status: 'auto-exact', candidates: exactNameMatches };
+  if (exactNameMatches.length > 1) return { status: 'review-multiple', candidates: exactNameMatches, reason: 'Multiple Master colors share this exact name.' };
+
+  const masterAliasMatches = candidates.filter(c => (c.aliases || []).some(a => rcNorm(a) === nameNorm));
+  if (masterAliasMatches.length === 1) return { status: 'auto-alias', candidates: masterAliasMatches };
+  if (masterAliasMatches.length > 1) return { status: 'review-multiple', candidates: masterAliasMatches, reason: 'Multiple Master colors list this as a known alias.' };
+
+  // Evidence from a BUSINESS-created alias only (never trusted enough to auto-link — a human
+  // must confirm since invoice/local shorthand isn't as reliable as the Master's own records).
+  const businessAliases = (entry.aliases || []).map(rcNorm).filter(Boolean);
+  if (businessAliases.length > 0) {
+    const bizAliasMatches = candidates.filter(c => businessAliases.includes(rcNorm(c.colorName)) || (c.aliases || []).some(a => businessAliases.includes(rcNorm(a))));
+    if (bizAliasMatches.length === 1) return { status: 'review-business-alias', candidates: bizAliasMatches, reason: 'Matches one of your own saved aliases, not the Master record’s own name/alias.' };
+    if (bizAliasMatches.length > 1) return { status: 'review-multiple', candidates: bizAliasMatches, reason: 'Multiple Master colors match one of your own aliases.' };
+  }
+
+  const looseName = rcNormLoose(entry.colorName);
+  const fuzzyMatches = looseName ? candidates.filter(c => {
+    const looseC = rcNormLoose(c.colorName);
+    if (!looseC) return false;
+    if (looseName === looseC) return true; // differs only by punctuation/spacing/case
+    if (looseName.length >= 4 && looseC.length >= 4 && (looseName.includes(looseC) || looseC.includes(looseName))) return true;
+    return Math.min(looseName.length, looseC.length) >= 4 && rcLevenshtein(looseName, looseC) <= 2;
+  }) : [];
+  if (fuzzyMatches.length === 1) return { status: 'review-fuzzy', candidates: fuzzyMatches, reason: 'Close to a Master color’s name, but not an exact match.' };
+  if (fuzzyMatches.length > 1) return { status: 'review-multiple', candidates: fuzzyMatches, reason: 'Multiple Master colors look similar to this name.' };
+
+  return { status: 'unmatched' };
+}
+const RC_STATUS_META = {
+  linked: { label: 'Already linked', bg: 'transparent', color: 'var(--text-tertiary)' },
+  'auto-exact': { label: 'Will auto-link — exact match', bg: 'var(--accent-light)', color: 'var(--accent)' },
+  'auto-alias': { label: 'Will auto-link — Master alias match', bg: 'var(--accent-light)', color: 'var(--accent)' },
+  'review-business-alias': { label: 'Needs review — your alias only', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
+  'review-fuzzy': { label: 'Needs review — close match', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
+  'review-multiple': { label: 'Needs review — multiple candidates', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
+  unmatched: { label: 'No match — stays custom', bg: 'transparent', color: 'var(--text-tertiary)' },
+};
+function rcIsReviewStatus(status) { return status === 'review-business-alias' || status === 'review-fuzzy' || status === 'review-multiple'; }
+
+function rcToggleSection() {
+  rcCollapsed = !rcCollapsed;
+  clRenderSettingsSection();
+}
+// The one and only entry point that computes classifications — always an explicit button press,
+// never automatic on load, on a Master Catalog change, or on any other render.
+function rcRunPreview() {
+  rcPreviewResults = COLOR_LIBRARY.map(entry => {
+    const result = rcClassifyEntry(entry);
+    const candidateIds = (result.candidates || []).map(c => c.id);
+    const isAuto = result.status === 'auto-exact' || result.status === 'auto-alias';
+    return {
+      entryId: entry.id,
+      status: result.status,
+      candidates: candidateIds,
+      reason: result.reason || null,
+      reviewAction: isAuto ? 'link' : null,
+      chosenMasterColorId: isAuto ? candidateIds[0] : null,
+    };
+  });
+  rcChoosePickerFor = null;
+  rcRenderPreview();
+}
+// Every row this Apply step will actually write — exactly the rows the preview already displays
+// as "would link," nothing more. keep-separate, unmatched, already-linked, and any still-undecided
+// review row are all naturally excluded since none of them ever set reviewAction to 'link'.
+function rcApprovedRows() {
+  if (!rcPreviewResults) return [];
+  return rcPreviewResults.filter(r => r.reviewAction === 'link' && r.chosenMasterColorId);
+}
+// The one and only place reconciliation ever writes to a real Color Library entry — sets
+// masterColorId, and nothing else. id/brand/colorName/aliases are never assigned here or anywhere
+// else in this Apply step; Inventory/colorId/ledger data is never referenced at all.
+function rcApplyEntry(entry, masterColorId) {
+  entry.masterColorId = masterColorId;
+}
+// Explicit-button-only. Never called from a snapshot listener, boot sequence, or Master Catalog
+// change handler — the only caller anywhere in the file is the Apply button's onclick.
+async function rcCommitApply() {
+  const toApply = rcApprovedRows();
+  if (toApply.length === 0) { alert('Nothing is approved to apply yet — link or auto-link at least one color first.'); return; }
+  if (!confirm(`This will set a BBT Master Catalog link (masterColorId) on ${toApply.length} Color Library ${toApply.length === 1 ? 'entry' : 'entries'}.\n\nNothing else changes — id, brand, colorName, aliases, Inventory, and ledger data are all untouched.\n\nContinue?`)) return;
+
+  const btn = document.getElementById('rc-apply-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Applying...'; }
+
+  // COLOR_LIBRARY persists as one whole array in one Firestore document (clSaveLibrary) — so this
+  // is naturally all-or-nothing at the storage level already: the single write either succeeds
+  // (every entry below is saved) or throws (none of them are). The snapshot below exists so a
+  // thrown save can roll the in-memory array back to match, rather than leaving memory looking
+  // "applied" while nothing was actually persisted.
+  const snapshot = toApply.map(r => {
+    const entry = COLOR_LIBRARY.find(e => e.id === r.entryId);
+    return { entry, prevMasterColorId: entry ? entry.masterColorId : undefined };
+  }).filter(s => s.entry);
+
+  snapshot.forEach(s => rcApplyEntry(s.entry, toApply.find(r => r.entryId === s.entry.id).chosenMasterColorId));
+
+  try {
+    await clSaveLibrary();
+    alert(`Applied — ${snapshot.length} Color Library ${snapshot.length === 1 ? 'entry is' : 'entries are'} now linked to the BBT Master Catalog.`);
+  } catch (err) {
+    console.error('Reconciliation Apply failed:', err);
+    snapshot.forEach(s => { s.entry.masterColorId = s.prevMasterColorId; });
+    alert("Couldn't apply — check your connection and try again. Nothing was saved.");
+  }
+  // Recompute from the (now-updated, or correctly-rolled-back) real Color Library, so the preview
+  // reflects reality — a successfully-linked entry shows as "Already linked" instead of a stale
+  // "would link" proposal.
+  rcRunPreview();
+  clRefreshAliasViews();
+}
+function rcSetPreviewFilter(filter) {
+  rcPreviewFilter = filter;
+  rcRenderPreview();
+}
+function rcSetReviewAction(entryId, action) {
+  if (!rcPreviewResults) return;
+  const row = rcPreviewResults.find(r => r.entryId === entryId);
+  if (!row) return;
+  if (action === 'link') {
+    if (row.candidates.length !== 1) { alert('This one has more than one possible match — use "Choose Different Match" to pick a specific color.'); return; }
+    row.reviewAction = 'link';
+    row.chosenMasterColorId = row.candidates[0];
+  } else if (action === 'keep-separate') {
+    row.reviewAction = 'keep-separate';
+    row.chosenMasterColorId = null;
+  }
+  rcChoosePickerFor = null;
+  rcRenderPreview();
+}
+function rcToggleChoosePicker(entryId) {
+  rcChoosePickerFor = (rcChoosePickerFor === entryId) ? null : entryId;
+  rcChoosePickerQuery = '';
+  rcRenderPreview();
+}
+function rcSetChoosePickerQuery(value) {
+  rcChoosePickerQuery = value;
+  rcRenderChoosePickerResults();
+}
+function rcChooseMatch(entryId, masterColorId) {
+  if (!rcPreviewResults) return;
+  const row = rcPreviewResults.find(r => r.entryId === entryId);
+  if (!row) return;
+  row.reviewAction = 'link';
+  row.chosenMasterColorId = masterColorId;
+  rcChoosePickerFor = null;
+  rcRenderPreview();
+}
+// Scoped re-render (matches the same pattern as clRenderSubstitutePickerResults / clRenderPicker)
+// so the search input never loses focus on each keystroke. Deliberately not brand-scoped — a human
+// manually overriding a match is allowed to pick across manufacturers if that's genuinely correct;
+// the "never cross manufacturers" rule governs only the automatic classifier above.
+function rcRenderChoosePickerResults() {
+  const entryId = rcChoosePickerFor;
+  if (!entryId) return;
+  const container = document.getElementById('rc-choose-results-' + entryId);
+  if (!container) return;
+  const q = rcChoosePickerQuery.trim().toLowerCase();
+  if (!q) { container.innerHTML = ''; return; }
+  const results = MASTER_COLORS.filter(c => c.active !== false && (c.colorName.toLowerCase().includes(q) || (c.aliases || []).some(a => a.toLowerCase().includes(q)))).slice(0, 20);
+  container.innerHTML = results.length === 0 ? `<div style="font-size:12px; color:var(--text-secondary); padding:4px 0;">No matches.</div>` : results.map(c => {
+    const mfr = mstFindManufacturer(c.manufacturerId);
+    return `<div style="display:flex; align-items:center; gap:6px; padding:4px 0; font-size:12px;">
+      ${c.hex ? `<span style="display:inline-block; width:10px; height:10px; border-radius:50%; border:0.5px solid var(--border-strong); background:${invAttr(c.hex)}; flex-shrink:0;"></span>` : ''}
+      <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${psEscape(mfr ? mfr.name + ' ' : '')}${psEscape(c.colorName)}</span>
+      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="rcChooseMatch('${entryId}','${c.id}')">Pick</button>
+    </div>`;
+  }).join('');
+}
+function rcRowHtml(row) {
+  const entry = COLOR_LIBRARY.find(e => e.id === row.entryId);
+  if (!entry) return '';
+  const label = `${entry.brand ? psEscape(entry.brand) + ' ' : ''}${psEscape(entry.colorName)}`;
+  const meta = RC_STATUS_META[row.status];
+  let html = `<div style="padding:8px 0; border-bottom:0.5px solid var(--border);">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+      <div style="font-size:13px; font-weight:600;">${label}</div>
+      <span style="font-size:10px; font-weight:600; padding:2px 8px; border-radius:999px; background:${meta.bg}; color:${meta.color}; white-space:nowrap;">${meta.label}</span>
+    </div>`;
+
+  if (row.status === 'linked') {
+    const master = MASTER_COLORS.find(c => c.id === entry.masterColorId);
+    html += `<div style="font-size:12px; color:var(--text-tertiary); margin-top:4px;">Already linked to ${master ? psEscape(master.colorName) : '(a Master color that no longer exists)'}</div>`;
+  } else if (row.status === 'unmatched') {
+    html += `<div style="font-size:12px; color:var(--text-tertiary); margin-top:4px;">No BBT Master Catalog match — remains a valid custom color, untouched.</div>`;
+  } else if (row.status === 'auto-exact' || row.status === 'auto-alias') {
+    const master = MASTER_COLORS.find(c => c.id === row.chosenMasterColorId);
+    const mfr = master && mstFindManufacturer(master.manufacturerId);
+    const willLink = row.reviewAction === 'link';
+    html += `<div style="font-size:12px; color:${willLink ? 'var(--accent)' : 'var(--text-tertiary)'}; margin-top:4px;">${willLink ? '✓ Would link to' : 'Turned off — would stay unlinked from'} ${mfr ? psEscape(mfr.name) + ' ' : ''}${master ? psEscape(master.colorName) : ''}</div>`;
+    html += `<button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; margin-top:6px;" onclick="rcSetReviewAction('${entry.id}','${willLink ? 'keep-separate' : 'link'}')">${willLink ? "Don't link this one" : 'Link after all'}</button>`;
+  } else if (rcIsReviewStatus(row.status)) {
+    const candidateLabels = row.candidates.map(id => {
+      const c = MASTER_COLORS.find(x => x.id === id);
+      const m = c && mstFindManufacturer(c.manufacturerId);
+      return c ? `${m ? m.name + ' ' : ''}${c.colorName}` : null;
+    }).filter(Boolean);
+    html += `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">${row.reason ? psEscape(row.reason) : ''}${candidateLabels.length ? (row.reason ? ' ' : '') + 'Possible match: ' + candidateLabels.map(psEscape).join(', ') : ''}</div>`;
+    if (row.reviewAction === 'link') {
+      const chosen = MASTER_COLORS.find(c => c.id === row.chosenMasterColorId);
+      const chosenMfr = chosen && mstFindManufacturer(chosen.manufacturerId);
+      html += `<div style="font-size:12px; color:var(--accent); margin-top:4px;">✓ Would link to ${chosenMfr ? psEscape(chosenMfr.name) + ' ' : ''}${chosen ? psEscape(chosen.colorName) : ''}</div>`;
+    } else if (row.reviewAction === 'keep-separate') {
+      html += `<div style="font-size:12px; color:var(--text-tertiary); margin-top:4px;">Kept separate — would remain an unlinked custom color.</div>`;
+    }
+    html += `<div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap;">
+      ${row.candidates.length === 1 ? `<button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="rcSetReviewAction('${entry.id}','link')">Same Color / Link</button>` : ''}
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="rcSetReviewAction('${entry.id}','keep-separate')">Keep Separate</button>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="rcToggleChoosePicker('${entry.id}')">${rcChoosePickerFor === entry.id ? 'Close' : 'Choose Different Match'}</button>
+    </div>`;
+    if (rcChoosePickerFor === entry.id) {
+      html += `<div style="margin-top:6px;">
+        <input type="text" placeholder="Search Master Catalog colors..." style="width:100%; font-size:12px;" oninput="rcSetChoosePickerQuery(this.value)">
+        <div id="rc-choose-results-${entry.id}" style="margin-top:4px; max-height:160px; overflow-y:auto;"></div>
+      </div>`;
+    }
+  }
+  html += `</div>`;
+  return html;
+}
+function rcRenderPreview() {
+  const container = document.getElementById('rc-preview-root');
+  if (!container) return;
+  if (!rcPreviewResults) { container.innerHTML = ''; return; }
+  const counts = {
+    linked: rcPreviewResults.filter(r => r.status === 'linked').length,
+    autoExact: rcPreviewResults.filter(r => r.status === 'auto-exact').length,
+    autoAlias: rcPreviewResults.filter(r => r.status === 'auto-alias').length,
+    needsReview: rcPreviewResults.filter(r => rcIsReviewStatus(r.status)).length,
+    unmatched: rcPreviewResults.filter(r => r.status === 'unmatched').length,
+  };
+  const approvedCount = rcApprovedRows().length;
+  let html = `<div style="background:var(--warning-bg); color:var(--warning-text); border-radius:var(--radius-sm); padding:8px 10px; font-size:12px; font-weight:600; margin-bottom:0.75rem;">
+    <i class="fa-solid fa-flask"></i> Nothing below is saved until you press Apply. Applying only ever sets masterColorId on the entries approved below — id, brand, colorName, aliases, Inventory, and ledger data are never touched.
+  </div>`;
+  html += `<button class="save-btn" id="rc-apply-btn" ${approvedCount === 0 ? 'disabled' : ''} onclick="rcCommitApply()" style="margin-bottom:0.75rem;"><i class="fa-solid fa-check"></i> Apply ${approvedCount} approved link${approvedCount === 1 ? '' : 's'}</button>`;
+  html += `<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); gap:8px; margin-bottom:0.75rem;">
+    ${[
+      ['Exact matches', counts.autoExact, 'auto-link'],
+      ['Master-alias matches', counts.autoAlias, 'auto-link'],
+      ['Needs review', counts.needsReview, 'needs-review'],
+      ['Unmatched / custom', counts.unmatched, 'unmatched'],
+      ['Already linked', counts.linked, 'linked'],
+    ].map(([label, n, filterKey]) => `<button class="icon-btn" style="text-align:left; padding:8px; border:0.5px solid ${rcPreviewFilter === filterKey ? 'var(--accent)' : 'var(--border-strong)'};" onclick="rcSetPreviewFilter('${filterKey}')">
+      <div style="font-size:18px; font-weight:700;">${n}</div>
+      <div style="font-size:10px; color:var(--text-secondary);">${label}</div>
+    </button>`).join('')}
+  </div>`;
+  html += `<div class="trip-toggle" style="margin:0 0 0.6rem;">
+    ${[['all', 'All'], ['needs-review', 'Needs review'], ['auto-link', 'Will auto-link'], ['unmatched', 'Unmatched'], ['linked', 'Already linked']].map(([key, label]) =>
+      `<button class="trip-btn ${rcPreviewFilter === key ? 'active' : ''}" onclick="rcSetPreviewFilter('${key}')">${label}</button>`).join('')}
+  </div>`;
+  const filtered = rcPreviewResults.filter(r => {
+    if (rcPreviewFilter === 'all') return true;
+    if (rcPreviewFilter === 'needs-review') return rcIsReviewStatus(r.status);
+    if (rcPreviewFilter === 'auto-link') return r.status === 'auto-exact' || r.status === 'auto-alias';
+    if (rcPreviewFilter === 'unmatched') return r.status === 'unmatched';
+    if (rcPreviewFilter === 'linked') return r.status === 'linked';
+    return true;
+  });
+  html += filtered.length === 0
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">Nothing in this category.</div>`
+    : `<div class="card">${filtered.map(rcRowHtml).join('')}</div>`;
+  container.innerHTML = html;
+  if (rcChoosePickerFor) rcRenderChoosePickerResults();
+}
+
 function clAddSelectedColors() {
   if (clPickerSelected.size === 0) return;
   const colors = [...clPickerSelected];
@@ -8915,6 +9506,73 @@ function invAddAliasFromField(colorId) {
   clRefreshAliasViews();
 }
 
+// Phase 2 additive fields (masterColorId / displayHexOverride / substituteIds) — rendered
+// alongside the alias editor at every one of its three existing embed points (an Inventory item's
+// expanded card, the Library-only list, and the manufacturer picker's "already have it" expander)
+// so every Color Library entry gets this UI regardless of which surface it's being edited from.
+// masterColorId is read-only here — Phase 3 ("Add from BBT Catalog") and Phase 4 (reconciliation)
+// own the actual linking workflow; this phase only makes the field real, joined, and displayed.
+function clMasterFieldsHtml(colorId) {
+  const entry = COLOR_LIBRARY.find(e => e.id === colorId);
+  if (!entry) return '';
+  const master = entry.masterColorId ? mstFindColor(entry.masterColorId) : null;
+  const resolvedHex = clResolveDisplayHex(entry);
+  const subs = (entry.substituteIds || []).map(id => COLOR_LIBRARY.find(e => e.id === id)).filter(Boolean);
+  const pickerOpen = clSubstitutePickerFor === colorId;
+  return `<div style="margin:0.75rem 0; padding-top:0.6rem; border-top:0.5px dashed var(--border);">
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+      ${resolvedHex ? `<span style="display:inline-block; width:14px; height:14px; border-radius:50%; border:0.5px solid var(--border-strong); background:${invAttr(resolvedHex)}; flex-shrink:0;"></span>` : ''}
+      <div style="font-size:11px; color:var(--text-secondary); flex:1;">${master ? `Linked to BBT Master Catalog: ${psEscape(master.colorName)}` : 'Not linked to the BBT Master Catalog yet'}</div>
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; margin-bottom:8px;">
+      <label style="font-size:11px; color:var(--text-secondary); flex-shrink:0;">Display hex override</label>
+      <input type="text" value="${invAttr(entry.displayHexOverride)}" placeholder="${master && master.hex ? psEscape(master.hex) + ' (from Master)' : '#RRGGBB'}" style="flex:1; font-size:12px;" onchange="clSetDisplayHexOverride('${entry.id}', this.value)">
+    </div>
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Substitutes / dupes</div>
+    <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px;">
+      ${subs.length === 0 ? `<span style="font-size:12px; color:var(--text-tertiary);">None yet</span>` : subs.map(s => `<span style="font-size:12px; background:var(--bg); border:0.5px solid var(--border-strong); border-radius:999px; padding:2px 8px;">${psEscape(s.brand ? s.brand + ' ' : '')}${psEscape(s.colorName)} <i class="fa-solid fa-xmark" style="cursor:pointer;" onclick="clRemoveSubstitute('${entry.id}','${s.id}')"></i></span>`).join('')}
+    </div>
+    <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="clToggleSubstitutePicker('${entry.id}')">${pickerOpen ? 'Close' : '+ Add substitute'}</button>
+    ${pickerOpen ? `<div style="margin-top:6px;">
+      <input type="text" placeholder="Search colors..." style="width:100%; font-size:12px;" oninput="clSetSubstitutePickerQuery(this.value)">
+      <div id="cl-sub-picker-results-${entry.id}" style="margin-top:4px; max-height:160px; overflow-y:auto;"></div>
+    </div>` : ''}
+  </div>`;
+}
+function clToggleSubstitutePicker(colorId) {
+  clSubstitutePickerFor = (clSubstitutePickerFor === colorId) ? null : colorId;
+  clSubstitutePickerQuery = '';
+  clRefreshAliasViews();
+}
+// Scoped re-render (matches clRenderPicker's own pattern) — only the results div underneath the
+// search box is replaced on each keystroke, so the search input itself never loses focus/cursor
+// position the way a full clRefreshAliasViews() would.
+function clSetSubstitutePickerQuery(value) {
+  clSubstitutePickerQuery = value;
+  clRenderSubstitutePickerResults();
+}
+function clRenderSubstitutePickerResults() {
+  const colorId = clSubstitutePickerFor;
+  if (!colorId) return;
+  const container = document.getElementById('cl-sub-picker-results-' + colorId);
+  if (!container) return;
+  const q = clSubstitutePickerQuery.trim();
+  if (!q) { container.innerHTML = ''; return; }
+  const entry = COLOR_LIBRARY.find(e => e.id === colorId);
+  const existingSubs = new Set((entry && entry.substituteIds) || []);
+  const results = clSearch(q, { activeOnly: false }).filter(e => e.id !== colorId && !existingSubs.has(e.id)).slice(0, 20);
+  container.innerHTML = results.length === 0
+    ? `<div style="font-size:12px; color:var(--text-secondary); padding:4px 0;">No matches.</div>`
+    : results.map(e => {
+        const hex = clResolveDisplayHex(e);
+        return `<div style="display:flex; align-items:center; gap:6px; padding:4px 0; font-size:12px;">
+          ${hex ? `<span style="display:inline-block; width:10px; height:10px; border-radius:50%; border:0.5px solid var(--border-strong); background:${invAttr(hex)}; flex-shrink:0;"></span>` : ''}
+          <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${psEscape(e.brand ? e.brand + ' ' : '')}${psEscape(e.colorName)}</span>
+          <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="clAddSubstitute('${colorId}','${e.id}')">Add</button>
+        </div>`;
+      }).join('');
+}
+
 function clToggleLibraryOnlySection() {
   clLibraryOnlySectionCollapsed = !clLibraryOnlySectionCollapsed;
   clRenderSettingsSection();
@@ -8954,7 +9612,7 @@ function invLibraryOnlyHtml() {
           <button class="icon-btn" style="padding:4px;" onclick="${isActive ? `clArchive('${e.id}')` : `clRestore('${e.id}')`}; clRefreshAliasViews();" aria-label="${isActive ? 'Deactivate' : 'Reactivate'} color"><i class="fa-solid fa-${isActive ? 'eye-slash' : 'eye'}"></i></button>
         </div>
       </div>
-      ${aliasBoxOpen ? invAliasEditorHtml(e.id) : ''}
+      ${aliasBoxOpen ? invAliasEditorHtml(e.id) + clMasterFieldsHtml(e.id) : ''}
     </div>`;
   });
   html += `</div>`;
@@ -9053,6 +9711,7 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
         <datalist id="inv-color-group-suggestions">${invColorGroupSuggestions().map(g => `<option value="${invAttr(g)}">`).join('')}</datalist>
       </div>`;
       html += invAliasEditorHtml(item.colorId);
+      html += clMasterFieldsHtml(item.colorId);
     }
     if (invMode === 'edit') {
       html += `<div class="row" style="margin-top:0.75rem;">
@@ -9801,6 +10460,437 @@ function foilRenderScreen() {
   }
   root.innerHTML = html;
   if (foilCategoryTab === 'lettersNumbers') foilRenderResults();
+}
+
+// ═══════════════════════════════════════ BBT MASTER COLOR CATALOG ═══════════════════════════════════════
+//
+// Phase 1 (data foundation) of the approved BBT Master Catalog architecture — see the "BBT Master
+// Color Catalog" plan for the full design. masterManufacturers/masterColorCatalog (wired in the
+// module script above) are the first genuinely global, non-business-scoped data in this app: BBT's
+// own shared reference data, not owned by any one business. Nothing here is read by any
+// business-facing screen yet (Standard Latex, Specialty Latex, Foil, Color Library) — that linkage
+// is Phase 2+. IDs are Firestore's own native auto-generated document ids (window.fbNewMaster*Id),
+// deliberately never derived from a name/brand string, so a later rename can never look like a
+// change of identity.
+//
+// Admin gate is the same shared invAdminUnlocked passcode used by every other Settings section —
+// but unlike those, this data is global, not business-owned, so that passcode is ONLY a
+// convenience that hides this screen from routine team members. It is NOT the real security
+// boundary: real protection has to come from a Firestore Security Rule limiting writes to these
+// two collections to an actual BBT-staff allowlist, which is outside what this codebase can apply
+// itself (see the notice rendered in the panel below).
+
+let MASTER_MANUFACTURERS = [];
+let MASTER_COLORS = [];
+let mstColorSearchQuery = '';
+let mstColorAddOpen = false;
+let mstColorAddDraft = null;
+
+function mstStartListeners() {
+  mstRenderManufacturersSection();
+  mstRenderColorsSection();
+  window.fbOnSnapshotMasterManufacturers(
+    (snapshot) => { MASTER_MANUFACTURERS = snapshot.docs.map(d => d.data()).filter(m => !m.deletedAt); mstRenderManufacturersSection(); mstRenderColorsSection(); },
+    (err) => console.error('Master Manufacturers sync error:', err)
+  );
+  window.fbOnSnapshotMasterColorCatalog(
+    (snapshot) => { MASTER_COLORS = snapshot.docs.map(d => d.data()).filter(c => !c.deletedAt); mstRenderColorsSection(); },
+    (err) => console.error('Master Color Catalog sync error:', err)
+  );
+}
+
+function mstSaveManufacturer(m) {
+  window.fbSaveMasterManufacturer(m).catch(err => { console.error('Master Manufacturer save failed:', err); alert("Couldn't save that — check your connection and try again."); });
+}
+function mstSaveColor(c) {
+  window.fbSaveMasterColor(c).catch(err => { console.error('Master Color save failed:', err); alert("Couldn't save that — check your connection and try again."); });
+}
+
+// ── Manufacturers ─────────────────────────────────────────────────────────────────────────────
+function mstFindManufacturer(id) { return MASTER_MANUFACTURERS.find(m => m.id === id); }
+
+function mstAddManufacturer() {
+  const nameEl = document.getElementById('mst-mfr-new-name');
+  if (!nameEl) return;
+  const name = nameEl.value.trim();
+  if (!name) { alert('Enter a manufacturer name.'); return; }
+  const existing = MASTER_MANUFACTURERS.find(m => m.name.trim().toLowerCase() === name.toLowerCase());
+  if (existing) { alert(`"${existing.name}" already exists in the Master Catalog.`); return; }
+  const m = {
+    id: window.fbNewMasterManufacturerId(), name, aliases: [], lifecycle: 'current',
+    active: true, deletedAt: null, standardPackageDefaultsBySize: {},
+    createdAt: Date.now(), updatedAt: Date.now(),
+  };
+  MASTER_MANUFACTURERS.push(m);
+  mstSaveManufacturer(m);
+  nameEl.value = '';
+  mstRenderManufacturersSection();
+}
+function mstUpdateManufacturerField(id, field, value) {
+  const m = mstFindManufacturer(id);
+  if (!m) return;
+  if (field === 'aliases') m.aliases = value.split('|').map(a => a.trim()).filter(Boolean);
+  else if (field === 'active') m.active = (value === 'true' || value === true);
+  else m[field] = typeof value === 'string' ? value.trim() : value;
+  m.updatedAt = Date.now();
+  mstSaveManufacturer(m);
+  mstRenderColorsSection(); // color rows display their manufacturer's name
+}
+function mstSetManufacturerPackageDefault(id, size, value) {
+  const m = mstFindManufacturer(id);
+  if (!m) return;
+  if (!m.standardPackageDefaultsBySize) m.standardPackageDefaultsBySize = {};
+  const n = parseFloat(value);
+  if (!n || n <= 0) delete m.standardPackageDefaultsBySize[size];
+  else m.standardPackageDefaultsBySize[size] = n;
+  m.updatedAt = Date.now();
+  mstSaveManufacturer(m);
+}
+function mstDeleteManufacturer(id) {
+  const m = mstFindManufacturer(id);
+  if (!m) return;
+  if (MASTER_COLORS.some(c => c.manufacturerId === id)) { alert('This manufacturer has Master Colors referencing it — remove or reassign those first.'); return; }
+  if (!confirm(`Remove "${m.name}" from the Master Catalog?`)) return;
+  m.deletedAt = Date.now();
+  MASTER_MANUFACTURERS = MASTER_MANUFACTURERS.filter(x => x.id !== id);
+  mstSaveManufacturer(m);
+  mstRenderManufacturersSection();
+}
+
+// ── Colors ────────────────────────────────────────────────────────────────────────────────────
+function mstFindColor(id) { return MASTER_COLORS.find(c => c.id === id); }
+
+function mstOpenAddColor() {
+  if (MASTER_MANUFACTURERS.length === 0) { alert('Add a manufacturer first.'); return; }
+  mstColorAddOpen = true;
+  mstColorAddDraft = { manufacturerId: MASTER_MANUFACTURERS[0].id, colorName: '', sku: '', hex: '', aliases: '', lifecycle: 'current' };
+  mstRenderColorsSection();
+}
+function mstCancelAddColor() { mstColorAddOpen = false; mstColorAddDraft = null; mstRenderColorsSection(); }
+function mstSetColorDraftField(field, value) { if (mstColorAddDraft) mstColorAddDraft[field] = value; }
+function mstSubmitAddColor() {
+  const d = mstColorAddDraft;
+  if (!d) return;
+  const colorName = (d.colorName || '').trim();
+  if (!colorName) { alert('Enter a color name.'); return; }
+  const mfr = mstFindManufacturer(d.manufacturerId);
+  if (!mfr) { alert('Pick a manufacturer.'); return; }
+  const dupe = MASTER_COLORS.find(c => c.manufacturerId === d.manufacturerId && c.colorName.trim().toLowerCase() === colorName.toLowerCase());
+  if (dupe) { alert(`"${mfr.name} ${dupe.colorName}" already exists in the Master Catalog.`); return; }
+  const c = {
+    id: window.fbNewMasterColorId(), manufacturerId: d.manufacturerId, colorName,
+    sku: (d.sku || '').trim(), hex: (d.hex || '').trim() || null,
+    aliases: (d.aliases || '').split('|').map(a => a.trim()).filter(Boolean),
+    lifecycle: d.lifecycle || 'unknown', sizes: [],
+    active: true, deletedAt: null, createdAt: Date.now(), updatedAt: Date.now(),
+  };
+  MASTER_COLORS.push(c);
+  mstSaveColor(c);
+  mstColorAddOpen = false;
+  mstColorAddDraft = null;
+  mstRenderColorsSection();
+}
+function mstUpdateColorField(id, field, value) {
+  const c = mstFindColor(id);
+  if (!c) return;
+  if (field === 'aliases') c.aliases = value.split('|').map(a => a.trim()).filter(Boolean);
+  else if (field === 'active') c.active = (value === 'true' || value === true);
+  else c[field] = (typeof value === 'string' ? value.trim() : value) || null;
+  c.updatedAt = Date.now();
+  mstSaveColor(c);
+  mstRenderColorsSection();
+}
+function mstSetColorSizeOverride(id, size, value) {
+  const c = mstFindColor(id);
+  if (!c) return;
+  if (!c.sizes) c.sizes = [];
+  const n = parseFloat(value);
+  const idx = c.sizes.findIndex(s => s.size === size);
+  if (!n || n <= 0) { if (idx >= 0) c.sizes.splice(idx, 1); }
+  else if (idx >= 0) c.sizes[idx].standardPackageQty = n;
+  else c.sizes.push({ size, standardPackageQty: n });
+  c.updatedAt = Date.now();
+  mstSaveColor(c);
+}
+function mstDeleteColor(id) {
+  const c = mstFindColor(id);
+  if (!c) return;
+  if (!confirm(`Remove "${c.colorName}" from the Master Catalog?`)) return;
+  c.deletedAt = Date.now();
+  MASTER_COLORS = MASTER_COLORS.filter(x => x.id !== id);
+  mstSaveColor(c);
+  mstRenderColorsSection();
+}
+function mstSetColorSearch(q) { mstColorSearchQuery = q; mstRenderColorsSection(); }
+function mstFilteredColors() {
+  const items = [...MASTER_COLORS].sort((a, b) => {
+    const mfrA = mstFindManufacturer(a.manufacturerId), mfrB = mstFindManufacturer(b.manufacturerId);
+    return (mfrA ? mfrA.name : '').localeCompare(mfrB ? mfrB.name : '') || a.colorName.localeCompare(b.colorName);
+  });
+  const q = mstColorSearchQuery.trim().toLowerCase();
+  if (!q) return items;
+  return items.filter(c => {
+    const mfr = mstFindManufacturer(c.manufacturerId);
+    return c.colorName.toLowerCase().includes(q) || (mfr && mfr.name.toLowerCase().includes(q)) || (c.aliases || []).some(a => a.toLowerCase().includes(q));
+  });
+}
+
+// ── CSV export/import — reuses the shared impState/impOpen wizard (see clCsvImportSpec for the
+// established contract this follows). Any row with no existing match always mints a fresh
+// Firestore auto-id — a CSV-supplied id column is only ever used to FIND an existing record to
+// update, never adopted as a new record's real identity. ──────────────────────────────────────
+function mstCsvCell(v) {
+  const s = String(v == null ? '' : v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function mstDownloadCsv(lines, filename) {
+  const csv = lines.map(row => row.map(mstCsvCell).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+function mstExportManufacturersCsv() {
+  const lines = [['id', 'name', 'aliases', 'lifecycle', 'active']];
+  MASTER_MANUFACTURERS.forEach(m => lines.push([m.id, m.name, (m.aliases || []).join('|'), m.lifecycle, m.active]));
+  mstDownloadCsv(lines, `master-manufacturers-${new Date().toISOString().slice(0, 10)}.csv`);
+}
+function mstExportColorsCsv() {
+  const lines = [['id', 'manufacturer', 'colorName', 'sku', 'hex', 'aliases', 'lifecycle', 'active']];
+  MASTER_COLORS.forEach(c => {
+    const mfr = mstFindManufacturer(c.manufacturerId);
+    lines.push([c.id, mfr ? mfr.name : '', c.colorName, c.sku || '', c.hex || '', (c.aliases || []).join('|'), c.lifecycle, c.active]);
+  });
+  mstDownloadCsv(lines, `master-colors-${new Date().toISOString().slice(0, 10)}.csv`);
+}
+function mstOpenManufacturerCsvImport() { impOpen(mstManufacturerCsvSpec()); }
+function mstOpenColorCsvImport() { impOpen(mstColorCsvSpec()); }
+
+function mstManufacturerCsvSpec() {
+  return {
+    key: 'masterManufacturers',
+    title: 'Import Master Manufacturers',
+    updatable: true,
+    fields: [
+      { key: 'id', label: 'ID (blank = new)', required: false },
+      { key: 'name', label: 'Name', required: true },
+      { key: 'aliases', label: 'Aliases (pipe-separated)', required: false },
+      { key: 'lifecycle', label: 'Lifecycle', required: false },
+      { key: 'active', label: 'Active', required: false },
+    ],
+    validateRow: (v) => !v.name ? 'Missing name' : null,
+    matchExisting: (v) => (v.id && mstFindManufacturer(v.id)) || null,
+    describeExisting: (existing) => existing.name,
+    commitRows: (rows) => {
+      let created = 0, updated = 0, skipped = 0;
+      const toSave = [];
+      rows.forEach(r => {
+        if (r.action === 'skip') { skipped++; return; }
+        const aliases = (r.values.aliases || '').split('|').map(a => a.trim()).filter(Boolean);
+        const lifecycle = ['current', 'discontinued', 'unknown'].includes((r.values.lifecycle || '').toLowerCase()) ? r.values.lifecycle.toLowerCase() : 'unknown';
+        const active = (r.values.active || '').trim().toLowerCase() !== 'false';
+        if (r.existing) {
+          Object.assign(r.existing, { name: r.values.name.trim(), aliases, lifecycle, active, updatedAt: Date.now() });
+          toSave.push(r.existing);
+          updated++;
+        } else {
+          const m = { id: window.fbNewMasterManufacturerId(), name: r.values.name.trim(), aliases, lifecycle, active, deletedAt: null, standardPackageDefaultsBySize: {}, createdAt: Date.now(), updatedAt: Date.now() };
+          MASTER_MANUFACTURERS.push(m);
+          toSave.push(m);
+          created++;
+        }
+      });
+      if (toSave.length === 0) return Promise.resolve({ created, updated, skipped, failed: 0 });
+      return Promise.all(toSave.map(m => window.fbSaveMasterManufacturer(m)))
+        .then(() => ({ created, updated, skipped, failed: 0 }))
+        .catch(err => { console.error('Master Manufacturer CSV commit failed:', err); return { created: 0, updated: 0, skipped, failed: toSave.length }; });
+    }
+  };
+}
+function mstColorCsvSpec() {
+  return {
+    key: 'masterColors',
+    title: 'Import Master Colors',
+    updatable: true,
+    fields: [
+      { key: 'id', label: 'ID (blank = new)', required: false },
+      { key: 'manufacturer', label: 'Manufacturer', required: true },
+      { key: 'colorName', label: 'Color name', required: true },
+      { key: 'sku', label: 'SKU', required: false },
+      { key: 'hex', label: 'Hex', required: false },
+      { key: 'aliases', label: 'Aliases (pipe-separated)', required: false },
+      { key: 'lifecycle', label: 'Lifecycle', required: false },
+      { key: 'active', label: 'Active', required: false },
+    ],
+    validateRow: (v) => {
+      if (!v.colorName) return 'Missing color name';
+      if (!v.manufacturer) return 'Missing manufacturer';
+      if (!MASTER_MANUFACTURERS.find(m => m.name.trim().toLowerCase() === v.manufacturer.trim().toLowerCase())) return `Unknown manufacturer "${v.manufacturer}" — add it to Master Manufacturers first`;
+      return null;
+    },
+    matchExisting: (v) => (v.id && mstFindColor(v.id)) || null,
+    describeExisting: (existing) => {
+      const mfr = mstFindManufacturer(existing.manufacturerId);
+      return `${mfr ? mfr.name : 'unknown manufacturer'} / ${existing.colorName}`;
+    },
+    commitRows: async (rows) => {
+      let created = 0, updated = 0, skipped = 0;
+      const toSave = [];
+      rows.forEach(r => {
+        if (r.action === 'skip') { skipped++; return; }
+        const mfr = MASTER_MANUFACTURERS.find(m => m.name.trim().toLowerCase() === r.values.manufacturer.trim().toLowerCase());
+        if (!mfr) { skipped++; return; }
+        const aliases = (r.values.aliases || '').split('|').map(a => a.trim()).filter(Boolean);
+        const lifecycle = ['current', 'discontinued', 'unknown'].includes((r.values.lifecycle || '').toLowerCase()) ? r.values.lifecycle.toLowerCase() : 'unknown';
+        const active = (r.values.active || '').trim().toLowerCase() !== 'false';
+        if (r.existing) {
+          Object.assign(r.existing, { manufacturerId: mfr.id, colorName: r.values.colorName.trim(), sku: (r.values.sku || '').trim(), hex: (r.values.hex || '').trim() || null, aliases, lifecycle, active, updatedAt: Date.now() });
+          toSave.push(r.existing);
+          updated++;
+        } else {
+          const c = { id: window.fbNewMasterColorId(), manufacturerId: mfr.id, colorName: r.values.colorName.trim(), sku: (r.values.sku || '').trim(), hex: (r.values.hex || '').trim() || null, aliases, lifecycle, sizes: [], active, deletedAt: null, createdAt: Date.now(), updatedAt: Date.now() };
+          MASTER_COLORS.push(c);
+          toSave.push(c);
+          created++;
+        }
+      });
+      if (toSave.length === 0) return { created, updated, skipped, failed: 0 };
+      const CHUNK = 450;
+      try {
+        for (let i = 0; i < toSave.length; i += CHUNK) { await window.fbBatchSaveMasterColors(toSave.slice(i, i + CHUNK)); }
+        return { created, updated, skipped, failed: 0 };
+      } catch (err) {
+        console.error('Master Color CSV commit failed:', err);
+        return { created: 0, updated: 0, skipped, failed: toSave.length };
+      }
+    }
+  };
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────────────────────
+function mstAdminGateHtml() {
+  return `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">Unlock admin (Settings home) to manage the BBT Master Catalog.</div>`;
+}
+function mstNoticeHtml() {
+  return `<div class="card" style="font-size:11px; color:var(--text-secondary); line-height:1.5;">
+    This screen edits BBT's shared reference data, visible to every business — not just this one.
+    The admin passcode only hides this screen from routine team members; it is <strong>not</strong> the
+    real security boundary. Writes here are only actually protected by a Firestore Security Rule
+    limiting these two collections to BBT staff.
+  </div>`;
+}
+function mstManufacturerRowHtml(m) {
+  return `<div style="padding:0.6rem 0; border-bottom:0.5px solid var(--border);">
+    <div class="row" style="align-items:center; gap:8px;">
+      <input type="text" value="${invAttr(m.name)}" style="flex:1; font-weight:600;" onchange="mstUpdateManufacturerField('${m.id}','name',this.value)">
+      <select style="flex:0 0 auto;" onchange="mstUpdateManufacturerField('${m.id}','lifecycle',this.value)">
+        ${['current', 'discontinued', 'unknown'].map(l => `<option value="${l}" ${m.lifecycle === l ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+      <label style="display:flex; align-items:center; gap:4px; font-size:12px; flex:0 0 auto;"><input type="checkbox" ${m.active !== false ? 'checked' : ''} onchange="mstUpdateManufacturerField('${m.id}','active',this.checked)"> Active</label>
+      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text); flex:0 0 auto;" onclick="mstDeleteManufacturer('${m.id}')"><i class="fa-solid fa-trash"></i></button>
+    </div>
+    <input type="text" value="${invAttr((m.aliases || []).join(' | '))}" placeholder="Aliases (pipe-separated)" style="width:100%; margin-top:0.4rem; font-size:12px;" onchange="mstUpdateManufacturerField('${m.id}','aliases',this.value)">
+    <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:0.5rem;">
+      ${INV_SIZES.map(size => `<div style="font-size:11px; color:var(--text-secondary);">${psEscape(size)}
+        <input type="number" min="0" value="${(m.standardPackageDefaultsBySize || {})[size] || ''}" placeholder="—" style="width:56px; font-size:12px; margin-left:4px;" onchange="mstSetManufacturerPackageDefault('${m.id}','${invAttr(size)}',this.value)">
+      </div>`).join('')}
+    </div>
+  </div>`;
+}
+function mstRenderManufacturersSection() {
+  const root = document.getElementById('mst-mfr-root');
+  if (!root) return;
+  if (!invAdminUnlocked) { root.innerHTML = mstAdminGateHtml(); return; }
+  let html = mstNoticeHtml();
+  html += `<div class="card">
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0; flex:1;"><label>New manufacturer name</label><input type="text" id="mst-mfr-new-name" placeholder="e.g. Sempertex"></div>
+    </div>
+    <button class="save-btn" style="margin-top:0.5rem;" onclick="mstAddManufacturer()"><i class="fa-solid fa-plus"></i> Add manufacturer</button>
+    <div style="display:flex; gap:8px; margin-top:0.6rem; flex-wrap:wrap;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong);" onclick="mstExportManufacturersCsv()"><i class="fa-solid fa-file-arrow-down"></i> Export CSV</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong);" onclick="mstOpenManufacturerCsvImport()"><i class="fa-solid fa-file-arrow-up"></i> Import CSV</button>
+    </div>
+    ${impState && impState.spec.key === 'masterManufacturers' ? `<div id="imp-root" style="margin-top:0.75rem;"></div>` : ''}
+  </div>`;
+  html += `<div class="section-label">Manufacturers (${MASTER_MANUFACTURERS.length})</div>`;
+  html += MASTER_MANUFACTURERS.length === 0
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No manufacturers yet.</div>`
+    : `<div class="card">${MASTER_MANUFACTURERS.map(mstManufacturerRowHtml).join('')}</div>`;
+  root.innerHTML = html;
+  if (impState && impState.spec.key === 'masterManufacturers') impRender();
+}
+function mstColorRowHtml(c) {
+  const mfr = mstFindManufacturer(c.manufacturerId);
+  const overrides = {}; (c.sizes || []).forEach(s => overrides[s.size] = s.standardPackageQty);
+  return `<div style="padding:0.6rem 0; border-bottom:0.5px solid var(--border);">
+    <div class="row" style="align-items:center; gap:8px;">
+      ${c.hex ? `<span style="display:inline-block; width:16px; height:16px; border-radius:50%; border:0.5px solid var(--border-strong); background:${invAttr(c.hex)}; flex:0 0 auto;"></span>` : ''}
+      <div style="flex:0 0 auto; font-size:12px; color:var(--text-secondary); min-width:90px;">${psEscape(mfr ? mfr.name : '—')}</div>
+      <input type="text" value="${invAttr(c.colorName)}" style="flex:1; font-weight:600;" onchange="mstUpdateColorField('${c.id}','colorName',this.value)">
+      <label style="display:flex; align-items:center; gap:4px; font-size:12px; flex:0 0 auto;"><input type="checkbox" ${c.active !== false ? 'checked' : ''} onchange="mstUpdateColorField('${c.id}','active',this.checked)"> Active</label>
+      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text); flex:0 0 auto;" onclick="mstDeleteColor('${c.id}')"><i class="fa-solid fa-trash"></i></button>
+    </div>
+    <div class="row" style="gap:8px; margin-top:0.4rem;">
+      <input type="text" value="${invAttr(c.sku)}" placeholder="SKU" style="flex:1; font-size:12px;" onchange="mstUpdateColorField('${c.id}','sku',this.value)">
+      <input type="text" value="${invAttr(c.hex)}" placeholder="#RRGGBB" style="flex:1; font-size:12px;" onchange="mstUpdateColorField('${c.id}','hex',this.value)">
+      <select style="flex:1; font-size:12px;" onchange="mstUpdateColorField('${c.id}','lifecycle',this.value)">
+        ${['current', 'discontinued', 'unknown'].map(l => `<option value="${l}" ${c.lifecycle === l ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    <input type="text" value="${invAttr((c.aliases || []).join(' | '))}" placeholder="Aliases (pipe-separated)" style="width:100%; margin-top:0.4rem; font-size:12px;" onchange="mstUpdateColorField('${c.id}','aliases',this.value)">
+    <div style="font-size:10px; color:var(--text-tertiary); margin-top:0.5rem;">Standard Package Qty override (only if this color/size differs from ${mfr ? psEscape(mfr.name) : 'the manufacturer'}'s default):</div>
+    <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:0.3rem;">
+      ${INV_SIZES.map(size => `<div style="font-size:11px; color:var(--text-secondary);">${psEscape(size)}
+        <input type="number" min="0" value="${overrides[size] || ''}" placeholder="${(mfr && (mfr.standardPackageDefaultsBySize || {})[size]) || '—'}" style="width:56px; font-size:12px; margin-left:4px;" onchange="mstSetColorSizeOverride('${c.id}','${invAttr(size)}',this.value)">
+      </div>`).join('')}
+    </div>
+  </div>`;
+}
+function mstRenderColorsSection() {
+  const root = document.getElementById('mst-color-root');
+  if (!root) return;
+  if (!invAdminUnlocked) { root.innerHTML = mstAdminGateHtml(); return; }
+  let html = mstNoticeHtml();
+  html += `<div class="card">`;
+  if (mstColorAddOpen && mstColorAddDraft) {
+    const d = mstColorAddDraft;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0.5rem; flex:1;"><label>Manufacturer</label>
+        <select onchange="mstSetColorDraftField('manufacturerId', this.value)">
+          ${MASTER_MANUFACTURERS.map(m => `<option value="${m.id}" ${d.manufacturerId === m.id ? 'selected' : ''}>${psEscape(m.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="settings-field" style="margin-bottom:0.5rem; flex:1;"><label>Color name</label><input type="text" value="${invAttr(d.colorName)}" placeholder="e.g. Fashion Red" onchange="mstSetColorDraftField('colorName', this.value)"></div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0.5rem; flex:1;"><label>SKU (optional)</label><input type="text" value="${invAttr(d.sku)}" onchange="mstSetColorDraftField('sku', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0.5rem; flex:1;"><label>Hex (optional)</label><input type="text" value="${invAttr(d.hex)}" placeholder="#RRGGBB" onchange="mstSetColorDraftField('hex', this.value)"></div>
+    </div>
+    <div class="settings-field" style="margin-bottom:0.5rem;"><label>Aliases (optional, pipe-separated)</label><input type="text" value="${invAttr(d.aliases)}" onchange="mstSetColorDraftField('aliases', this.value)"></div>
+    <div style="display:flex; gap:8px;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="mstCancelAddColor()">Cancel</button>
+      <button class="save-btn" style="flex:1;" onclick="mstSubmitAddColor()"><i class="fa-solid fa-plus"></i> Add color</button>
+    </div>`;
+  } else {
+    html += `<button class="save-btn" onclick="mstOpenAddColor()"><i class="fa-solid fa-plus"></i> Add master color</button>
+    <div style="display:flex; gap:8px; margin-top:0.6rem; flex-wrap:wrap;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong);" onclick="mstExportColorsCsv()"><i class="fa-solid fa-file-arrow-down"></i> Export CSV</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong);" onclick="mstOpenColorCsvImport()"><i class="fa-solid fa-file-arrow-up"></i> Import CSV</button>
+    </div>
+    ${impState && impState.spec.key === 'masterColors' ? `<div id="imp-root" style="margin-top:0.75rem;"></div>` : ''}`;
+  }
+  html += `</div>`;
+  html += `<div class="settings-field" style="margin:0.75rem 0;">${invSearchFieldHtml({ id: 'mst-color-search', placeholder: 'Search master colors...', value: mstColorSearchQuery, onInput: 'mstSetColorSearch(this.value)', onClear: "mstSetColorSearch('')" })}</div>`;
+  const filtered = mstFilteredColors();
+  html += `<div class="section-label">Colors (${filtered.length}${filtered.length !== MASTER_COLORS.length ? ` of ${MASTER_COLORS.length}` : ''})</div>`;
+  html += filtered.length === 0
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No master colors yet.</div>`
+    : `<div class="card">${filtered.map(mstColorRowHtml).join('')}</div>`;
+  root.innerHTML = html;
+  if (impState && impState.spec.key === 'masterColors') impRender();
 }
 
 // ═══════════════════════════════════════ LETTER STYLING CALCULATOR VIEW ═══════════════════════════════════════
@@ -11546,6 +12636,7 @@ function bootApp() {
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
   try { spStartListeners(); } catch (e) { console.error('Specialty Latex listeners failed to start:', e); }
   try { foilStartListeners(); } catch (e) { console.error('Foil inventory listeners failed to start:', e); }
+  try { mstStartListeners(); } catch (e) { console.error('BBT Master Catalog listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { bsUpdateHomeBanner(); } catch (e) { console.error('bsUpdateHomeBanner failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
