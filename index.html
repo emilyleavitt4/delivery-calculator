@@ -7123,6 +7123,11 @@ function impRender() {
         </tr></thead><tbody>`;
     s.rows.forEach((r, i) => {
       const cells = s.spec.fields.map(f => `<td style="padding:5px 8px; white-space:nowrap;">${psEscape(r.values[f.key] || '')}</td>`).join('');
+      // Optional, spec-provided extra line (e.g. a Standard Package Qty before→after diff) shown
+      // underneath the normal status text — every other existing spec simply doesn't define this
+      // hook, so this is a no-op for them.
+      const extra = (r.valid && !r.dupeInBatch && s.spec.describeRowExtra) ? s.spec.describeRowExtra(r.values, r.existing) : null;
+      const extraHtml = extra ? `<div style="margin-top:2px;">${extra}</div>` : '';
       let statusCell;
       if (!r.valid) {
         statusCell = `<td style="padding:5px 8px; color:#c0392b; white-space:nowrap;">${psEscape(r.reason)}</td>`;
@@ -7136,9 +7141,10 @@ function impRender() {
             <option value="skip" ${r.action === 'skip' ? 'selected' : ''}>Skip</option>
             <option value="update" ${r.action === 'update' ? 'selected' : ''}>Update existing</option>
           </select>`}
+          ${extraHtml}
         </td>`;
       } else {
-        statusCell = `<td style="padding:5px 8px; color:var(--accent); white-space:nowrap;">New</td>`;
+        statusCell = `<td style="padding:5px 8px; color:var(--accent); white-space:nowrap;">New${extraHtml}</td>`;
       }
       html += `<tr style="border-top:0.5px solid var(--border);">${cells}${statusCell}</tr>`;
     });
@@ -10695,6 +10701,58 @@ function mstFilteredColors() {
 // established contract this follows). Any row with no existing match always mints a fresh
 // Firestore auto-id — a CSV-supplied id column is only ever used to FIND an existing record to
 // update, never adopted as a new record's real identity. ──────────────────────────────────────
+
+// Standard Package Qty columns, shared by both the Manufacturer and Color CSVs — one column per
+// INV_SIZES entry, the same fixed 5 sizes Standard Latex already uses everywhere. Column keys are
+// stable/code-safe; the human-facing label (shown only in the wizard's mapping step) uses the
+// real size string.
+const MST_PKG_SIZE_FIELDS = [
+  { key: 'pkgQty_5_7', size: '5"/7"' },
+  { key: 'pkgQty_11', size: '11"' },
+  { key: 'pkgQty_17_18', size: '17"/18"' },
+  { key: 'pkgQty_24', size: '24"' },
+  { key: 'pkgQty_30_36', size: '30"/36"' },
+];
+// blank = leave the existing value alone (unset if creating new) — deliberately NOT the same as
+// clearing it, so re-exporting and re-importing a sheet where most cells are blank can never
+// accidentally wipe data nobody meant to touch. 'CLEAR' is the only way to explicitly remove a
+// size's value. Anything else must be a positive whole number — zero, negative, decimal, and
+// non-numeric text are all rejected rather than guessed at.
+function mstParsePkgQtyCell(raw) {
+  const s = (raw || '').trim();
+  if (s === '') return { action: 'none' };
+  if (s.toUpperCase() === 'CLEAR') return { action: 'clear' };
+  if (!/^-?\d+$/.test(s)) return { action: 'invalid' };
+  const n = Number(s);
+  if (n <= 0) return { action: 'invalid' };
+  return { action: 'set', value: n };
+}
+function mstValidatePkgQtyFields(values) {
+  for (const f of MST_PKG_SIZE_FIELDS) {
+    if (mstParsePkgQtyCell(values[f.key]).action === 'invalid') {
+      return `Standard Package Qty for ${f.size} must be a positive whole number, blank, or CLEAR (got "${values[f.key]}")`;
+    }
+  }
+  return null;
+}
+// One shared diff-formatting function for the preview table's optional extra line (see
+// impRender's describeRowExtra hook) — getCurrentValue reads whatever "existing" shape the
+// caller has (a plain map for manufacturers, a sizes[] array for colors) so this stays agnostic
+// to which record type it's describing.
+function mstDescribePkgQtyChanges(values, existing, getCurrentValue) {
+  const lines = [];
+  MST_PKG_SIZE_FIELDS.forEach(f => {
+    const parsed = mstParsePkgQtyCell(values[f.key]);
+    if (parsed.action === 'none') return;
+    const before = existing ? getCurrentValue(existing, f.size) : null;
+    if (parsed.action === 'clear') {
+      if (existing && before != null) lines.push(`${f.size}: ${before} → cleared`);
+    } else if (parsed.action === 'set') {
+      lines.push(existing ? `${f.size}: ${before != null ? before : '—'} → ${parsed.value}` : `${f.size}: ${parsed.value}`);
+    }
+  });
+  return lines.length ? lines.map(psEscape).join('<br>') : null;
+}
 function mstCsvCell(v) {
   const s = String(v == null ? '' : v);
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
@@ -10709,15 +10767,22 @@ function mstDownloadCsv(lines, filename) {
   URL.revokeObjectURL(url);
 }
 function mstExportManufacturersCsv() {
-  const lines = [['id', 'name', 'aliases', 'lifecycle', 'active']];
-  MASTER_MANUFACTURERS.forEach(m => lines.push([m.id, m.name, (m.aliases || []).join('|'), m.lifecycle, m.active]));
+  const lines = [['id', 'name', 'aliases', 'lifecycle', 'active', ...MST_PKG_SIZE_FIELDS.map(f => f.key)]];
+  MASTER_MANUFACTURERS.forEach(m => {
+    const pkgVals = MST_PKG_SIZE_FIELDS.map(f => (m.standardPackageDefaultsBySize || {})[f.size] ?? '');
+    lines.push([m.id, m.name, (m.aliases || []).join('|'), m.lifecycle, m.active, ...pkgVals]);
+  });
   mstDownloadCsv(lines, `master-manufacturers-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 function mstExportColorsCsv() {
-  const lines = [['id', 'manufacturer', 'colorName', 'sku', 'hex', 'aliases', 'lifecycle', 'active']];
+  const lines = [['id', 'manufacturer', 'colorName', 'sku', 'hex', 'aliases', 'lifecycle', 'active', ...MST_PKG_SIZE_FIELDS.map(f => f.key)]];
   MASTER_COLORS.forEach(c => {
     const mfr = mstFindManufacturer(c.manufacturerId);
-    lines.push([c.id, mfr ? mfr.name : '', c.colorName, c.sku || '', c.hex || '', (c.aliases || []).join('|'), c.lifecycle, c.active]);
+    const pkgVals = MST_PKG_SIZE_FIELDS.map(f => {
+      const override = (c.sizes || []).find(s => s.size === f.size);
+      return override ? override.standardPackageQty : '';
+    });
+    lines.push([c.id, mfr ? mfr.name : '', c.colorName, c.sku || '', c.hex || '', (c.aliases || []).join('|'), c.lifecycle, c.active, ...pkgVals]);
   });
   mstDownloadCsv(lines, `master-colors-${new Date().toISOString().slice(0, 10)}.csv`);
 }
@@ -10735,10 +10800,12 @@ function mstManufacturerCsvSpec() {
       { key: 'aliases', label: 'Aliases (pipe-separated)', required: false },
       { key: 'lifecycle', label: 'Lifecycle', required: false },
       { key: 'active', label: 'Active', required: false },
+      ...MST_PKG_SIZE_FIELDS.map(f => ({ key: f.key, label: `Standard Package Qty — ${f.size}`, required: false })),
     ],
-    validateRow: (v) => !v.name ? 'Missing name' : null,
+    validateRow: (v) => !v.name ? 'Missing name' : mstValidatePkgQtyFields(v),
     matchExisting: (v) => (v.id && mstFindManufacturer(v.id)) || null,
     describeExisting: (existing) => existing.name,
+    describeRowExtra: (values, existing) => mstDescribePkgQtyChanges(values, existing, (m, size) => (m.standardPackageDefaultsBySize || {})[size] ?? null),
     commitRows: (rows) => {
       let created = 0, updated = 0, skipped = 0;
       const toSave = [];
@@ -10747,16 +10814,23 @@ function mstManufacturerCsvSpec() {
         const aliases = (r.values.aliases || '').split('|').map(a => a.trim()).filter(Boolean);
         const lifecycle = ['current', 'discontinued', 'unknown'].includes((r.values.lifecycle || '').toLowerCase()) ? r.values.lifecycle.toLowerCase() : 'unknown';
         const active = (r.values.active || '').trim().toLowerCase() !== 'false';
+        let target;
         if (r.existing) {
           Object.assign(r.existing, { name: r.values.name.trim(), aliases, lifecycle, active, updatedAt: Date.now() });
-          toSave.push(r.existing);
+          target = r.existing;
           updated++;
         } else {
-          const m = { id: window.fbNewMasterManufacturerId(), name: r.values.name.trim(), aliases, lifecycle, active, deletedAt: null, standardPackageDefaultsBySize: {}, createdAt: Date.now(), updatedAt: Date.now() };
-          MASTER_MANUFACTURERS.push(m);
-          toSave.push(m);
+          target = { id: window.fbNewMasterManufacturerId(), name: r.values.name.trim(), aliases, lifecycle, active, deletedAt: null, standardPackageDefaultsBySize: {}, createdAt: Date.now(), updatedAt: Date.now() };
+          MASTER_MANUFACTURERS.push(target);
           created++;
         }
+        if (!target.standardPackageDefaultsBySize) target.standardPackageDefaultsBySize = {};
+        MST_PKG_SIZE_FIELDS.forEach(f => {
+          const parsed = mstParsePkgQtyCell(r.values[f.key]);
+          if (parsed.action === 'set') target.standardPackageDefaultsBySize[f.size] = parsed.value;
+          else if (parsed.action === 'clear') delete target.standardPackageDefaultsBySize[f.size];
+        });
+        toSave.push(target);
       });
       if (toSave.length === 0) return Promise.resolve({ created, updated, skipped, failed: 0 });
       return Promise.all(toSave.map(m => window.fbSaveMasterManufacturer(m)))
@@ -10779,18 +10853,23 @@ function mstColorCsvSpec() {
       { key: 'aliases', label: 'Aliases (pipe-separated)', required: false },
       { key: 'lifecycle', label: 'Lifecycle', required: false },
       { key: 'active', label: 'Active', required: false },
+      ...MST_PKG_SIZE_FIELDS.map(f => ({ key: f.key, label: `Standard Package Qty — ${f.size}`, required: false })),
     ],
     validateRow: (v) => {
       if (!v.colorName) return 'Missing color name';
       if (!v.manufacturer) return 'Missing manufacturer';
       if (!MASTER_MANUFACTURERS.find(m => m.name.trim().toLowerCase() === v.manufacturer.trim().toLowerCase())) return `Unknown manufacturer "${v.manufacturer}" — add it to Master Manufacturers first`;
-      return null;
+      return mstValidatePkgQtyFields(v);
     },
     matchExisting: (v) => (v.id && mstFindColor(v.id)) || null,
     describeExisting: (existing) => {
       const mfr = mstFindManufacturer(existing.manufacturerId);
       return `${mfr ? mfr.name : 'unknown manufacturer'} / ${existing.colorName}`;
     },
+    describeRowExtra: (values, existing) => mstDescribePkgQtyChanges(values, existing, (c, size) => {
+      const override = (c.sizes || []).find(s => s.size === size);
+      return override ? override.standardPackageQty : null;
+    }),
     commitRows: async (rows) => {
       let created = 0, updated = 0, skipped = 0;
       const toSave = [];
@@ -10801,16 +10880,29 @@ function mstColorCsvSpec() {
         const aliases = (r.values.aliases || '').split('|').map(a => a.trim()).filter(Boolean);
         const lifecycle = ['current', 'discontinued', 'unknown'].includes((r.values.lifecycle || '').toLowerCase()) ? r.values.lifecycle.toLowerCase() : 'unknown';
         const active = (r.values.active || '').trim().toLowerCase() !== 'false';
+        let target;
         if (r.existing) {
           Object.assign(r.existing, { manufacturerId: mfr.id, colorName: r.values.colorName.trim(), sku: (r.values.sku || '').trim(), hex: (r.values.hex || '').trim() || null, aliases, lifecycle, active, updatedAt: Date.now() });
-          toSave.push(r.existing);
+          target = r.existing;
           updated++;
         } else {
-          const c = { id: window.fbNewMasterColorId(), manufacturerId: mfr.id, colorName: r.values.colorName.trim(), sku: (r.values.sku || '').trim(), hex: (r.values.hex || '').trim() || null, aliases, lifecycle, sizes: [], active, deletedAt: null, createdAt: Date.now(), updatedAt: Date.now() };
-          MASTER_COLORS.push(c);
-          toSave.push(c);
+          target = { id: window.fbNewMasterColorId(), manufacturerId: mfr.id, colorName: r.values.colorName.trim(), sku: (r.values.sku || '').trim(), hex: (r.values.hex || '').trim() || null, aliases, lifecycle, sizes: [], active, deletedAt: null, createdAt: Date.now(), updatedAt: Date.now() };
+          MASTER_COLORS.push(target);
           created++;
         }
+        let sizes = target.sizes ? [...target.sizes] : [];
+        MST_PKG_SIZE_FIELDS.forEach(f => {
+          const parsed = mstParsePkgQtyCell(r.values[f.key]);
+          if (parsed.action === 'set') {
+            const idx = sizes.findIndex(s => s.size === f.size);
+            if (idx >= 0) sizes[idx] = { size: f.size, standardPackageQty: parsed.value };
+            else sizes.push({ size: f.size, standardPackageQty: parsed.value });
+          } else if (parsed.action === 'clear') {
+            sizes = sizes.filter(s => s.size !== f.size);
+          }
+        });
+        target.sizes = sizes;
+        toSave.push(target);
       });
       if (toSave.length === 0) return { created, updated, skipped, failed: 0 };
       const CHUNK = 450;
