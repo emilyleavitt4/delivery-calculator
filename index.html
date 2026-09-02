@@ -9974,7 +9974,7 @@ const SP_SIZE_OPTIONS = {
   twisting: ['160', '260', '350', '646'],
   linking: ['6"', '12"', '18"'],
   printed: ['5"', '11"', '18"', '24"'],
-  shapes: ['5"', '12"'],
+  shapes: ['5"', '12"', '14"', '16"', '18"'],
 };
 let spKindTab = 'twisting';
 let spExpandedItem = null;
@@ -10030,6 +10030,18 @@ function spColorSuggestionsDatalist() {
   SPECIALTY_ITEMS.forEach(i => { if (i.color) names.add(i.color); });
   return `<datalist id="sp-color-suggestions">${[...names].sort().map(n => `<option value="${invAttr(n)}">`).join('')}</datalist>`;
 }
+// Latex Shapes' `shape` field — plain text, always free to type something new (Option A: no
+// managed registry, no rename/delete lifecycle). Seeded with a small set of common shapes so the
+// picker isn't empty on first use, growing organically from there exactly like Brand/Color already do.
+const SP_SHAPE_SEED_SUGGESTIONS = ['Heart', 'Star', 'Geo Donut', 'Diamond', 'Butterfly', 'Cloud', 'Mouse Head'];
+function spKnownShapes() {
+  const shapes = new Set(SP_SHAPE_SEED_SUGGESTIONS);
+  SPECIALTY_ITEMS.forEach(i => { if (i.shape) shapes.add(i.shape); });
+  return [...shapes].sort();
+}
+function spShapeSuggestionsDatalist() {
+  return `<datalist id="sp-shape-suggestions">${spKnownShapes().map(s => `<option value="${invAttr(s)}">`).join('')}</datalist>`;
+}
 
 function spSetKindTab(kind) { spKindTab = kind; spExpandedItem = null; spRenderScreen(); }
 function spSetSearch(q) { spSearchQuery = q; spRenderResults(); }
@@ -10037,19 +10049,20 @@ function spToggleExpand(id) { spExpandedItem = spExpandedItem === id ? null : id
 
 function spFilteredItems() {
   const q = spSearchQuery.trim().toLowerCase();
-  // Printed Latex sorts color → size → brand (secondary to its Print Group grouping in
-  // spRenderResults); every other kind keeps the original brand → color sort.
+  // Printed Latex and Latex Shapes both sort color → size → brand (secondary to their respective
+  // Print Group/Shape grouping in spRenderResults); every other kind keeps the brand → color sort.
+  const groupedKind = spKindTab === 'printed' || spKindTab === 'shapes';
   const items = SPECIALTY_ITEMS.filter(i => (i.kind || 'twisting') === spKindTab)
-    .sort((a, b) => spKindTab === 'printed'
+    .sort((a, b) => groupedKind
       ? (a.color || '').localeCompare(b.color || '') || (a.sizeType || '').localeCompare(b.sizeType || '') || (a.brand || '').localeCompare(b.brand || '')
       : (a.brand || '').localeCompare(b.brand || '') || (a.color || '').localeCompare(b.color || ''));
   if (!q) return items;
-  return items.filter(i => [i.brand, i.color, i.sizeType, i.pattern, i.descriptor].some(f => (f || '').toLowerCase().includes(q)));
+  return items.filter(i => [i.brand, i.color, i.sizeType, i.pattern, i.shape, i.descriptor].some(f => (f || '').toLowerCase().includes(q)));
 }
 
 function spOpenAdd() {
   spAddOpen = true;
-  spAddDraft = { kind: spKindTab, brand: '', brandOther: '', color: '', sizeType: '', sizeOther: '', pattern: '', printGroupId: '', printGroupNewName: '', descriptor: '', perBag: 100, costPerBag: 0, backstock: 0 };
+  spAddDraft = { kind: spKindTab, brand: '', brandOther: '', color: '', sizeType: '', sizeOther: '', pattern: '', printGroupId: '', printGroupNewName: '', shape: '', descriptor: '', perBag: 100, costPerBag: 0, backstock: 0 };
   spRenderScreen();
 }
 function spCancelAdd() { spAddOpen = false; spAddDraft = null; spRenderScreen(); }
@@ -10086,6 +10099,8 @@ function spSubmitAdd() {
       printGroupId = d.printGroupId;
     }
   }
+  const shape = d.kind === 'shapes' ? (d.shape || '').trim() : '';
+  if (d.kind === 'shapes' && !shape) { alert('Enter a shape.'); return; }
   const item = {
     id: psNewSpecialtyItemId(),
     kind: d.kind,
@@ -10094,6 +10109,7 @@ function spSubmitAdd() {
     sizeType,
     pattern: d.kind === 'printed' ? (d.pattern || '').trim() : '',
     printGroupId: d.kind === 'printed' ? printGroupId : null,
+    shape,
     descriptor: (d.descriptor || '').trim(),
     perBag: parseFloat(d.perBag) || 0,
     costPerBag: parseFloat(d.costPerBag) || 0,
@@ -10310,6 +10326,26 @@ function spGroupedPrintedItems(items) {
     items: byGroup[key],
   }));
 }
+// Shape is the leading grouping criteria for Latex Shapes only, same {key,label,items} + sort
+// convention as spGroupedPrintedItems — but keyed directly by the plain `shape` string (Option A
+// per approval: no managed registry, unlike Print Groups). Any blank/malformed value is defensively
+// bucketed as Uncategorized rather than crashing, even though Shape is required going forward.
+function spGroupedShapesItems(items) {
+  const byShape = {};
+  items.forEach(i => {
+    const key = (i.shape && typeof i.shape === 'string' && i.shape.trim()) ? i.shape.trim() : '(uncategorized)';
+    (byShape[key] = byShape[key] || []).push(i);
+  });
+  return Object.keys(byShape).sort((a, b) => {
+    if (a === '(uncategorized)') return 1;
+    if (b === '(uncategorized)') return -1;
+    return a.localeCompare(b);
+  }).map(key => ({
+    key: 'sp-shape:' + key,
+    label: key === '(uncategorized)' ? 'Uncategorized' : key,
+    items: byShape[key],
+  }));
+}
 // Reuses the same shared collapse-state Set Standard Latex's own groups use (invCollapsedGroups is
 // just a plain Set of arbitrary string keys, not actually coupled to Standard Latex) — but calls
 // this screen's own render function rather than invToggleGroup's hardcoded invRenderColorsList().
@@ -10353,6 +10389,7 @@ function spAddFormHtml() {
         ${d.sizeType === 'Custom' ? `<input type="text" style="margin-top:6px;" placeholder="Size/type" value="${invAttr(d.sizeOther)}" oninput="spSetDraftField('sizeOther', this.value)">` : ''}
       </div>
       ${d.kind === 'printed' ? `<div class="settings-field" style="margin-bottom:0"><label>Pattern/Print</label><input type="text" placeholder="e.g. Cow Print" value="${invAttr(d.pattern)}" oninput="spSetDraftField('pattern', this.value)"></div>` : ''}
+      ${d.kind === 'shapes' ? `<div class="settings-field" style="margin-bottom:0"><label>Shape</label><input type="text" list="sp-shape-suggestions" placeholder="e.g. Heart" value="${invAttr(d.shape)}" oninput="spSetDraftField('shape', this.value)">${spShapeSuggestionsDatalist()}</div>` : ''}
     </div>
     ${d.kind === 'printed' ? `<div class="settings-field">
       <label>Print Group <span style="font-weight:400;">(optional — the broader family used for grouping, e.g. "Polka Dots")</span></label>
@@ -10424,13 +10461,13 @@ function spRenderResults() {
     root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${psEscape(spKindLabel(spKindTab).toLowerCase())} yet.</div>`;
     return;
   }
-  if (spKindTab !== 'printed') {
+  if (spKindTab !== 'printed' && spKindTab !== 'shapes') {
     root.innerHTML = `<div class="inv-color-list">` + items.map(spItemCardHtml).join('') + `</div>`;
     return;
   }
-  // Printed Latex only: Print Group leads, reusing the same collapsible-section look as Standard
-  // Latex's own grouped views (.inv-group-header) via spGroupedPrintedItems/spToggleGroup.
-  const groups = spGroupedPrintedItems(items);
+  // Printed Latex groups by Print Group; Latex Shapes groups by Shape — both reuse the same
+  // collapsible-section look as Standard Latex's own grouped views (.inv-group-header).
+  const groups = spKindTab === 'printed' ? spGroupedPrintedItems(items) : spGroupedShapesItems(items);
   root.innerHTML = groups.map(g => {
     const collapsed = invCollapsedGroups.has(g.key);
     return `<div class="inv-group-header" onclick="spToggleGroup('${g.key}')">
