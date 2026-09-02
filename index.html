@@ -909,6 +909,16 @@
   // referenced by Inventory (stock levels) and searched by every color autocomplete in the app.
   window.fbLoadColorLibrary = () => window.fbLoadSettingsDoc('colorLibrary');
   window.fbSaveColorLibrary = (data) => window.fbSaveSettingsDoc('colorLibrary', data);
+  // Standard Latex "Edit Details" writes the whole Color Library doc AND one Inventory item doc
+  // together in a single Firestore batch — either both commit or neither does, so a rename can
+  // never leave the two half-synced. Simpler than runTransaction since nothing here needs to read
+  // fresh server state mid-write; we already hold the full in-memory state before calling this.
+  window.fbSaveColorRenameAtomic = (colorsData, inventoryItem) => {
+    const batch = writeBatch(db);
+    batch.set(settingsDocRef('colorLibrary'), colorsData);
+    batch.set(doc(inventoryItemsRef, inventoryItem.id), inventoryItem);
+    return batch.commit();
+  };
 
   // A real backup, not just a display filter — a removed Library color/colors land here (see
   // clRemoveColorFromLibrary/clClearLibraryAndInventory) instead of being discarded outright, so
@@ -5832,6 +5842,8 @@ let invExpandedItem = null;
 let invOrderFormKey = null; // `${itemId}|${size}` of the order form currently open, or null
 let invFlagComposerKey = null; // `${itemId}|${size}` of the flag-note composer currently open, or null
 let invHistoryOpenKey = null; // `${itemId}|${size}` of the history panel currently open, or null
+let invEditDetailsItemId = null; // item currently showing the Edit Details form, or null
+let invEditDetailsDraft = null; // { brand, color } while that form is open
 // 'view' (default, safe): Open bin/Backstock show as plain read-only text, so a normal "what do
 // we have?" check can't accidentally change a real count. 'edit': the same fields become the
 // actual select/input, for count days. Separate from the admin passcode on purpose — anyone on
@@ -7859,6 +7871,101 @@ function invSetTier(itemId, tier) {
   item.tier = tier;
   invSaveItem(item);
 }
+
+// ── Edit Details: correcting Brand/Color after creation, without delete+recreate ──
+// Standard Latex identity is split across two records — the Inventory row's own denormalized
+// color/brand copy, and the linked Color Library entry's canonical colorName/brand (joined only by
+// colorId, never itself changed here). Both must be written together or not at all — see
+// fbSaveColorRenameAtomic. This is NOT a category-conversion tool: colorId/id are never touched,
+// so the record stays the same Standard Latex color, just correctly named.
+function invOpenEditDetails(itemId) {
+  const item = invFindItem(itemId);
+  if (!item) return;
+  invEditDetailsItemId = itemId;
+  invEditDetailsDraft = { brand: item.brand || '', color: item.color || '' };
+  invRenderColorsList();
+}
+function invCancelEditDetails() {
+  invEditDetailsItemId = null;
+  invEditDetailsDraft = null;
+  invRenderColorsList();
+}
+function invSetEditDetailsField(field, value) {
+  if (!invEditDetailsDraft) return;
+  invEditDetailsDraft[field] = value;
+}
+async function invSubmitEditDetails(itemId) {
+  const item = invFindItem(itemId);
+  if (!item || !invEditDetailsDraft) return;
+  const newBrand = (invEditDetailsDraft.brand || '').trim();
+  const newColor = (invEditDetailsDraft.color || '').trim();
+  if (!newColor) { alert('Enter a color name.'); return; }
+  const entry = COLOR_LIBRARY.find(e => e.id === item.colorId);
+  if (!entry) { alert('This item has no linked Color Library entry — cannot edit details.'); return; }
+
+  // Block on collision rather than merging/overwriting — same exact-match rule clFindOrCreate
+  // already uses at creation time, just excluding this entry's own (unchanged) id.
+  const collision = clFindEntry(newBrand, newColor);
+  if (collision && collision.id !== entry.id) {
+    alert(`"${newBrand || '(no brand)'} — ${newColor}" already exists as a different color — choose a different name, or edit that color instead.`);
+    return;
+  }
+
+  const oldColorName = entry.colorName;
+  const nameChanged = oldColorName.trim().toLowerCase() !== newColor.toLowerCase();
+  // Snapshot for rollback — if the atomic write fails, in-memory state must never drift from what
+  // was actually persisted (nothing was saved), so roll every touched field back exactly.
+  const prevEntry = { brand: entry.brand, colorName: entry.colorName, aliases: [...(entry.aliases || [])] };
+  const prevItem = { color: item.color, brand: item.brand };
+
+  entry.brand = newBrand;
+  entry.colorName = newColor;
+  // Preserve the old name as an alias so existing Production jobs whose stored color text still
+  // reads the old name keep resolving via clEntriesByExactName/clResolveName — a rename here must
+  // never silently break inventory-requirement math for a job that was never touched.
+  if (nameChanged && !(entry.aliases || []).some(a => a.trim().toLowerCase() === oldColorName.trim().toLowerCase())) {
+    entry.aliases = [...(entry.aliases || []), oldColorName];
+  }
+  item.color = newColor;
+  item.brand = newBrand;
+
+  try {
+    await window.fbSaveColorRenameAtomic({ colors: COLOR_LIBRARY }, item);
+  } catch (err) {
+    console.error('Edit Details save failed:', err);
+    entry.brand = prevEntry.brand;
+    entry.colorName = prevEntry.colorName;
+    entry.aliases = prevEntry.aliases;
+    item.color = prevItem.color;
+    item.brand = prevItem.brand;
+    alert("Couldn't save — nothing was changed. Check your connection and try again.");
+    invRenderColorsList();
+    return;
+  }
+
+  invEditDetailsItemId = null;
+  invEditDetailsDraft = null;
+  invRenderColorsList();
+}
+function invEditDetailsFormHtml(item) {
+  const d = invEditDetailsDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.5rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Edit Details</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invCancelEditDetails()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field" style="margin-bottom:0.5rem;">
+      <label>Brand</label>
+      <input type="text" list="inv-brand-suggestions" value="${invAttr(d.brand)}" oninput="invSetEditDetailsField('brand', this.value)">
+      <datalist id="inv-brand-suggestions">${[...new Set(COLOR_LIBRARY.map(e => e.brand).filter(Boolean))].sort().map(b => `<option value="${invAttr(b)}">`).join('')}</datalist>
+    </div>
+    <div class="settings-field">
+      <label>Color</label>
+      <input type="text" value="${invAttr(d.color)}" oninput="invSetEditDetailsField('color', this.value)">
+    </div>
+    <button class="save-btn" onclick="invSubmitEditDetails('${item.id}')">Save Details</button>
+  </div>`;
+}
 // Soft delete — the item's Firestore doc is never actually removed, just flagged with
 // `deletedAt` and filtered out of INVENTORY_ITEMS (see invStartListeners). "Recently Deleted"
 // below can always bring it back, so an accidental tap here (or a whole "Clear All") is never
@@ -9793,8 +9900,10 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
         <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border-radius:999px; border:0.5px solid ${tier === 'misc' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${tier === 'misc' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invSetTier('${item.id}','misc')">Misc</button>
         <span style="flex:1;"></span>
         <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invToggleActive('${item.id}')">${isActive ? 'Deactivate' : 'Reactivate'}</button>
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
         <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invDeleteColor('${item.id}')"><i class="fa-solid fa-trash"></i></button>
       </div>`;
+      if (invEditDetailsItemId === item.id) html += invEditDetailsFormHtml(item);
       html += `<div class="settings-field" style="margin-top:0.5rem; margin-bottom:0;"><label>Color Group <span style="font-weight:400;">(optional — for collapsible sections under the Color tab)</span></label>
         <input type="text" list="inv-color-group-suggestions" value="${invAttr(item.colorGroup)}" placeholder="e.g. Reds" onchange="invUpdateItemField('${item.id}','colorGroup',this.value)">
         <datalist id="inv-color-group-suggestions">${invColorGroupSuggestions().map(g => `<option value="${invAttr(g)}">`).join('')}</datalist>
@@ -10101,13 +10210,18 @@ function spSubmitAdd() {
   }
   const shape = d.kind === 'shapes' ? (d.shape || '').trim() : '';
   if (d.kind === 'shapes' && !shape) { alert('Enter a shape.'); return; }
+  const color = (d.color || '').trim();
+  const pattern = d.kind === 'printed' ? (d.pattern || '').trim() : '';
+  const identityExtra = d.kind === 'printed' ? pattern : d.kind === 'shapes' ? shape : '';
+  const dup = spFindCollision(d.kind, brand, color, sizeType, identityExtra, null);
+  if (dup) { alert(`An item with this Brand/Color/Size${identityExtra ? '/' + (d.kind === 'printed' ? 'Pattern' : 'Shape') : ''} already exists.`); return; }
   const item = {
     id: psNewSpecialtyItemId(),
     kind: d.kind,
     brand,
-    color: (d.color || '').trim(),
+    color,
     sizeType,
-    pattern: d.kind === 'printed' ? (d.pattern || '').trim() : '',
+    pattern,
     printGroupId: d.kind === 'printed' ? printGroupId : null,
     shape,
     descriptor: (d.descriptor || '').trim(),
@@ -10155,6 +10269,117 @@ function spDeleteItem(itemId) {
   SPECIALTY_ITEMS = SPECIALTY_ITEMS.filter(i => i.id !== itemId);
   spSaveItem(item);
   spRenderResults();
+}
+// Shared identity-equality rule for Specialty Latex — used by both Add (closing a pre-existing gap
+// where no dedup existed at all) and Edit Details. `extra` is Pattern (Printed) or Shape (Shapes),
+// '' for kinds that don't have one. `excludeId` lets Edit Details ignore the item being edited
+// against itself.
+function spFindCollision(kind, brand, color, sizeType, extra, excludeId) {
+  const norm = s => (s || '').trim().toLowerCase();
+  return SPECIALTY_ITEMS.find(i => i.id !== excludeId && i.kind === kind &&
+    norm(i.brand) === norm(brand) && norm(i.color) === norm(color) && norm(i.sizeType) === norm(sizeType) &&
+    norm(kind === 'printed' ? i.pattern : kind === 'shapes' ? i.shape : '') === norm(extra));
+}
+
+// ── Edit Details: correcting Brand/Color/Size/Pattern/Shape/Descriptor after creation ──
+// `kind` is never editable here — changing it would change what the record fundamentally is, not
+// just correct its identity. Backstock/perBag/costPerBag/active/id are untouched.
+let spEditDetailsItemId = null;
+let spEditDetailsDraft = null;
+function spOpenEditDetails(itemId) {
+  const item = spFindItem(itemId);
+  if (!item) return;
+  const options = spBrandOptions();
+  const isKnownBrand = options.includes(item.brand);
+  const isPresetSize = (SP_SIZE_OPTIONS[item.kind] || []).includes(item.sizeType);
+  spEditDetailsItemId = itemId;
+  spEditDetailsDraft = {
+    brand: isKnownBrand ? item.brand : 'Other',
+    brandOther: isKnownBrand ? '' : (item.brand || ''),
+    color: item.color || '',
+    sizeType: isPresetSize ? item.sizeType : 'Custom',
+    sizeOther: isPresetSize ? '' : (item.sizeType || ''),
+    pattern: item.pattern || '',
+    shape: item.shape || '',
+    descriptor: item.descriptor || '',
+  };
+  spRenderResults();
+}
+function spCancelEditDetails() {
+  spEditDetailsItemId = null;
+  spEditDetailsDraft = null;
+  spRenderResults();
+}
+function spSetEditDetailsField(field, value) {
+  if (!spEditDetailsDraft) return;
+  spEditDetailsDraft[field] = value;
+  if (field === 'brand' || field === 'sizeType') spRenderResults(); // reveal Other/Custom free-text
+}
+function spSubmitEditDetails(itemId) {
+  const item = spFindItem(itemId);
+  if (!item || !spEditDetailsDraft) return;
+  const d = spEditDetailsDraft;
+  const brand = resolveBrandValue(d.brand, d.brandOther);
+  if (!brand) { alert('Pick a brand, or choose Other and type one in.'); return; }
+  const color = (d.color || '').trim();
+  if (!color) { alert('Enter a color.'); return; }
+  const sizeType = d.sizeType === 'Custom' ? (d.sizeOther || '').trim() : d.sizeType;
+  if (!sizeType) { alert('Enter a size/type.'); return; }
+  const pattern = item.kind === 'printed' ? (d.pattern || '').trim() : '';
+  const shape = item.kind === 'shapes' ? (d.shape || '').trim() : '';
+  if (item.kind === 'shapes' && !shape) { alert('Enter a shape.'); return; }
+  const identityExtra = item.kind === 'printed' ? pattern : item.kind === 'shapes' ? shape : '';
+  const collision = spFindCollision(item.kind, brand, color, sizeType, identityExtra, item.id);
+  if (collision) {
+    alert(`This would collide with an existing item (${collision.brand} — ${collision.color} — ${collision.sizeType}${identityExtra ? ' — ' + identityExtra : ''}). Edit that item instead, or change one of these fields.`);
+    return;
+  }
+  item.brand = brand;
+  item.color = color;
+  item.sizeType = sizeType;
+  if (item.kind === 'printed') item.pattern = pattern;
+  if (item.kind === 'shapes') item.shape = shape;
+  item.descriptor = (d.descriptor || '').trim();
+  spSaveItem(item);
+  spEditDetailsItemId = null;
+  spEditDetailsDraft = null;
+  spRenderResults();
+}
+function spEditDetailsFormHtml(item) {
+  const d = spEditDetailsDraft;
+  const sizeOptions = (SP_SIZE_OPTIONS[item.kind] || []).concat(['Custom']);
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.5rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Edit Details</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="spCancelEditDetails()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Brand</label>
+        ${brandSelectorHtml({ options: spBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "spSetEditDetailsField('brand', this.value)", onOtherInput: "spSetEditDetailsField('brandOther', this.value)" })}
+      </div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Color</label>
+        <input type="text" list="sp-color-suggestions" value="${invAttr(d.color)}" oninput="spSetEditDetailsField('color', this.value)">
+        ${spColorSuggestionsDatalist()}
+      </div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Size/Type</label>
+        <select onchange="spSetEditDetailsField('sizeType', this.value)">
+          ${sizeOptions.map(s => `<option value="${invAttr(s)}" ${s === d.sizeType ? 'selected' : ''}>${psEscape(s)}</option>`).join('')}
+        </select>
+        ${d.sizeType === 'Custom' ? `<input type="text" style="margin-top:6px;" placeholder="Size/type" value="${invAttr(d.sizeOther)}" oninput="spSetEditDetailsField('sizeOther', this.value)">` : ''}
+      </div>
+      ${item.kind === 'printed' ? `<div class="settings-field" style="margin-bottom:0"><label>Pattern/Print</label><input type="text" value="${invAttr(d.pattern)}" oninput="spSetEditDetailsField('pattern', this.value)"></div>` : ''}
+      ${item.kind === 'shapes' ? `<div class="settings-field" style="margin-bottom:0"><label>Shape</label><input type="text" list="sp-shape-suggestions" value="${invAttr(d.shape)}" oninput="spSetEditDetailsField('shape', this.value)">${spShapeSuggestionsDatalist()}</div>` : ''}
+    </div>
+    <div class="settings-field"><label>Descriptor/Notes <span style="font-weight:400;">(optional)</span></label>
+      <input type="text" value="${invAttr(d.descriptor)}" oninput="spSetEditDetailsField('descriptor', this.value)">
+    </div>
+    <button class="save-btn" onclick="spSubmitEditDetails('${item.id}')">Save Details</button>
+  </div>`;
 }
 
 function spKindLabel(kind) { return (SP_KINDS.find(k => k.id === kind) || {}).label || kind; }
@@ -10444,9 +10669,11 @@ function spItemCardHtml(item) {
     html += `<div class="row">
       <div class="settings-field" style="margin-bottom:0"><label>Cost/bag</label><input type="number" step="0.01" min="0" value="${item.costPerBag}" onchange="spUpdateField('${item.id}','costPerBag',this.value)"></div>
     </div>`;
-    html += `<div style="display:flex; justify-content:flex-end;">
+    html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="spOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="spDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
     </div>`;
+    if (spEditDetailsItemId === item.id) html += spEditDetailsFormHtml(item);
     html += `</div>`; // ps-job-body
   }
   html += `</div>`; // inv-color-row
@@ -10677,6 +10904,84 @@ function foilDeleteItem(itemId) {
   FOIL_ITEMS_TRASHED = FOIL_ITEMS_TRASHED.concat([item]);
   foilRenderScreen();
 }
+// ── Edit Details: correcting Size/Color/Brand after creation ──
+// `charType` stays fixed — changing it would restructure `quantities` (a different character set
+// entirely, A-Z vs. 0-9) rather than just correct this group's identity, so it's out of scope here
+// per the explicit "not a category-conversion tool" instruction.
+let foilEditDetailsItemId = null;
+let foilEditDetailsDraft = null;
+function foilOpenEditDetails(itemId) {
+  const item = foilFindItem(itemId);
+  if (!item) return;
+  const options = foilBrandOptions();
+  const isKnownBrand = options.includes(item.brand);
+  foilEditDetailsItemId = itemId;
+  foilEditDetailsDraft = {
+    size: item.size || '',
+    color: item.color || '',
+    brand: isKnownBrand ? item.brand : 'Other',
+    brandOther: isKnownBrand ? '' : (item.brand || ''),
+  };
+  foilRenderResults();
+}
+function foilCancelEditDetails() {
+  foilEditDetailsItemId = null;
+  foilEditDetailsDraft = null;
+  foilRenderResults();
+}
+function foilSetEditDetailsField(field, value) {
+  if (!foilEditDetailsDraft) return;
+  foilEditDetailsDraft[field] = value;
+  if (field === 'brand') foilRenderResults(); // reveal "Other"'s free-text input
+}
+function foilSubmitEditDetails(itemId) {
+  const item = foilFindItem(itemId);
+  if (!item || !foilEditDetailsDraft) return;
+  const d = foilEditDetailsDraft;
+  const size = (d.size || '').trim();
+  const color = (d.color || '').trim();
+  if (!size) { alert('Enter a size.'); return; }
+  if (!color) { alert('Enter a color.'); return; }
+  if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
+  const brand = resolveBrandValue(d.brand, d.brandOther);
+  if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
+  const dup = foilFindDuplicateGroup(item.charType, size, color, brand);
+  if (dup && dup.id !== item.id) {
+    alert(`"${size} ${color} ${item.charType === 'letters' ? 'Letters' : 'Numbers'}" already exists as a separate group — edit that one instead, or change one of these fields.`);
+    return;
+  }
+  item.size = size;
+  item.color = color;
+  item.brand = brand;
+  foilSaveItem(item);
+  foilEditDetailsItemId = null;
+  foilEditDetailsDraft = null;
+  foilRenderResults();
+}
+function foilEditDetailsFormHtml(item) {
+  const d = foilEditDetailsDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.5rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Edit Details</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelEditDetails()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Size</label>
+        <input type="text" list="foil-size-suggestions" value="${invAttr(d.size)}" oninput="foilSetEditDetailsField('size', this.value)">
+      </div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Color</label>
+        <input type="text" list="foil-color-suggestions" value="${invAttr(d.color)}" oninput="foilSetEditDetailsField('color', this.value)">
+      </div>
+    </div>
+    <div class="settings-field">
+      <label>Brand</label>
+      ${brandSelectorHtml({ options: foilBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "foilSetEditDetailsField('brand', this.value)", onOtherInput: "foilSetEditDetailsField('brandOther', this.value)" })}
+    </div>
+    <button class="save-btn" onclick="foilSubmitEditDetails('${item.id}')">Save Details</button>
+  </div>`;
+}
 function foilRestoreItem(itemId) {
   const item = FOIL_ITEMS_TRASHED.find(i => i.id === itemId);
   if (!item) return;
@@ -10766,9 +11071,11 @@ function foilItemCardHtml(item) {
       <div class="settings-field" style="margin-bottom:0"><label>Cost per foil</label><input type="number" step="0.01" min="0" value="${item.costPerFoil == null ? '' : item.costPerFoil}" placeholder="optional" onchange="foilUpdateField('${item.id}','costPerFoil',this.value)"></div>
       <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdateField('${item.id}','storageLocation',this.value)"></div>
     </div>`;
-    html += `<div style="display:flex; justify-content:flex-end;">
+    html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
     </div>`;
+    if (foilEditDetailsItemId === item.id) html += foilEditDetailsFormHtml(item);
     html += `</div>`; // ps-job-body
   }
   html += `</div>`; // inv-color-row
