@@ -10291,15 +10291,12 @@ function spShapeSuggestionsDatalist() {
 function spSetKindTab(kind) {
   spKindTab = kind;
   spExpandedItem = null;
-  // Print Group / Shape sections default to collapsed each time this tab is opened, matching the
-  // general BBT convention — seeded here (once, on entering the tab) rather than on every render,
-  // so a user's own expand/collapse choice made during this visit isn't fought by a later
-  // re-render (e.g. after editing an item elsewhere in the same group).
-  if (kind === 'printed' || kind === 'shapes') {
-    const items = SPECIALTY_ITEMS.filter(i => (i.kind || 'twisting') === kind);
-    const groups = kind === 'printed' ? spGroupedPrintedItems(items) : spGroupedShapesItems(items);
-    groups.forEach(g => invCollapsedGroups.add(g.key));
-  }
+  // Group sections default to collapsed each time this tab is opened, matching the general BBT
+  // convention — seeded here (once, on entering the tab) rather than on every render, so a user's
+  // own expand/collapse choice made during this visit isn't fought by a later re-render (e.g.
+  // after editing an item elsewhere in the same group).
+  const items = SPECIALTY_ITEMS.filter(i => (i.kind || 'twisting') === kind);
+  spGroupedItems(items, kind).forEach(g => invCollapsedGroups.add(g.key));
   spRenderScreen();
 }
 function spSetSearch(q) { spSearchQuery = q; spRenderResults(); }
@@ -10307,13 +10304,11 @@ function spToggleExpand(id) { spExpandedItem = spExpandedItem === id ? null : id
 
 function spFilteredItems() {
   const q = spSearchQuery.trim().toLowerCase();
-  // Printed Latex and Latex Shapes both sort color → size → brand (secondary to their respective
-  // Print Group/Shape grouping in spRenderResults); every other kind keeps the brand → color sort.
-  const groupedKind = spKindTab === 'printed' || spKindTab === 'shapes';
+  // Every kind is grouped now (see spGroupedItems) — this is the pre-sort within the flat filtered
+  // list, using each kind's own comparator (spItemSortComparator) as the secondary sort inside
+  // whatever group a search/grouping pass buckets an item into.
   const items = SPECIALTY_ITEMS.filter(i => (i.kind || 'twisting') === spKindTab)
-    .sort((a, b) => groupedKind
-      ? (a.color || '').localeCompare(b.color || '') || (a.sizeType || '').localeCompare(b.sizeType || '') || (a.brand || '').localeCompare(b.brand || '')
-      : (a.brand || '').localeCompare(b.brand || '') || (a.color || '').localeCompare(b.color || ''));
+    .sort(spItemSortComparator(spKindTab));
   if (!q) return items;
   return items.filter(i => [i.brand, i.color, i.sizeType, i.pattern, i.shape, i.descriptor].some(f => (f || '').toLowerCase().includes(q)));
 }
@@ -10328,11 +10323,14 @@ function spSetDraftField(field, value) {
   if (!spAddDraft) return;
   spAddDraft[field] = value;
   if (field === 'kind') {
-    // Each kind has its own size list (see SP_SIZE_OPTIONS) — clearing sizeType/sizeOther here
-    // avoids silently submitting a size from the previous kind that isn't even shown as selected
-    // in the now-different dropdown. Pattern only shows for 'printed' — needs a re-render either way.
+    // Each kind has its own size list (see SP_SIZE_OPTIONS) and its own Groups — clearing
+    // sizeType/sizeOther/printGroupId here avoids silently submitting a stale value that isn't
+    // even shown as selected in the now-different dropdowns. Pattern only shows for 'printed' —
+    // needs a re-render either way.
     spAddDraft.sizeType = '';
     spAddDraft.sizeOther = '';
+    spAddDraft.printGroupId = '';
+    spAddDraft.printGroupNewName = '';
     spRenderScreen();
   } else if (field === 'brand' || field === 'sizeType' || field === 'printGroupId' || field === 'backstockUnit') {
     // Selecting "Other"/"Custom"/"+ Add new group"/the balloons toggle needs to swap the field's
@@ -10347,15 +10345,14 @@ function spSubmitAdd() {
   if (!brand) { alert('Pick a brand, or choose Other and type one in.'); return; }
   const sizeType = d.sizeType === 'Custom' ? (d.sizeOther || '').trim() : d.sizeType;
   if (!sizeType) { alert('Enter a size/type.'); return; }
+  // Group applies to every kind now, not just Printed.
   let printGroupId = null;
-  if (d.kind === 'printed') {
-    if (d.printGroupId === '__new__') {
-      const name = (d.printGroupNewName || '').trim();
-      if (!name) { alert('Type a name for the new print group, or choose an existing one.'); return; }
-      printGroupId = pgAddGroup(name).id;
-    } else if (d.printGroupId) {
-      printGroupId = d.printGroupId;
-    }
+  if (d.printGroupId === '__new__') {
+    const name = (d.printGroupNewName || '').trim();
+    if (!name) { alert('Type a name for the new group, or choose an existing one.'); return; }
+    printGroupId = pgAddGroup(d.kind, name).id;
+  } else if (d.printGroupId) {
+    printGroupId = d.printGroupId;
   }
   const shape = d.kind === 'shapes' ? (d.shape || '').trim() : '';
   if (d.kind === 'shapes' && !shape) { alert('Enter a shape.'); return; }
@@ -10384,7 +10381,7 @@ function spSubmitAdd() {
     color,
     sizeType,
     pattern,
-    printGroupId: d.kind === 'printed' ? printGroupId : null,
+    printGroupId,
     shape,
     descriptor: (d.descriptor || '').trim(),
     perBag,
@@ -10448,9 +10445,9 @@ function spSetItemPrintGroup(itemId, value) {
   const item = spFindItem(itemId);
   if (!item) return;
   if (value === '__new__') {
-    const name = prompt('New print group name:');
+    const name = prompt('New group name:');
     if (name === null || !name.trim()) { spRenderResults(); return; } // reset the select back to its actual value
-    item.printGroupId = pgAddGroup(name.trim()).id;
+    item.printGroupId = pgAddGroup(item.kind, name.trim()).id;
   } else {
     item.printGroupId = value || null;
   }
@@ -10580,13 +10577,36 @@ function spEditDetailsFormHtml(item) {
 
 function spKindLabel(kind) { return (SP_KINDS.find(k => k.id === kind) || {}).label || kind; }
 
-// ─────────────────────────── Print Groups (business-editable, Printed Latex only) ───────────────────────────
+// ─────────────────────────── Groups (business-editable, shared across all Specialty Latex kinds) ───────────────────────────
+// Started as "Print Groups" (Printed Latex only); generalized to Twisting/Linking/Printed/Shapes.
+// The stored key is kept as `printGroups`/`printGroupId` everywhere for backward compatibility —
+// renaming either would mean rewriting every existing item and settings doc for a purely cosmetic
+// gain. Same precedent as `perBag` staying the key for what the UI now calls "Standard Package
+// Qty": the internal name doesn't need to track the broadened concept, only the code's own
+// comments and any *new* code's local variable names need to read clearly (`groupId`, not
+// `printGroupId`, in new call sites below).
 function psNewPrintGroupId() { return 'printgroup_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 function pgInit() {
   window.fbLoadPrintGroups().then(snap => {
     if (snap.exists() && Array.isArray(snap.data().groups)) {
-      PRINT_GROUPS = snap.data().groups;
-      if (spKindTab === 'printed') spRenderScreen();
+      const loaded = snap.data().groups;
+      // Backward-compatible defaulting, computed at load time only (never rewritten until the
+      // next real edit, same `|| default` convention as every other optional field this session)
+      // — every existing group predates kind/order/active. kind defaults to 'printed' (the only
+      // kind that existed before this), active defaults true, and order is assigned to match each
+      // kind's current alphabetical position so nothing visually reshuffles the moment this ships.
+      const byKind = {};
+      loaded.forEach(g => { const k = g.kind || 'printed'; (byKind[k] = byKind[k] || []).push(g); });
+      Object.keys(byKind).forEach(k => {
+        byKind[k].sort((a, b) => (a.order != null && b.order != null) ? a.order - b.order : a.name.localeCompare(b.name));
+        byKind[k].forEach((g, idx) => {
+          if (!g.kind) g.kind = 'printed';
+          if (g.order == null) g.order = idx;
+          if (g.active == null) g.active = true;
+        });
+      });
+      PRINT_GROUPS = loaded;
+      spRenderScreen();
     }
   }).catch(err => console.error('Print groups load failed:', err));
 }
@@ -10594,19 +10614,29 @@ function pgSave() {
   window.fbSavePrintGroups({ groups: PRINT_GROUPS }).catch(err => console.error('Print groups save failed:', err));
 }
 function pgFindGroup(id) { return PRINT_GROUPS.find(g => g.id === id); }
-function pgSortedGroups() { return [...PRINT_GROUPS].sort((a, b) => a.name.localeCompare(b.name)); }
-// Case/whitespace-insensitive exact match, same dedup philosophy as clFindEntry/mstAddManufacturer
-// — never create a second group for a name that (up to formatting) already exists.
-function pgFindByName(name) {
-  const norm = s => (s || '').trim().toLowerCase();
-  return PRINT_GROUPS.find(g => norm(g.name) === norm(name));
+// Groups scoped to one Specialty Latex kind, manual-order sorted. includeArchived also returns
+// archived (active:false) groups, for the manage panel's own "Archived" section and for id-based
+// lookups that must still resolve an archived group's name for an item still referencing it.
+function pgGroupsForKind(kind, includeArchived) {
+  return PRINT_GROUPS.filter(g => g.kind === kind && (includeArchived || g.active !== false))
+    .sort((a, b) => (a.order || 0) - (b.order || 0));
 }
-function pgAddGroup(name) {
+// Case/whitespace-insensitive exact match within the same kind, same dedup philosophy as
+// clFindEntry/mstAddManufacturer — never create a second group for a name that (up to formatting)
+// already exists in that kind. Different kinds may reuse the same name (e.g. "Standard" as both a
+// Twisting group and a Linking group) since they're never shown together.
+function pgFindByName(kind, name) {
+  const norm = s => (s || '').trim().toLowerCase();
+  return PRINT_GROUPS.find(g => g.kind === kind && norm(g.name) === norm(name));
+}
+function pgAddGroup(kind, name) {
   const trimmed = (name || '').trim();
   if (!trimmed) return null;
-  const existing = pgFindByName(trimmed);
+  const existing = pgFindByName(kind, trimmed);
   if (existing) return existing;
-  const group = { id: psNewPrintGroupId(), name: trimmed };
+  const siblings = pgGroupsForKind(kind, true);
+  const maxOrder = siblings.reduce((m, g) => Math.max(m, g.order || 0), -1);
+  const group = { id: psNewPrintGroupId(), kind, name: trimmed, order: maxOrder + 1, active: true };
   PRINT_GROUPS.push(group);
   pgSave();
   return group;
@@ -10621,29 +10651,69 @@ function pgRenameGroup(id, name) {
   pgRenderManage();
   spRenderResults();
 }
-// Blocked (never silently orphaning) when any Printed item still references this group — the same
-// rule mstDeleteManufacturer already uses for a Master Manufacturer referenced by a Master Color.
+// Swaps this group's manual order with its neighbor among ACTIVE groups of the same kind —
+// archived groups are excluded from the visible reorder list entirely.
+function pgMoveGroup(id, direction) {
+  const group = pgFindGroup(id);
+  if (!group) return;
+  const siblings = pgGroupsForKind(group.kind, false);
+  const idx = siblings.findIndex(g => g.id === id);
+  const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+  if (idx === -1 || swapIdx < 0 || swapIdx >= siblings.length) return;
+  const other = siblings[swapIdx];
+  const tmp = group.order;
+  group.order = other.order;
+  other.order = tmp;
+  pgSave();
+  pgRenderManage();
+  spRenderResults();
+}
+// Archive/restore is the normal lifecycle — always allowed, never destructive: an archived group
+// keeps its id/name, any item still referencing it keeps showing that name, it's just hidden from
+// pickers/new-assignment until restored. Mirrors the archive/trash pattern already used elsewhere
+// (Color Library, Foil, Inventory) rather than inventing a new one.
+function pgArchiveGroup(id) {
+  const group = pgFindGroup(id);
+  if (!group) return;
+  if (!confirm(`Archive "${group.name}"? Items already using it keep their group — it just won't be offered for new assignments until restored.`)) return;
+  group.active = false;
+  pgSave();
+  pgRenderManage();
+  spRenderResults();
+}
+function pgRestoreGroup(id) {
+  const group = pgFindGroup(id);
+  if (!group) return;
+  group.active = true;
+  pgSave();
+  pgRenderManage();
+  spRenderResults();
+}
+// Permanent removal — real cleanup only, still blocked (never silently orphaning) when any item
+// still references this group, the same rule mstDeleteManufacturer already uses for a Master
+// Manufacturer referenced by a Master Color. Archive is the everyday action; this stays available
+// underneath for genuinely deleting a group nothing uses (typically one already archived).
 function pgDeleteGroup(id) {
   const group = pgFindGroup(id);
   if (!group) return;
-  const usedBy = SPECIALTY_ITEMS.filter(i => i.kind === 'printed' && i.printGroupId === id).length;
-  if (usedBy > 0) { alert(`"${group.name}" is used by ${usedBy} item${usedBy === 1 ? '' : 's'} — reassign those items' Print Group first.`); return; }
-  if (!confirm(`Delete the "${group.name}" print group? This can't be undone.`)) return;
+  const usedBy = SPECIALTY_ITEMS.filter(i => i.printGroupId === id).length;
+  if (usedBy > 0) { alert(`"${group.name}" is used by ${usedBy} item${usedBy === 1 ? '' : 's'} — reassign those items' group first.`); return; }
+  if (!confirm(`Permanently delete the "${group.name}" group? This can't be undone.`)) return;
   PRINT_GROUPS = PRINT_GROUPS.filter(g => g.id !== id);
   pgSave();
   pgRenderManage();
 }
 function pgAddGroupPrompt() {
-  const name = prompt('New print group name:');
+  const name = prompt('New group name:');
   if (name === null) return;
   const trimmed = name.trim();
   if (!trimmed) return;
-  pgAddGroup(trimmed);
+  pgAddGroup(spKindTab, trimmed);
   pgRenderList();
   spRenderResults();
 }
 function pgUnlockAdmin() {
-  const entered = prompt('Enter the admin passcode to edit print groups:');
+  const entered = prompt('Enter the admin passcode to edit groups:');
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; settingsRefreshAdminSections(); }
   else alert('Incorrect passcode.');
@@ -10655,11 +10725,11 @@ function pgLockAdmin() {
 let pgManageCollapsed = true;
 function pgToggleManageCollapsed() { pgManageCollapsed = !pgManageCollapsed; pgRenderManage(); }
 function pgRenderManage() {
-  const root = document.getElementById('sp-print-manage-root');
+  const root = document.getElementById('sp-manage-root');
   if (!root) return;
   root.innerHTML = `
     <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="pgToggleManageCollapsed()">
-      <span>Print Groups</span>
+      <span>Groups</span>
       <i class="fa-solid fa-chevron-${pgManageCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
     </div>
     ${pgManageCollapsed ? '' : `
@@ -10673,7 +10743,7 @@ function pgRenderManage() {
       <div id="pg-list"></div>
       ${invAdminUnlocked ? `
         <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="pgAddGroupPrompt()"><i class="fa-solid fa-plus"></i> Add group</button>
-        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px; margin-left:8px;" onclick="pgAssimilateExistingPatterns()"><i class="fa-solid fa-wand-magic-sparkles"></i> Assimilate existing patterns</button>
+        ${spKindTab === 'printed' ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px; margin-left:8px;" onclick="pgAssimilateExistingPatterns()"><i class="fa-solid fa-wand-magic-sparkles"></i> Assimilate existing patterns</button>` : ''}
       ` : ''}
     </div>`}
   `;
@@ -10682,19 +10752,37 @@ function pgRenderManage() {
 function pgRenderList() {
   const container = document.getElementById('pg-list');
   if (!container) return;
-  const groups = pgSortedGroups();
-  if (groups.length === 0) {
-    container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary);">No print groups yet.</div>`;
+  const active = pgGroupsForKind(spKindTab, false);
+  const archived = pgGroupsForKind(spKindTab, true).filter(g => g.active === false);
+  const countFor = (id) => SPECIALTY_ITEMS.filter(i => i.printGroupId === id).length;
+  if (active.length === 0 && archived.length === 0) {
+    container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary);">No groups yet.</div>`;
     return;
   }
-  container.innerHTML = groups.map(g => {
-    const count = SPECIALTY_ITEMS.filter(i => i.kind === 'printed' && i.printGroupId === g.id).length;
+  container.innerHTML = active.map((g, idx) => {
+    const count = countFor(g.id);
     return `<div style="display:flex; align-items:center; gap:6px; margin-bottom:0.5rem;">
       <input type="text" style="flex:1;" value="${invAttr(g.name)}" ${invAdminUnlocked ? '' : 'disabled'} onchange="pgRenameGroup('${g.id}', this.value)">
       <span style="font-size:11px; color:var(--text-secondary); flex-shrink:0;">${count} item${count === 1 ? '' : 's'}</span>
-      ${invAdminUnlocked ? `<button class="icon-btn" style="padding:4px;" onclick="pgDeleteGroup('${g.id}')" aria-label="Delete group"><i class="fa-solid fa-trash"></i></button>` : ''}
+      ${invAdminUnlocked ? `
+        <button class="icon-btn" style="padding:4px; ${idx === 0 ? 'opacity:0.3;' : ''}" ${idx === 0 ? 'disabled' : ''} onclick="pgMoveGroup('${g.id}','up')" aria-label="Move up"><i class="fa-solid fa-arrow-up"></i></button>
+        <button class="icon-btn" style="padding:4px; ${idx === active.length - 1 ? 'opacity:0.3;' : ''}" ${idx === active.length - 1 ? 'disabled' : ''} onclick="pgMoveGroup('${g.id}','down')" aria-label="Move down"><i class="fa-solid fa-arrow-down"></i></button>
+        <button class="icon-btn" style="padding:4px;" onclick="pgArchiveGroup('${g.id}')" aria-label="Archive group"><i class="fa-solid fa-box-archive"></i></button>
+      ` : ''}
     </div>`;
-  }).join('');
+  }).join('') + (archived.length === 0 ? '' : `
+    <div style="font-size:11px; color:var(--text-secondary); margin-top:0.5rem; margin-bottom:0.3rem;">Archived</div>
+    ${archived.map(g => {
+      const count = countFor(g.id);
+      return `<div style="display:flex; align-items:center; gap:6px; margin-bottom:0.5rem; opacity:0.7;">
+        <span style="flex:1; font-size:13px;">${psEscape(g.name)}</span>
+        <span style="font-size:11px; color:var(--text-secondary); flex-shrink:0;">${count} item${count === 1 ? '' : 's'}</span>
+        ${invAdminUnlocked ? `
+          <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;" onclick="pgRestoreGroup('${g.id}')">Restore</button>
+          <button class="icon-btn" style="padding:4px;" onclick="pgDeleteGroup('${g.id}')" aria-label="Delete forever"><i class="fa-solid fa-trash"></i></button>
+        ` : ''}
+      </div>`;
+    }).join('')}`);
 }
 // One-time assimilation of the Printed Latex patterns that existed before Print Groups shipped —
 // the approved mapping from the 2026-09-01 inventory inspection: Agate/Graffiti/Graffiti Marble →
@@ -10719,52 +10807,47 @@ function pgAssimilateExistingPatterns() {
   const summary = Object.entries(counts).map(([name, n]) => `${name}: ${n}`).join('\n');
   if (!confirm(`Assign Print Groups to ${matches.length} existing item(s) based on their pattern text?\n\n${summary}\n\nOnly the new Print Group field is set — nothing else about these items changes.`)) return;
   matches.forEach(({ item, groupName }) => {
-    const group = pgAddGroup(groupName);
+    const group = pgAddGroup('printed', groupName);
     item.printGroupId = group.id;
     spSaveItem(item);
   });
   spRenderScreen();
   alert(`Done — ${matches.length} item(s) assigned.`);
 }
-// Print Group is the leading grouping criteria for Printed Latex only — Twisting/Linking/Shapes
-// stay a flat list. Mirrors invGroupedItems's {key,label,items} + "ungrouped pinned last" shape,
-// but scoped to Specialty Latex's own state rather than reusing that Standard-Latex-coupled function.
-function spGroupedPrintedItems(items) {
+// Per-kind sort within a group — the one thing that's genuinely different per Specialty Latex
+// type. Printed/Linking: color -> size -> brand. Twisting: size -> color -> brand (size reads as
+// more identity-defining there — 160/260/350/646 — than color). Shapes: shape -> color -> size ->
+// brand, since a mixed group (e.g. "Animals") should cluster same-shape items together rather than
+// interleaving them; `shape` stays the specific identity field, the Group is the broader category.
+function spItemSortComparator(kind) {
+  const n = s => s || '';
+  if (kind === 'shapes') return (a, b) => n(a.shape).localeCompare(n(b.shape)) || n(a.color).localeCompare(n(b.color)) || n(a.sizeType).localeCompare(n(b.sizeType)) || n(a.brand).localeCompare(n(b.brand));
+  if (kind === 'twisting') return (a, b) => n(a.sizeType).localeCompare(n(b.sizeType)) || n(a.color).localeCompare(n(b.color)) || n(a.brand).localeCompare(n(b.brand));
+  return (a, b) => n(a.color).localeCompare(n(b.color)) || n(a.sizeType).localeCompare(n(b.sizeType)) || n(a.brand).localeCompare(n(b.brand));
+}
+// Group is the leading grouping criteria for every Specialty Latex kind — Twisting, Linking,
+// Printed, and Shapes all share this one function now (previously Printed-only, with Shapes using
+// a separate, since-retired grouping by its own `shape` text — see spItemSortComparator's comment
+// on why `shape` stays a per-item field rather than the grouping key). Mirrors invGroupedItems's
+// {key,label,items} + "ungrouped pinned last" shape, but scoped to Specialty Latex's own state.
+// Sections sort by each group's manual order (pgMoveGroup) rather than alphabetically.
+function spGroupedItems(items, kind) {
   const byGroup = {};
   items.forEach(i => {
     const key = i.printGroupId || '(uncategorized)';
     (byGroup[key] = byGroup[key] || []).push(i);
   });
+  const orderById = {};
+  pgGroupsForKind(kind, true).forEach((g, idx) => { orderById[g.id] = idx; });
+  const comparator = spItemSortComparator(kind);
   return Object.keys(byGroup).sort((a, b) => {
     if (a === '(uncategorized)') return 1;
     if (b === '(uncategorized)') return -1;
-    const nameA = (pgFindGroup(a) || {}).name || '';
-    const nameB = (pgFindGroup(b) || {}).name || '';
-    return nameA.localeCompare(nameB);
+    return (orderById[a] ?? 999999) - (orderById[b] ?? 999999);
   }).map(key => ({
-    key: 'sp-print-group:' + key,
+    key: 'sp-group:' + key,
     label: key === '(uncategorized)' ? 'Uncategorized' : ((pgFindGroup(key) || {}).name || 'Uncategorized'),
-    items: byGroup[key],
-  }));
-}
-// Shape is the leading grouping criteria for Latex Shapes only, same {key,label,items} + sort
-// convention as spGroupedPrintedItems — but keyed directly by the plain `shape` string (Option A
-// per approval: no managed registry, unlike Print Groups). Any blank/malformed value is defensively
-// bucketed as Uncategorized rather than crashing, even though Shape is required going forward.
-function spGroupedShapesItems(items) {
-  const byShape = {};
-  items.forEach(i => {
-    const key = (i.shape && typeof i.shape === 'string' && i.shape.trim()) ? i.shape.trim() : '(uncategorized)';
-    (byShape[key] = byShape[key] || []).push(i);
-  });
-  return Object.keys(byShape).sort((a, b) => {
-    if (a === '(uncategorized)') return 1;
-    if (b === '(uncategorized)') return -1;
-    return a.localeCompare(b);
-  }).map(key => ({
-    key: 'sp-shape:' + key,
-    label: key === '(uncategorized)' ? 'Uncategorized' : key,
-    items: byShape[key],
+    items: [...byGroup[key]].sort(comparator),
   }));
 }
 // Reuses the same shared collapse-state Set Standard Latex's own groups use (invCollapsedGroups is
@@ -10812,15 +10895,15 @@ function spAddFormHtml() {
       ${d.kind === 'printed' ? `<div class="settings-field" style="margin-bottom:0"><label>Pattern/Print</label><input type="text" placeholder="e.g. Cow Print" value="${invAttr(d.pattern)}" oninput="spSetDraftField('pattern', this.value)"></div>` : ''}
       ${d.kind === 'shapes' ? `<div class="settings-field" style="margin-bottom:0"><label>Shape</label><input type="text" list="sp-shape-suggestions" placeholder="e.g. Heart" value="${invAttr(d.shape)}" oninput="spSetDraftField('shape', this.value)">${spShapeSuggestionsDatalist()}</div>` : ''}
     </div>
-    ${d.kind === 'printed' ? `<div class="settings-field">
-      <label>Print Group <span style="font-weight:400;">(optional — the broader family used for grouping, e.g. "Polka Dots")</span></label>
+    <div class="settings-field">
+      <label>Group <span style="font-weight:400;">(optional — the broader category used for organizing, e.g. "Standard 260s")</span></label>
       <select onchange="spSetDraftField('printGroupId', this.value)">
         <option value="" ${d.printGroupId === '' ? 'selected' : ''}>Uncategorized</option>
-        ${pgSortedGroups().map(g => `<option value="${invAttr(g.id)}" ${g.id === d.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+        ${pgGroupsForKind(d.kind, false).map(g => `<option value="${invAttr(g.id)}" ${g.id === d.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
         <option value="__new__" ${d.printGroupId === '__new__' ? 'selected' : ''}>+ Add new group…</option>
       </select>
       ${d.printGroupId === '__new__' ? `<input type="text" style="margin-top:6px;" placeholder="New group name" value="${invAttr(d.printGroupNewName)}" oninput="spSetDraftField('printGroupNewName', this.value)">` : ''}
-    </div>` : ''}
+    </div>
     <div class="settings-field"><label>Descriptor/Notes <span style="font-weight:400;">(optional — e.g. distinguishing two similar prints)</span></label>
       <input type="text" value="${invAttr(d.descriptor)}" oninput="spSetDraftField('descriptor', this.value)">
     </div>
@@ -10855,12 +10938,12 @@ function spItemCardHtml(item) {
   if (expanded) {
     html += `<div class="ps-job-body">`;
     if (item.descriptor) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">${psEscape(item.descriptor)}</div>`;
-    if (item.kind === 'printed') html += `<div class="row">
+    html += `<div class="row">
       <div class="settings-field" style="margin-bottom:0">
-        <label>Print Group</label>
+        <label>Group</label>
         <select onchange="spSetItemPrintGroup('${item.id}', this.value)">
           <option value="" ${!item.printGroupId ? 'selected' : ''}>Uncategorized</option>
-          ${pgSortedGroups().map(g => `<option value="${invAttr(g.id)}" ${g.id === item.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+          ${pgGroupsForKind(item.kind, false).map(g => `<option value="${invAttr(g.id)}" ${g.id === item.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
           <option value="__new__">+ Add new group…</option>
         </select>
       </div>
@@ -10902,13 +10985,9 @@ function spRenderResults() {
     root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${psEscape(spKindLabel(spKindTab).toLowerCase())} yet.</div>`;
     return;
   }
-  if (spKindTab !== 'printed' && spKindTab !== 'shapes') {
-    root.innerHTML = `<div class="inv-color-list">` + items.map(spItemCardHtml).join('') + `</div>`;
-    return;
-  }
-  // Printed Latex groups by Print Group; Latex Shapes groups by Shape — both reuse the same
-  // collapsible-section look as Standard Latex's own grouped views (.inv-group-header).
-  const groups = spKindTab === 'printed' ? spGroupedPrintedItems(items) : spGroupedShapesItems(items);
+  // Every kind groups by its own Groups now, reusing the same collapsible-section look as
+  // Standard Latex's own grouped views (.inv-group-header).
+  const groups = spGroupedItems(items, spKindTab);
   root.innerHTML = groups.map(g => {
     const collapsed = invCollapsedGroups.has(g.key);
     return `<div class="inv-group-header" onclick="spToggleGroup('${g.key}')">
@@ -10931,11 +11010,11 @@ function spRenderScreen() {
     </div>
     <button class="save-btn" onclick="spOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${psEscape(spKindLabel(spKindTab))}</button>
   </div>`;
-  if (spKindTab === 'printed') html += `<div id="sp-print-manage-root" style="margin-bottom:0.75rem;"></div>`;
+  html += `<div id="sp-manage-root" style="margin-bottom:0.75rem;"></div>`;
   if (spAddOpen) html += spAddFormHtml();
   html += `<div id="sp-results-root"></div>`;
   root.innerHTML = html;
-  if (spKindTab === 'printed') pgRenderManage();
+  pgRenderManage();
   spRenderResults();
 }
 
