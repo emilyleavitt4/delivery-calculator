@@ -959,6 +959,12 @@
   window.fbLoadPrintGroups = () => window.fbLoadSettingsDoc('printGroups');
   window.fbSavePrintGroups = (data) => window.fbSaveSettingsDoc('printGroups', data);
 
+  // Foil Phrases' business-editable phrase-name list (the "character set" for that Letters &
+  // Numbers charType) — a small free-text list, unlike the fixed A-Z/0-9 sets, so it needs its own
+  // tiny persisted doc rather than a hardcoded constant.
+  window.fbLoadFoilPhrases = () => window.fbLoadSettingsDoc('foilPhrases');
+  window.fbSaveFoilPhrases = (data) => window.fbSaveSettingsDoc('foilPhrases', data);
+
   // Guided Setup's interview progress — where the conversation is, not the actual configuration
   // it produces (that's still RECIPES/customProductionTemplates, same as a hand-edit in Settings).
   // Losing this doc only costs interview progress, never real templates.
@@ -11092,13 +11098,24 @@ let foilDecoratorSearchQuery = '';
 let foilDecoratorExpandedItem = null;
 let foilDecoratorAddOpen = false;
 let foilDecoratorAddDraft = null;
+// Letters/Numbers have a fixed, universal character set (A-Z, 0-9) that never changes. Phrases is
+// a third charType whose "character set" is instead a small, business-editable, free-text list
+// (FOIL_PHRASES, its own tiny persisted doc) — e.g. "Happy Birthday", "Congrats" — since there's no
+// fixed universal alphabet of phrase wording. foilCharsFor() is the one place that resolves either
+// kind into an array; every reader (blank quantities, group totals, the item card's grid) goes
+// through it so adding, renaming, or removing a phrase name never requires touching existing items.
 const FOIL_CHARACTERS = { letters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''), numbers: '0123456789'.split('') };
+let FOIL_PHRASES = [];
 let foilCategoryTab = 'lettersNumbers';
 let foilCharTypeTab = 'letters';
 let foilSearchQuery = '';
 let foilExpandedItem = null;
 let foilAddOpen = false;
 let foilAddDraft = null;
+
+function foilCharsFor(charType) { return charType === 'phrases' ? FOIL_PHRASES : (FOIL_CHARACTERS[charType] || []); }
+function foilCharTypeLabel(charType) { return charType === 'letters' ? 'Letters' : charType === 'numbers' ? 'Numbers' : 'Phrases'; }
+function foilCharTypeNoun(charType) { return charType === 'letters' ? 'letter' : charType === 'numbers' ? 'number' : 'phrase'; }
 
 function foilStartListeners() {
   foilRenderScreen(); // shell first, same pattern as invStartListeners/spStartListeners
@@ -11111,6 +11128,62 @@ function foilStartListeners() {
     },
     (err) => console.error('Foil items sync error:', err)
   );
+  foilPhrasesInit();
+}
+function foilPhrasesInit() {
+  window.fbLoadFoilPhrases().then(snap => {
+    if (snap.exists()) {
+      FOIL_PHRASES = snap.data().names || [];
+      foilRenderScreen();
+    }
+  }).catch(err => console.error('Foil phrases load failed:', err));
+}
+function foilPhrasesSave() {
+  window.fbSaveFoilPhrases({ names: FOIL_PHRASES }).catch(err => console.error('Foil phrases save failed:', err));
+}
+// A phrase name is free text (unlike a fixed A-Z/0-9 character), so add/rename/remove need real
+// validation/dedup/cascade logic that Letters/Numbers never needed.
+function foilAddPhraseNamePrompt() {
+  const name = prompt('New phrase (e.g. "Happy Birthday"):');
+  if (name === null) return;
+  foilAddPhraseName(name);
+}
+function foilAddPhraseName(name) {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return;
+  if (FOIL_PHRASES.some(p => p.toLowerCase() === trimmed.toLowerCase())) { alert(`"${trimmed}" is already in the list.`); return; }
+  FOIL_PHRASES.push(trimmed);
+  foilPhrasesSave();
+  foilRenderScreen();
+}
+// Renaming has to carry each existing item's stored quantity along with it — the quantity lives
+// under a `quantities[oldName]` key, so leaving that key behind would silently zero out real stock.
+function foilRenamePhraseName(oldName, newValue) {
+  const trimmed = (newValue || '').trim();
+  if (!trimmed || trimmed === oldName) { foilRenderScreen(); return; }
+  if (FOIL_PHRASES.some(p => p !== oldName && p.toLowerCase() === trimmed.toLowerCase())) { alert(`"${trimmed}" already exists.`); foilRenderScreen(); return; }
+  const idx = FOIL_PHRASES.indexOf(oldName);
+  if (idx === -1) return;
+  FOIL_PHRASES[idx] = trimmed;
+  foilPhrasesSave();
+  FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === 'phrases').forEach(item => {
+    if (Object.prototype.hasOwnProperty.call(item.quantities, oldName)) {
+      item.quantities[trimmed] = item.quantities[oldName];
+      delete item.quantities[oldName];
+      foilSaveItem(item);
+    }
+  });
+  foilRenderScreen();
+}
+// Blocked while any group still carries real stock under this name — the same "reassign/zero-out
+// first" philosophy as pgDeleteGroup, rather than silently discarding a nonzero count.
+function foilRemovePhraseName(name) {
+  const usedBy = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === 'phrases' && (i.quantities[name] || 0) > 0).length;
+  if (usedBy > 0) { alert(`"${name}" has stock recorded in ${usedBy} group${usedBy === 1 ? '' : 's'} — set those quantities to 0 first.`); return; }
+  if (!confirm(`Remove "${name}" from the Phrases list? This can't be undone.`)) return;
+  FOIL_PHRASES = FOIL_PHRASES.filter(p => p !== name);
+  foilPhrasesSave();
+  foilRenderScreen();
 }
 function psNewFoilItemId() { return 'foilitem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 function foilFindItem(id) { return FOIL_ITEMS.find(i => i.id === id) || FOIL_ITEMS_TRASHED.find(i => i.id === id); }
@@ -11122,7 +11195,7 @@ function foilSaveItem(item) {
 }
 function foilBlankQuantities(charType) {
   const q = {};
-  FOIL_CHARACTERS[charType].forEach(c => { q[c] = 0; });
+  foilCharsFor(charType).forEach(c => { q[c] = 0; });
   return q;
 }
 
@@ -11207,7 +11280,7 @@ function foilSubmitAdd() {
 
   const dup = foilFindDuplicateGroup(d.charType, size, color, brand);
   if (dup) {
-    alert(`"${size} ${color} ${d.charType === 'letters' ? 'Letters' : 'Numbers'}" already exists — opening it instead of creating another.`);
+    alert(`"${size} ${color} ${foilCharTypeLabel(d.charType)}" already exists — opening it instead of creating another.`);
     foilAddOpen = false;
     foilAddDraft = null;
     foilCharTypeTab = d.charType;
@@ -11255,7 +11328,7 @@ function foilItemLabel(item) {
     const groupName = item.printGroupId ? ((pgFindGroup(item.printGroupId) || {}).name || '') : '';
     return [item.size, item.color, groupName].filter(Boolean).join(' ');
   }
-  return `${item.size} ${item.color} ${item.charType === 'letters' ? 'Letters' : 'Numbers'}`;
+  return `${item.size} ${item.color} ${foilCharTypeLabel(item.charType)}`;
 }
 function foilDeleteItem(itemId) {
   const item = foilFindItem(itemId);
@@ -11313,7 +11386,7 @@ function foilSubmitEditDetails(itemId) {
   if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
   const dup = foilFindDuplicateGroup(item.charType, size, color, brand);
   if (dup && dup.id !== item.id) {
-    alert(`"${size} ${color} ${item.charType === 'letters' ? 'Letters' : 'Numbers'}" already exists as a separate group — edit that one instead, or change one of these fields.`);
+    alert(`"${size} ${color} ${foilCharTypeLabel(item.charType)}" already exists as a separate group — edit that one instead, or change one of these fields.`);
     return;
   }
   item.size = size;
@@ -11369,20 +11442,21 @@ function foilPermanentlyDeleteItem(itemId) {
 }
 
 function foilGroupTotal(item) {
-  return FOIL_CHARACTERS[item.charType].reduce((sum, c) => sum + (item.quantities[c] || 0), 0);
+  return foilCharsFor(item.charType).reduce((sum, c) => sum + (item.quantities[c] || 0), 0);
 }
 
 function foilAddFormHtml() {
   const d = foilAddDraft;
   return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
-      <strong style="font-size:14px;">Add ${d.charType === 'letters' ? 'Letters' : 'Numbers'} group</strong>
+      <strong style="font-size:14px;">Add ${foilCharTypeLabel(d.charType)} group</strong>
       <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
-    <div class="settings-field"><label>Letters or Numbers</label>
+    <div class="settings-field"><label>Type</label>
       <select onchange="foilSetDraftField('charType', this.value)">
         <option value="letters" ${d.charType === 'letters' ? 'selected' : ''}>Letters (A-Z)</option>
         <option value="numbers" ${d.charType === 'numbers' ? 'selected' : ''}>Numbers (0-9)</option>
+        <option value="phrases" ${d.charType === 'phrases' ? 'selected' : ''}>Phrases</option>
       </select>
     </div>
     <div class="row">
@@ -11414,7 +11488,7 @@ function foilAddFormHtml() {
 // columns on mobile to many narrow ones on desktop without two separate layouts to maintain.
 function foilItemCardHtml(item) {
   const expanded = foilExpandedItem === item.id;
-  const chars = FOIL_CHARACTERS[item.charType];
+  const chars = foilCharsFor(item.charType);
   const total = foilGroupTotal(item);
   let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
   html += `<div class="inv-color-row-header" onclick="foilToggleExpand('${item.id}')">
@@ -11427,12 +11501,26 @@ function foilItemCardHtml(item) {
   </div>`;
   if (expanded) {
     html += `<div class="ps-job-body">`;
-    html += `<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(52px, 1fr)); gap:6px; margin-bottom:0.75rem;">
-      ${chars.map(c => `<div style="text-align:center;">
-        <div style="font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:2px;">${psEscape(c)}</div>
-        <input type="number" min="0" value="${item.quantities[c] || 0}" style="width:100%; text-align:center; padding:6px 2px; font-size:14px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);" onchange="foilUpdateQuantity('${item.id}','${invAttr(c)}', this.value)">
-      </div>`).join('')}
-    </div>`;
+    // Letters/Numbers: a dense auto-fill grid (a physical count means typing ~26/10 numbers in a
+    // row). Phrases: free-text names don't fit a 52px cell, so each gets its own labeled row
+    // instead — same underlying quantities map, just a layout suited to longer strings.
+    if (chars.length === 0) {
+      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.75rem;">${item.charType === 'phrases' ? 'No phrases in the list yet — add one from the Phrases tab.' : 'No characters to count.'}</div>`;
+    } else if (item.charType === 'phrases') {
+      html += `<div style="margin-bottom:0.75rem;">
+        ${chars.map(c => `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+          <div style="flex:1; font-size:13px;">${psEscape(c)}</div>
+          <input type="number" min="0" value="${item.quantities[c] || 0}" style="width:80px; text-align:center; padding:6px 2px; font-size:14px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);" onchange="foilUpdateQuantity('${item.id}','${psJsKeyAttr(c)}', this.value)">
+        </div>`).join('')}
+      </div>`;
+    } else {
+      html += `<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(52px, 1fr)); gap:6px; margin-bottom:0.75rem;">
+        ${chars.map(c => `<div style="text-align:center;">
+          <div style="font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:2px;">${psEscape(c)}</div>
+          <input type="number" min="0" value="${item.quantities[c] || 0}" style="width:100%; text-align:center; padding:6px 2px; font-size:14px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);" onchange="foilUpdateQuantity('${item.id}','${psJsKeyAttr(c)}', this.value)">
+        </div>`).join('')}
+      </div>`;
+    }
     html += `<div class="row">
       <div class="settings-field" style="margin-bottom:0"><label>Cost per foil</label><input type="number" step="0.01" min="0" value="${item.costPerFoil == null ? '' : item.costPerFoil}" placeholder="optional" onchange="foilUpdateField('${item.id}','costPerFoil',this.value)"></div>
       <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdateField('${item.id}','storageLocation',this.value)"></div>
@@ -11453,21 +11541,39 @@ function foilRenderResults() {
   if (!root) return;
   const items = foilFilteredGroups();
   root.innerHTML = items.length === 0
-    ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${foilCharTypeTab === 'letters' ? 'letter' : 'number'} groups yet.</div>`
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${foilCharTypeNoun(foilCharTypeTab)} groups yet.</div>`
     : `<div class="inv-color-list">` + items.map(foilItemCardHtml).join('') + `</div>`;
 }
 
+// Only Phrases needs a manage panel — Letters/Numbers' character set is fixed and never edited.
+function foilPhrasesManageHtml() {
+  return `<div class="card" style="margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+      <span class="section-label" style="margin:0;">Phrase names</span>
+      <button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="foilAddPhraseNamePrompt()"><i class="fa-solid fa-plus"></i> Add phrase</button>
+    </div>
+    ${FOIL_PHRASES.length === 0
+      ? `<div style="font-size:12px; color:var(--text-secondary);">No phrases yet — add one to start tracking quantities for it.</div>`
+      : FOIL_PHRASES.map(name => `
+        <div style="display:flex; align-items:center; gap:6px; margin-bottom:0.4rem;">
+          <input type="text" style="flex:1;" value="${invAttr(name)}" onchange="foilRenamePhraseName('${psJsKeyAttr(name)}', this.value)">
+          <button class="icon-btn" style="padding:4px;" onclick="foilRemovePhraseName('${psJsKeyAttr(name)}')" aria-label="Remove phrase"><i class="fa-solid fa-trash"></i></button>
+        </div>`).join('')}
+  </div>`;
+}
 function foilRenderLettersNumbers() {
   let html = `<div class="card">
     <div class="trip-toggle" style="margin:0 0 0.6rem;">
       <button class="trip-btn ${foilCharTypeTab === 'letters' ? 'active' : ''}" onclick="foilSetCharTypeTab('letters')">Letters</button>
       <button class="trip-btn ${foilCharTypeTab === 'numbers' ? 'active' : ''}" onclick="foilSetCharTypeTab('numbers')">Numbers</button>
+      <button class="trip-btn ${foilCharTypeTab === 'phrases' ? 'active' : ''}" onclick="foilSetCharTypeTab('phrases')">Phrases</button>
     </div>
     <div class="settings-field" style="margin-bottom:0.6rem;">
       ${invSearchFieldHtml({ id: 'foil-search', placeholder: 'Search size, color, brand...', value: foilSearchQuery, onInput: 'foilSetSearch(this.value)', onClear: "foilSetSearch('')" })}
     </div>
-    <button class="save-btn" onclick="foilOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${foilCharTypeTab === 'letters' ? 'Letters' : 'Numbers'} group</button>
+    <button class="save-btn" onclick="foilOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${foilCharTypeLabel(foilCharTypeTab)} group</button>
   </div>`;
+  if (foilCharTypeTab === 'phrases') html += foilPhrasesManageHtml();
   if (foilAddOpen) html += foilAddFormHtml();
   html += `<div id="foil-ln-results-root"></div>`;
 
@@ -11481,7 +11587,7 @@ function foilRenderLettersNumbers() {
         <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
           <div style="min-width:0;">
             <div style="font-size:13px; font-weight:600;">${psEscape(item.size)} ${psEscape(item.color)}</div>
-            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'Generic/Unknown')} · ${item.charType === 'letters' ? 'Letters' : 'Numbers'}</div>
+            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'Generic/Unknown')} · ${foilCharTypeLabel(item.charType)}</div>
           </div>
           <div style="display:flex; gap:6px; flex-shrink:0;">
             <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilRestoreItem('${item.id}')">Restore</button>
