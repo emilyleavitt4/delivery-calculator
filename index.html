@@ -5903,7 +5903,8 @@ function settingsRefreshAdminSections() {
   ptRenderShell();
   tmRenderShell();
   acRenderShell();
-  pgRenderManage();
+  pgRenderManage(spKindTab);
+  pgRenderManage('foilDecoratorShapes');
   heRenderSettingsSection();
   heRenderShell();
   mstRenderManufacturersSection();
@@ -10629,7 +10630,7 @@ function pgFindByName(kind, name) {
   const norm = s => (s || '').trim().toLowerCase();
   return PRINT_GROUPS.find(g => g.kind === kind && norm(g.name) === norm(name));
 }
-function pgAddGroup(kind, name) {
+function pgAddGroup(kind, name, quantityMode) {
   const trimmed = (name || '').trim();
   if (!trimmed) return null;
   const existing = pgFindByName(kind, trimmed);
@@ -10637,9 +10638,18 @@ function pgAddGroup(kind, name) {
   const siblings = pgGroupsForKind(kind, true);
   const maxOrder = siblings.reduce((m, g) => Math.max(m, g.order || 0), -1);
   const group = { id: psNewPrintGroupId(), kind, name: trimmed, order: maxOrder + 1, active: true };
+  if (quantityMode) group.quantityMode = quantityMode;
   PRINT_GROUPS.push(group);
   pgSave();
   return group;
+}
+// Every group knows which screen/render function it belongs to (its own `kind`), so rename/move/
+// archive/restore/delete can re-render the right screen without threading a kind param through
+// every call site — only functions with no existing group to inspect (add/manage/list) need one
+// passed in explicitly.
+function pgRerenderScreenFor(kind) {
+  if (kind === 'foilDecoratorShapes') { if (typeof foilRenderScreen === 'function') foilRenderScreen(); }
+  else { spRenderResults(); }
 }
 function pgRenameGroup(id, name) {
   const group = pgFindGroup(id);
@@ -10648,8 +10658,8 @@ function pgRenameGroup(id, name) {
   if (!trimmed) return;
   group.name = trimmed;
   pgSave();
-  pgRenderManage();
-  spRenderResults();
+  pgRenderManage(group.kind);
+  pgRerenderScreenFor(group.kind);
 }
 // Swaps this group's manual order with its neighbor among ACTIVE groups of the same kind —
 // archived groups are excluded from the visible reorder list entirely.
@@ -10665,8 +10675,8 @@ function pgMoveGroup(id, direction) {
   group.order = other.order;
   other.order = tmp;
   pgSave();
-  pgRenderManage();
-  spRenderResults();
+  pgRenderManage(group.kind);
+  pgRerenderScreenFor(group.kind);
 }
 // Archive/restore is the normal lifecycle — always allowed, never destructive: an archived group
 // keeps its id/name, any item still referencing it keeps showing that name, it's just hidden from
@@ -10678,16 +10688,16 @@ function pgArchiveGroup(id) {
   if (!confirm(`Archive "${group.name}"? Items already using it keep their group — it just won't be offered for new assignments until restored.`)) return;
   group.active = false;
   pgSave();
-  pgRenderManage();
-  spRenderResults();
+  pgRenderManage(group.kind);
+  pgRerenderScreenFor(group.kind);
 }
 function pgRestoreGroup(id) {
   const group = pgFindGroup(id);
   if (!group) return;
   group.active = true;
   pgSave();
-  pgRenderManage();
-  spRenderResults();
+  pgRenderManage(group.kind);
+  pgRerenderScreenFor(group.kind);
 }
 // Permanent removal — real cleanup only, still blocked (never silently orphaning) when any item
 // still references this group, the same rule mstDeleteManufacturer already uses for a Master
@@ -10696,21 +10706,35 @@ function pgRestoreGroup(id) {
 function pgDeleteGroup(id) {
   const group = pgFindGroup(id);
   if (!group) return;
-  const usedBy = SPECIALTY_ITEMS.filter(i => i.printGroupId === id).length;
+  const items = group.kind === 'foilDecoratorShapes' ? FOIL_ITEMS : SPECIALTY_ITEMS;
+  const usedBy = items.filter(i => i.printGroupId === id).length;
   if (usedBy > 0) { alert(`"${group.name}" is used by ${usedBy} item${usedBy === 1 ? '' : 's'} — reassign those items' group first.`); return; }
   if (!confirm(`Permanently delete the "${group.name}" group? This can't be undone.`)) return;
+  const kind = group.kind;
   PRINT_GROUPS = PRINT_GROUPS.filter(g => g.id !== id);
   pgSave();
-  pgRenderManage();
+  pgRenderManage(kind);
 }
-function pgAddGroupPrompt() {
+// Only a Decorator Shapes group ever shows/uses this — set on creation (Starbursts seeds as
+// 'packages') and editable afterward. A group with no quantityMode (every Specialty Latex group,
+// forever) is simply never asked about it — foilDecoratorEffectiveMode() already treats a missing
+// value as 'individual'.
+function pgSetGroupQuantityMode(id, mode) {
+  const group = pgFindGroup(id);
+  if (!group) return;
+  group.quantityMode = mode === 'packages' ? 'packages' : 'individual';
+  pgSave();
+  pgRenderList(group.kind);
+  pgRerenderScreenFor(group.kind);
+}
+function pgAddGroupPrompt(kind) {
   const name = prompt('New group name:');
   if (name === null) return;
   const trimmed = name.trim();
   if (!trimmed) return;
-  pgAddGroup(spKindTab, trimmed);
-  pgRenderList();
-  spRenderResults();
+  pgAddGroup(kind, trimmed);
+  pgRenderList(kind);
+  pgRerenderScreenFor(kind);
 }
 function pgUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit groups:');
@@ -10723,12 +10747,12 @@ function pgLockAdmin() {
   settingsRefreshAdminSections();
 }
 let pgManageCollapsed = true;
-function pgToggleManageCollapsed() { pgManageCollapsed = !pgManageCollapsed; pgRenderManage(); }
-function pgRenderManage() {
-  const root = document.getElementById('sp-manage-root');
+function pgToggleManageCollapsed(kind) { pgManageCollapsed = !pgManageCollapsed; pgRenderManage(kind); }
+function pgRenderManage(kind) {
+  const root = document.getElementById(kind === 'foilDecoratorShapes' ? 'foil-manage-root' : 'sp-manage-root');
   if (!root) return;
   root.innerHTML = `
-    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="pgToggleManageCollapsed()">
+    <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="pgToggleManageCollapsed('${kind}')">
       <span>Groups</span>
       <i class="fa-solid fa-chevron-${pgManageCollapsed ? 'down' : 'up'}" style="color:var(--text-tertiary); font-size:11px;"></i>
     </div>
@@ -10740,21 +10764,27 @@ function pgRenderManage() {
           ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="pgLockAdmin()">Lock</button>`
           : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="pgUnlockAdmin()">Unlock</button>`}
       </div>
-      <div id="pg-list"></div>
+      <div id="${kind === 'foilDecoratorShapes' ? 'foil-group-list' : 'pg-list'}"></div>
       ${invAdminUnlocked ? `
-        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="pgAddGroupPrompt()"><i class="fa-solid fa-plus"></i> Add group</button>
-        ${spKindTab === 'printed' ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px; margin-left:8px;" onclick="pgAssimilateExistingPatterns()"><i class="fa-solid fa-wand-magic-sparkles"></i> Assimilate existing patterns</button>` : ''}
+        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="pgAddGroupPrompt('${kind}')"><i class="fa-solid fa-plus"></i> Add group</button>
+        ${kind === 'printed' ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px; margin-left:8px;" onclick="pgAssimilateExistingPatterns()"><i class="fa-solid fa-wand-magic-sparkles"></i> Assimilate existing patterns</button>` : ''}
       ` : ''}
     </div>`}
   `;
-  pgRenderList();
+  pgRenderList(kind);
 }
-function pgRenderList() {
-  const container = document.getElementById('pg-list');
+function pgRenderList(kind) {
+  const container = document.getElementById(kind === 'foilDecoratorShapes' ? 'foil-group-list' : 'pg-list');
   if (!container) return;
-  const active = pgGroupsForKind(spKindTab, false);
-  const archived = pgGroupsForKind(spKindTab, true).filter(g => g.active === false);
-  const countFor = (id) => SPECIALTY_ITEMS.filter(i => i.printGroupId === id).length;
+  const active = pgGroupsForKind(kind, false);
+  const archived = pgGroupsForKind(kind, true).filter(g => g.active === false);
+  const items = kind === 'foilDecoratorShapes' ? FOIL_ITEMS : SPECIALTY_ITEMS;
+  const countFor = (id) => items.filter(i => i.printGroupId === id).length;
+  const quantityModeSelectHtml = (g) => kind !== 'foilDecoratorShapes' ? '' : `
+      <select style="flex-shrink:0; font-size:11px; width:auto;" ${invAdminUnlocked ? '' : 'disabled'} onchange="pgSetGroupQuantityMode('${g.id}', this.value)">
+        <option value="individual" ${g.quantityMode !== 'packages' ? 'selected' : ''}>Individual</option>
+        <option value="packages" ${g.quantityMode === 'packages' ? 'selected' : ''}>Packages</option>
+      </select>`;
   if (active.length === 0 && archived.length === 0) {
     container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary);">No groups yet.</div>`;
     return;
@@ -10763,6 +10793,7 @@ function pgRenderList() {
     const count = countFor(g.id);
     return `<div style="display:flex; align-items:center; gap:6px; margin-bottom:0.5rem;">
       <input type="text" style="flex:1;" value="${invAttr(g.name)}" ${invAdminUnlocked ? '' : 'disabled'} onchange="pgRenameGroup('${g.id}', this.value)">
+      ${quantityModeSelectHtml(g)}
       <span style="font-size:11px; color:var(--text-secondary); flex-shrink:0;">${count} item${count === 1 ? '' : 's'}</span>
       ${invAdminUnlocked ? `
         <button class="icon-btn" style="padding:4px; ${idx === 0 ? 'opacity:0.3;' : ''}" ${idx === 0 ? 'disabled' : ''} onclick="pgMoveGroup('${g.id}','up')" aria-label="Move up"><i class="fa-solid fa-arrow-up"></i></button>
@@ -11014,7 +11045,7 @@ function spRenderScreen() {
   if (spAddOpen) html += spAddFormHtml();
   html += `<div id="sp-results-root"></div>`;
   root.innerHTML = html;
-  pgRenderManage();
+  pgRenderManage(spKindTab);
   spRenderResults();
 }
 
@@ -11025,17 +11056,42 @@ function spRenderScreen() {
 // so nothing here can affect either. Letters & Numbers is a GROUPED record — one doc per
 // size+color+brand combination holding a per-character quantities map — rather than one doc per
 // character, matching the exact pattern Standard Latex already uses (one item, a nested map keyed
-// by a sub-identifier: size there, character here). Decorator Shapes and Themed Foils will be
-// flat single-quantity records instead (like Specialty Latex), sharing this same collection via
-// the `category` discriminator, but are not built yet — their tabs are inert placeholders.
-// Quantity edits are plain saves for now, exactly like Specialty Latex Phase 1 — no ledger yet.
+// by a sub-identifier: size there, character here). Decorator Shapes is a flat single-quantity
+// record instead (like Specialty Latex), sharing this same collection via the `category`
+// discriminator, and reuses the same Groups system built for Specialty Latex (PRINT_GROUPS) under
+// its own `kind: 'foilDecoratorShapes'` — including a per-Group `quantityMode` ('individual' |
+// 'packages') Specialty Latex groups never use. Themed Foils is not built yet — its tab is an
+// inert placeholder. Quantity edits are plain saves, exactly like Specialty Latex Phase 1 — no
+// ledger yet for either Foil category.
 let FOIL_ITEMS = [];
 let FOIL_ITEMS_TRASHED = [];
 const FOIL_CATEGORIES = [
   { id: 'lettersNumbers', label: 'Letters & Numbers', soon: false },
-  { id: 'decoratorShapes', label: 'Decorator Shapes', soon: true },
+  { id: 'decoratorShapes', label: 'Decorator Shapes', soon: false },
   { id: 'themed', label: 'Themed Foils', soon: true },
 ];
+// Starter Decorator Shapes groups, seeded once (the first time the category is opened with zero
+// groups already present) — business-editable/renameable/archiveable afterward like any group,
+// never re-seeded once at least one exists. Starbursts is the one group that ships as
+// package-tracked; everything else defaults to individual, matching the approved architecture.
+const FOIL_DECORATOR_GROUP_SEED = [
+  { name: 'Starbursts', quantityMode: 'packages' },
+  { name: 'Circles' }, { name: 'Hearts' }, { name: 'Magic Stars' },
+  { name: 'Bobo Standard' }, { name: 'Bobo Jumbo' }, { name: 'Cubez / Diamonds' },
+  { name: 'Crescents' }, { name: 'Stars Mini' }, { name: 'Stars Standard' },
+  { name: 'Stars Jumbo' }, { name: 'Stars Colored' }, { name: 'Orbz Standard' },
+  { name: 'Orbz Jumbo' }, { name: 'Orbz Print' }, { name: 'Starpoint Mini' },
+  { name: 'Starpoint Standard' }, { name: 'Starpoint Jumbo' }, { name: 'Curves' },
+  { name: 'Squares' },
+];
+function foilEnsureDecoratorGroupsSeeded() {
+  if (pgGroupsForKind('foilDecoratorShapes', true).length > 0) return;
+  FOIL_DECORATOR_GROUP_SEED.forEach(({ name, quantityMode }) => pgAddGroup('foilDecoratorShapes', name, quantityMode));
+}
+let foilDecoratorSearchQuery = '';
+let foilDecoratorExpandedItem = null;
+let foilDecoratorAddOpen = false;
+let foilDecoratorAddDraft = null;
 const FOIL_CHARACTERS = { letters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''), numbers: '0123456789'.split('') };
 let foilCategoryTab = 'lettersNumbers';
 let foilCharTypeTab = 'letters';
@@ -11092,6 +11148,15 @@ function foilSetCategoryTab(cat) {
   if (c && c.soon) { alert(`${c.label} is coming in a later phase.`); return; }
   foilCategoryTab = cat;
   foilExpandedItem = null;
+  foilDecoratorExpandedItem = null;
+  if (cat === 'decoratorShapes') {
+    foilEnsureDecoratorGroupsSeeded();
+    // Default every Decorator Shapes group section to collapsed on opening the category, same
+    // convention as Standard/Specialty Latex's groups (seeded once on tab entry, not on every
+    // render, so an in-visit expand/collapse choice isn't overwritten by an unrelated re-render).
+    pgGroupsForKind('foilDecoratorShapes', true).forEach(g => invCollapsedGroups.add('foil-group:' + g.id));
+    invCollapsedGroups.add('foil-group:(uncategorized)');
+  }
   foilRenderScreen();
 }
 function foilSetCharTypeTab(charType) {
@@ -11185,12 +11250,20 @@ function foilUpdateQuantity(itemId, character, value) {
 // Delete/restore/permanent-delete mirrors invDeleteColor/invRestoreItem/invPermanentlyDeleteItem
 // exactly — soft delete by default (deletedAt + move to a trashed array), always recoverable from
 // Recently Deleted, with a typed-confirmation permanent option as the one true dead end.
+function foilItemLabel(item) {
+  if (item.category === 'decoratorShapes') {
+    const groupName = item.printGroupId ? ((pgFindGroup(item.printGroupId) || {}).name || '') : '';
+    return [item.size, item.color, groupName].filter(Boolean).join(' ');
+  }
+  return `${item.size} ${item.color} ${item.charType === 'letters' ? 'Letters' : 'Numbers'}`;
+}
 function foilDeleteItem(itemId) {
   const item = foilFindItem(itemId);
   if (!item) return;
-  const label = `${item.size} ${item.color} ${item.charType === 'letters' ? 'Letters' : 'Numbers'}`;
+  const label = foilItemLabel(item);
   if (!confirm(`Move "${label}" to Recently Deleted? You can restore it from there anytime.`)) return;
   if (foilExpandedItem === itemId) foilExpandedItem = null;
+  if (foilDecoratorExpandedItem === itemId) foilDecoratorExpandedItem = null;
   item.deletedAt = Date.now();
   foilSaveItem(item);
   FOIL_ITEMS = FOIL_ITEMS.filter(i => i.id !== itemId);
@@ -11420,6 +11493,421 @@ function foilRenderLettersNumbers() {
   return html;
 }
 
+// ── Decorator Shapes: flat single-quantity records, grouped by the shared Groups system ──
+// No separate `shape` field — unlike Latex Shapes, the assigned Group IS the shape identity here
+// (e.g. "Hearts"), per the approved field list (Group, Brand, Color, Size, Condition, Storage
+// Location, Notes, Quantity — nothing else). Condition is part of identity (Option A): the same
+// shape can exist as separate Inflated and Uninflated records with independent quantities/storage.
+function foilDecoratorKnownSizes() {
+  const used = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes').map(i => i.size).filter(Boolean);
+  return [...new Set(['Mini', 'Small', 'Large', ...used])];
+}
+// Effective quantity mode: an Inflated record is always individual, regardless of its Group's own
+// setting — "an inflated Starburst is no longer sitting in a package," per the explicit rule.
+function foilDecoratorEffectiveMode(item) {
+  if (item.condition === 'inflated') return 'individual';
+  const group = item.printGroupId ? pgFindGroup(item.printGroupId) : null;
+  return group && group.quantityMode === 'packages' ? 'packages' : 'individual';
+}
+function foilDecoratorDraftEffectiveMode(d) {
+  if (d.condition === 'inflated') return 'individual';
+  if (!d.printGroupId || d.printGroupId === '__new__') return 'individual';
+  const group = pgFindGroup(d.printGroupId);
+  return group && group.quantityMode === 'packages' ? 'packages' : 'individual';
+}
+// Identity = Group + Brand + Color + Size + Condition — the same real physical shape shouldn't get
+// a second competing record just because someone re-typed a field slightly differently, but two
+// different Groups (or two different Conditions) sharing brand/color/size are genuinely distinct.
+function foilDecoratorFindCollision(printGroupId, brand, color, size, condition, excludeId) {
+  const norm = s => (s || '').trim().toLowerCase();
+  return FOIL_ITEMS.find(i => i.id !== excludeId && i.category === 'decoratorShapes' &&
+    (i.printGroupId || null) === (printGroupId || null) &&
+    norm(i.brand) === norm(brand) && norm(i.color) === norm(color) && norm(i.size) === norm(size) &&
+    (i.condition || 'uninflated') === (condition || 'uninflated'));
+}
+function foilDecoratorSortComparator() {
+  const n = s => s || '';
+  return (a, b) => n(a.color).localeCompare(n(b.color)) || n(a.size).localeCompare(n(b.size)) || n(a.brand).localeCompare(n(b.brand));
+}
+// Mirrors spGroupedItems's {key,label,items} shape (sections ordered by each group's manual order,
+// Uncategorized pinned last) against FOIL_ITEMS/foilDecoratorSortComparator instead.
+function foilGroupedDecoratorItems(items) {
+  const byGroup = {};
+  items.forEach(i => { const key = i.printGroupId || '(uncategorized)'; (byGroup[key] = byGroup[key] || []).push(i); });
+  const orderById = {};
+  pgGroupsForKind('foilDecoratorShapes', true).forEach((g, idx) => { orderById[g.id] = idx; });
+  const comparator = foilDecoratorSortComparator();
+  return Object.keys(byGroup).sort((a, b) => {
+    if (a === '(uncategorized)') return 1;
+    if (b === '(uncategorized)') return -1;
+    return (orderById[a] ?? 999999) - (orderById[b] ?? 999999);
+  }).map(key => ({
+    key: 'foil-group:' + key,
+    label: key === '(uncategorized)' ? 'Uncategorized' : ((pgFindGroup(key) || {}).name || 'Uncategorized'),
+    items: [...byGroup[key]].sort(comparator),
+  }));
+}
+function foilToggleDecoratorGroup(key) {
+  if (invCollapsedGroups.has(key)) invCollapsedGroups.delete(key);
+  else invCollapsedGroups.add(key);
+  foilRenderDecoratorResults();
+}
+function foilSetDecoratorSearch(q) { foilDecoratorSearchQuery = q; foilRenderDecoratorResults(); }
+function foilToggleDecoratorExpand(id) { foilDecoratorExpandedItem = foilDecoratorExpandedItem === id ? null : id; foilRenderDecoratorResults(); }
+function foilDecoratorFilteredItems() {
+  const q = foilDecoratorSearchQuery.trim().toLowerCase();
+  const items = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes');
+  if (!q) return items;
+  return items.filter(i => [i.brand, i.color, i.size, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)));
+}
+
+function foilOpenDecoratorAdd() {
+  foilDecoratorAddOpen = true;
+  foilDecoratorAddDraft = {
+    printGroupId: '', printGroupNewName: '',
+    brand: '', brandOther: '',
+    color: '', size: '',
+    condition: 'uninflated',
+    storageLocation: '', notes: '',
+    quantity: 0, packagesFull: 0, hasPartialPackage: false,
+  };
+  foilRenderScreen();
+}
+function foilCancelDecoratorAdd() { foilDecoratorAddOpen = false; foilDecoratorAddDraft = null; foilRenderScreen(); }
+function foilSetDecoratorDraftField(field, value) {
+  if (!foilDecoratorAddDraft) return;
+  foilDecoratorAddDraft[field] = value;
+  // Brand ("Other"), Group ("+ Add new") and Condition (flips the effective quantity mode) all
+  // change what the freshly-rendered form needs to show.
+  if (field === 'brand' || field === 'printGroupId' || field === 'condition') foilRenderScreen();
+}
+function foilSubmitDecoratorAdd() {
+  if (!foilDecoratorAddDraft) return;
+  const d = foilDecoratorAddDraft;
+  if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
+  const brand = resolveBrandValue(d.brand, d.brandOther);
+  if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
+  const color = (d.color || '').trim();
+  if (!color) { alert('Enter a color.'); return; }
+  const size = (d.size || '').trim();
+  if (!size) { alert('Enter a size.'); return; }
+  const condition = d.condition === 'inflated' ? 'inflated' : 'uninflated';
+
+  let printGroupId = null;
+  if (d.printGroupId === '__new__') {
+    const name = (d.printGroupNewName || '').trim();
+    if (!name) { alert('Type a name for the new group, or choose an existing one.'); return; }
+    printGroupId = pgAddGroup('foilDecoratorShapes', name).id;
+  } else if (d.printGroupId) {
+    printGroupId = d.printGroupId;
+  }
+
+  const dup = foilDecoratorFindCollision(printGroupId, brand, color, size, condition, null);
+  if (dup) {
+    alert(`${condition === 'inflated' ? 'An' : 'A'} ${condition} item with this Group/Brand/Color/Size already exists — opening it instead of creating another.`);
+    foilDecoratorAddOpen = false;
+    foilDecoratorAddDraft = null;
+    foilDecoratorExpandedItem = dup.id;
+    foilRenderScreen();
+    return;
+  }
+
+  const group = printGroupId ? pgFindGroup(printGroupId) : null;
+  const effectiveMode = condition === 'inflated' ? 'individual' : (group && group.quantityMode === 'packages' ? 'packages' : 'individual');
+
+  const item = {
+    id: psNewFoilItemId(),
+    category: 'decoratorShapes',
+    printGroupId,
+    brand, color, size, condition,
+    storageLocation: (d.storageLocation || '').trim(),
+    notes: (d.notes || '').trim(),
+    quantity: effectiveMode === 'individual' ? (parseInt(d.quantity, 10) || 0) : 0,
+    packagesFull: effectiveMode === 'packages' ? (parseInt(d.packagesFull, 10) || 0) : 0,
+    hasPartialPackage: effectiveMode === 'packages' ? !!d.hasPartialPackage : false,
+    active: true,
+  };
+  FOIL_ITEMS.push(item);
+  foilSaveItem(item);
+  foilDecoratorAddOpen = false;
+  foilDecoratorAddDraft = null;
+  foilDecoratorExpandedItem = item.id;
+  foilRenderScreen();
+}
+// Plain saves, matching Specialty Latex/Letters & Numbers — no ledger for Decorator Shapes either.
+function foilUpdateDecoratorField(itemId, field, value) {
+  const item = foilFindItem(itemId);
+  if (!item) return;
+  if (field === 'quantity' || field === 'packagesFull') item[field] = parseInt(value, 10) || 0;
+  else if (field === 'hasPartialPackage') item[field] = !!value;
+  else item[field] = value;
+  foilSaveItem(item);
+  foilRenderDecoratorResults();
+}
+// Group stays directly editable in the expanded card (not behind Edit Details), same precedent as
+// Specialty Latex's Print Group selector — organizational, doesn't affect quantity/identity math
+// beyond determining the effective quantity mode, which this re-render needs to pick up.
+function foilSetDecoratorItemGroup(itemId, value) {
+  const item = foilFindItem(itemId);
+  if (!item) return;
+  if (value === '__new__') {
+    const name = prompt('New group name:');
+    if (name === null || !name.trim()) { foilRenderDecoratorResults(); return; }
+    item.printGroupId = pgAddGroup('foilDecoratorShapes', name.trim()).id;
+  } else {
+    item.printGroupId = value || null;
+  }
+  foilSaveItem(item);
+  foilRenderDecoratorResults();
+}
+// ── Edit Details: Brand/Color/Size/Condition — the fundamental identifying fields, Group excluded
+// per the above (matching Specialty Latex's "Print Group stays directly editable" precedent). ──
+let foilDecoratorEditDetailsItemId = null;
+let foilDecoratorEditDetailsDraft = null;
+function foilOpenDecoratorEditDetails(itemId) {
+  const item = foilFindItem(itemId);
+  if (!item) return;
+  const options = foilBrandOptions();
+  const isKnownBrand = options.includes(item.brand);
+  foilDecoratorEditDetailsItemId = itemId;
+  foilDecoratorEditDetailsDraft = {
+    brand: isKnownBrand ? item.brand : 'Other',
+    brandOther: isKnownBrand ? '' : (item.brand || ''),
+    color: item.color || '',
+    size: item.size || '',
+    condition: item.condition === 'inflated' ? 'inflated' : 'uninflated',
+  };
+  foilRenderDecoratorResults();
+}
+function foilCancelDecoratorEditDetails() {
+  foilDecoratorEditDetailsItemId = null;
+  foilDecoratorEditDetailsDraft = null;
+  foilRenderDecoratorResults();
+}
+function foilSetDecoratorEditDetailsField(field, value) {
+  if (!foilDecoratorEditDetailsDraft) return;
+  foilDecoratorEditDetailsDraft[field] = value;
+  if (field === 'brand') foilRenderDecoratorResults();
+}
+function foilSubmitDecoratorEditDetails(itemId) {
+  const item = foilFindItem(itemId);
+  if (!item || !foilDecoratorEditDetailsDraft) return;
+  const d = foilDecoratorEditDetailsDraft;
+  if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
+  const brand = resolveBrandValue(d.brand, d.brandOther);
+  if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
+  const color = (d.color || '').trim();
+  if (!color) { alert('Enter a color.'); return; }
+  const size = (d.size || '').trim();
+  if (!size) { alert('Enter a size.'); return; }
+  const condition = d.condition === 'inflated' ? 'inflated' : 'uninflated';
+  const collision = foilDecoratorFindCollision(item.printGroupId, brand, color, size, condition, item.id);
+  if (collision) { alert('This would collide with an existing item in the same Group. Edit that one instead, or change one of these fields.'); return; }
+  const modeBefore = foilDecoratorEffectiveMode(item);
+  item.brand = brand;
+  item.color = color;
+  item.size = size;
+  item.condition = condition;
+  const modeAfter = foilDecoratorEffectiveMode(item);
+  // Switching Condition can flip the effective mode (e.g. Uninflated-packages -> Inflated-
+  // individual) — reset whichever fields no longer apply so a stale packages count never
+  // silently reappears as an individual quantity (or vice versa) later.
+  if (modeBefore !== modeAfter) {
+    if (modeAfter === 'individual') { item.packagesFull = 0; item.hasPartialPackage = false; }
+    else { item.quantity = 0; }
+  }
+  foilSaveItem(item);
+  foilDecoratorEditDetailsItemId = null;
+  foilDecoratorEditDetailsDraft = null;
+  foilRenderDecoratorResults();
+}
+function foilDecoratorEditDetailsFormHtml(item) {
+  const d = foilDecoratorEditDetailsDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.5rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Edit Details</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelDecoratorEditDetails()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Color</label>
+        <input type="text" list="foil-color-suggestions" value="${invAttr(d.color)}" oninput="foilSetDecoratorEditDetailsField('color', this.value)">
+      </div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Size</label>
+        <input type="text" list="foil-decorator-size-suggestions" value="${invAttr(d.size)}" oninput="foilSetDecoratorEditDetailsField('size', this.value)">
+      </div>
+    </div>
+    <div class="settings-field">
+      <label>Brand</label>
+      ${brandSelectorHtml({ options: foilBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "foilSetDecoratorEditDetailsField('brand', this.value)", onOtherInput: "foilSetDecoratorEditDetailsField('brandOther', this.value)" })}
+    </div>
+    <div class="settings-field">
+      <label>Condition</label>
+      <select onchange="foilSetDecoratorEditDetailsField('condition', this.value)">
+        <option value="uninflated" ${d.condition !== 'inflated' ? 'selected' : ''}>Uninflated</option>
+        <option value="inflated" ${d.condition === 'inflated' ? 'selected' : ''}>Inflated</option>
+      </select>
+    </div>
+    <button class="save-btn" onclick="foilSubmitDecoratorEditDetails('${item.id}')">Save Details</button>
+  </div>`;
+}
+
+function foilDecoratorAddFormHtml() {
+  const d = foilDecoratorAddDraft;
+  const mode = foilDecoratorDraftEffectiveMode(d);
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Add Decorator Shape</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelDecoratorAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field">
+      <label>Group <span style="font-weight:400;">(the shape category, e.g. "Hearts" or "Starbursts")</span></label>
+      <select onchange="foilSetDecoratorDraftField('printGroupId', this.value)">
+        <option value="" ${d.printGroupId === '' ? 'selected' : ''}>Uncategorized</option>
+        ${pgGroupsForKind('foilDecoratorShapes', false).map(g => `<option value="${invAttr(g.id)}" ${g.id === d.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+        <option value="__new__" ${d.printGroupId === '__new__' ? 'selected' : ''}>+ Add new group…</option>
+      </select>
+      ${d.printGroupId === '__new__' ? `<input type="text" style="margin-top:6px;" placeholder="New group name" value="${invAttr(d.printGroupNewName)}" oninput="foilSetDecoratorDraftField('printGroupNewName', this.value)">` : ''}
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Brand</label>
+        ${brandSelectorHtml({ options: foilBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "foilSetDecoratorDraftField('brand', this.value)", onOtherInput: "foilSetDecoratorDraftField('brandOther', this.value)" })}
+      </div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Color</label>
+        <input type="text" list="foil-color-suggestions" placeholder="e.g. Silver" value="${invAttr(d.color)}" oninput="foilSetDecoratorDraftField('color', this.value)">
+      </div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Size</label>
+        <input type="text" list="foil-decorator-size-suggestions" placeholder="e.g. Small" value="${invAttr(d.size)}" oninput="foilSetDecoratorDraftField('size', this.value)">
+        <datalist id="foil-decorator-size-suggestions">${foilDecoratorKnownSizes().map(s => `<option value="${invAttr(s)}">`).join('')}</datalist>
+      </div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>Condition</label>
+        <select onchange="foilSetDecoratorDraftField('condition', this.value)">
+          <option value="uninflated" ${d.condition !== 'inflated' ? 'selected' : ''}>Uninflated</option>
+          <option value="inflated" ${d.condition === 'inflated' ? 'selected' : ''}>Inflated</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location <span style="font-weight:400;">(optional)</span></label><input type="text" placeholder="e.g. Garage ceiling" value="${invAttr(d.storageLocation)}" oninput="foilSetDecoratorDraftField('storageLocation', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Notes <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.notes)}" oninput="foilSetDecoratorDraftField('notes', this.value)"></div>
+    </div>
+    ${mode === 'packages' ? `
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Full packages</label><input type="number" min="0" value="${d.packagesFull}" oninput="foilSetDecoratorDraftField('packagesFull', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0; display:flex; align-items:flex-end;">
+        <label style="display:flex; align-items:center; gap:6px; font-weight:400;"><input type="checkbox" ${d.hasPartialPackage ? 'checked' : ''} onchange="foilSetDecoratorDraftField('hasPartialPackage', this.checked)"> Plus a half package</label>
+      </div>
+    </div>` : `
+    <div class="settings-field"><label>Quantity</label><input type="number" min="0" value="${d.quantity}" oninput="foilSetDecoratorDraftField('quantity', this.value)"></div>`}
+    <button class="save-btn" onclick="foilSubmitDecoratorAdd()">Save item</button>
+  </div>`;
+}
+
+function foilDecoratorItemCardHtml(item) {
+  const expanded = foilDecoratorExpandedItem === item.id;
+  const mode = foilDecoratorEffectiveMode(item);
+  const displayQty = mode === 'packages'
+    ? `${item.packagesFull || 0}${item.hasPartialPackage ? ' + ½' : ''}`
+    : `${item.quantity || 0}`;
+  const isZero = mode === 'packages' ? (!item.packagesFull && !item.hasPartialPackage) : !item.quantity;
+  let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
+  html += `<div class="inv-color-row-header" onclick="foilToggleDecoratorExpand('${item.id}')">
+    <div class="inv-color-row-text">
+      <div class="inv-color-row-name">${psEscape(item.size)} ${psEscape(item.color)} ${item.condition === 'inflated' ? '<span style="font-size:11px; font-weight:600; color:var(--info-text);">(Inflated)</span>' : ''}</div>
+      <div class="inv-color-row-brand">${psEscape(item.brand || 'Generic/Unknown')}${item.storageLocation ? ' · ' + psEscape(item.storageLocation) : ''}</div>
+    </div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${isZero ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${isZero ? 'var(--accent)' : 'var(--info-text)'};">${displayQty}</div>
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+  </div>`;
+  if (expanded) {
+    html += `<div class="ps-job-body">`;
+    if (item.notes) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">${psEscape(item.notes)}</div>`;
+    html += `<div class="settings-field">
+      <label>Group</label>
+      <select onchange="foilSetDecoratorItemGroup('${item.id}', this.value)">
+        <option value="" ${!item.printGroupId ? 'selected' : ''}>Uncategorized</option>
+        ${pgGroupsForKind('foilDecoratorShapes', false).map(g => `<option value="${invAttr(g.id)}" ${g.id === item.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+        <option value="__new__">+ Add new group…</option>
+      </select>
+    </div>`;
+    html += mode === 'packages' ? `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Full packages</label><input type="number" min="0" value="${item.packagesFull || 0}" onchange="foilUpdateDecoratorField('${item.id}','packagesFull',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0; display:flex; align-items:flex-end;">
+        <label style="display:flex; align-items:center; gap:6px; font-weight:400;"><input type="checkbox" ${item.hasPartialPackage ? 'checked' : ''} onchange="foilUpdateDecoratorField('${item.id}','hasPartialPackage',this.checked)"> Plus a half package</label>
+      </div>
+    </div>` : `<div class="settings-field"><label>Quantity</label><input type="number" min="0" value="${item.quantity || 0}" onchange="foilUpdateDecoratorField('${item.id}','quantity',this.value)"></div>`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdateDecoratorField('${item.id}','storageLocation',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="foilUpdateDecoratorField('${item.id}','notes',this.value)"></div>
+    </div>`;
+    html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenDecoratorEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+    </div>`;
+    if (foilDecoratorEditDetailsItemId === item.id) html += foilDecoratorEditDetailsFormHtml(item);
+    html += `</div>`; // ps-job-body
+  }
+  html += `</div>`; // inv-color-row
+  return html;
+}
+
+function foilRenderDecoratorResults() {
+  const root = document.getElementById('foil-decorator-results-root');
+  if (!root) return;
+  const items = foilDecoratorFilteredItems();
+  if (items.length === 0) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No Decorator Shapes yet.</div>`;
+    return;
+  }
+  const groups = foilGroupedDecoratorItems(items);
+  root.innerHTML = groups.map(g => {
+    const collapsed = invCollapsedGroups.has(g.key);
+    return `<div class="inv-group-header" onclick="foilToggleDecoratorGroup('${g.key}')">
+      <span>${psEscape(g.label)} (${g.items.length})</span>
+      <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+    </div>
+    ${collapsed ? '' : `<div class="inv-color-list">` + g.items.map(foilDecoratorItemCardHtml).join('') + `</div>`}`;
+  }).join('');
+}
+
+function foilRenderDecoratorShapes() {
+  let html = `<div class="card">
+    <div class="settings-field" style="margin-bottom:0.6rem;">
+      ${invSearchFieldHtml({ id: 'foil-decorator-search', placeholder: 'Search brand, color, size, storage...', value: foilDecoratorSearchQuery, onInput: 'foilSetDecoratorSearch(this.value)', onClear: "foilSetDecoratorSearch('')" })}
+    </div>
+    <button class="save-btn" onclick="foilOpenDecoratorAdd()"><i class="fa-solid fa-plus"></i> Add Decorator Shape</button>
+  </div>`;
+  html += `<div id="foil-manage-root" style="margin-bottom:0.75rem;"></div>`;
+  if (foilDecoratorAddOpen) html += foilDecoratorAddFormHtml();
+  html += `<div id="foil-decorator-results-root"></div>`;
+
+  const trashed = FOIL_ITEMS_TRASHED.filter(i => i.category === 'decoratorShapes');
+  if (trashed.length > 0) {
+    html += `<div class="section-label">Recently deleted (${trashed.length})</div>
+    <div class="card">
+      ${trashed.map(item => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:600;">${psEscape(foilItemLabel(item))}</div>
+            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'Generic/Unknown')}${item.condition === 'inflated' ? ' · Inflated' : ''}</div>
+          </div>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilRestoreItem('${item.id}')">Restore</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="foilPermanentlyDeleteItem('${item.id}')">Delete forever</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
+  return html;
+}
+
 function foilRenderScreen() {
   const root = document.getElementById('inv-foil-root');
   if (!root) return;
@@ -11430,11 +11918,14 @@ function foilRenderScreen() {
   </div>`;
   if (foilCategoryTab === 'lettersNumbers') {
     html += foilRenderLettersNumbers();
+  } else if (foilCategoryTab === 'decoratorShapes') {
+    html += foilRenderDecoratorShapes();
   } else {
     html += `<div class="card" style="text-align:center; color:var(--text-secondary);">${psEscape((FOIL_CATEGORIES.find(c => c.id === foilCategoryTab) || {}).label || '')} is coming in a later phase.</div>`;
   }
   root.innerHTML = html;
   if (foilCategoryTab === 'lettersNumbers') foilRenderResults();
+  else if (foilCategoryTab === 'decoratorShapes') { pgRenderManage('foilDecoratorShapes'); foilRenderDecoratorResults(); }
 }
 
 // ═══════════════════════════════════════ BBT MASTER COLOR CATALOG ═══════════════════════════════════════
