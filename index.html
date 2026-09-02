@@ -10288,7 +10288,20 @@ function spShapeSuggestionsDatalist() {
   return `<datalist id="sp-shape-suggestions">${spKnownShapes().map(s => `<option value="${invAttr(s)}">`).join('')}</datalist>`;
 }
 
-function spSetKindTab(kind) { spKindTab = kind; spExpandedItem = null; spRenderScreen(); }
+function spSetKindTab(kind) {
+  spKindTab = kind;
+  spExpandedItem = null;
+  // Print Group / Shape sections default to collapsed each time this tab is opened, matching the
+  // general BBT convention — seeded here (once, on entering the tab) rather than on every render,
+  // so a user's own expand/collapse choice made during this visit isn't fought by a later
+  // re-render (e.g. after editing an item elsewhere in the same group).
+  if (kind === 'printed' || kind === 'shapes') {
+    const items = SPECIALTY_ITEMS.filter(i => (i.kind || 'twisting') === kind);
+    const groups = kind === 'printed' ? spGroupedPrintedItems(items) : spGroupedShapesItems(items);
+    groups.forEach(g => invCollapsedGroups.add(g.key));
+  }
+  spRenderScreen();
+}
 function spSetSearch(q) { spSearchQuery = q; spRenderResults(); }
 function spToggleExpand(id) { spExpandedItem = spExpandedItem === id ? null : id; spRenderResults(); }
 
