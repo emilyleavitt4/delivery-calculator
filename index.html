@@ -6453,15 +6453,50 @@ function invApplyInventoryTransactions(entries) {
       const sd = item.sizes[e.size];
       const previousBalance = sd.backstock || 0;
       let delta, balloonsUsed = null, perBagAtTime = null, remainderBefore = null, remainderAfter = null;
+      let looseBefore = null, looseAfter = null;
       if (typeof e.balloonsUsed === 'number') {
-        const existingRemainder = sd.usageRemainder || 0;
-        const converted = invBalloonsToStandardUnits(existingRemainder, e.balloonsUsed, sd.perBag, trackingUnit);
-        delta = -converted.unitsConsumed;
+        // Loose-first consumption: known loose balloons (a real physical partial bag — see
+        // looseBalloons) are used before BBT assumes another sealed Standard Package is being
+        // opened. Only the shortfall, if any, goes through the existing usageRemainder
+        // accumulator — usageRemainder is untouched whenever loose stock covers the pull outright.
+        // These two fields are deliberately never combined into one number: looseBalloons is a
+        // known physical asset, usageRemainder is consumption not yet docked from Backstock —
+        // conflating them would make an in-between value ambiguous between the two.
+        const existingLoose = sd.looseBalloons || 0;
+        const usedFromLoose = Math.min(existingLoose, e.balloonsUsed);
+        const remainingToConsume = e.balloonsUsed - usedFromLoose;
+        looseBefore = existingLoose;
+        sd.looseBalloons = existingLoose - usedFromLoose;
+        looseAfter = sd.looseBalloons;
         balloonsUsed = e.balloonsUsed;
         perBagAtTime = sd.perBag || null;
-        remainderBefore = existingRemainder;
-        remainderAfter = converted.newRemainder;
-        sd.usageRemainder = converted.newRemainder;
+        if (remainingToConsume > 0) {
+          const existingRemainder = sd.usageRemainder || 0;
+          const converted = invBalloonsToStandardUnits(existingRemainder, remainingToConsume, sd.perBag, trackingUnit);
+          delta = -converted.unitsConsumed;
+          remainderBefore = existingRemainder;
+          remainderAfter = converted.newRemainder;
+          sd.usageRemainder = converted.newRemainder;
+        } else {
+          delta = 0; // fully covered by loose stock — Backstock and usageRemainder untouched
+        }
+      } else if (typeof e.looseBalloonsReceived === 'number') {
+        // Receive in individual balloons: adds to known loose stock (never usageRemainder, which
+        // is a consumption concept, not a receiving one), auto-consolidating into a whole
+        // Standard Package the moment the total crosses one — same floor/modulo split
+        // invBalloonsToStandardUnits uses, applied to this separate, asset-side field.
+        const perBag = sd.perBag;
+        if (!perBag || perBag <= 0) {
+          throw Object.assign(new Error(`Standard Package Qty isn't set for ${item.color} ${e.size} — set it before receiving in individual balloons.`), { code: 'MISSING_STANDARD_QTY', itemId: e.itemId, size: e.size });
+        }
+        const existingLoose = sd.looseBalloons || 0;
+        const total = existingLoose + e.looseBalloonsReceived;
+        const unitsGained = Math.floor(total / perBag);
+        looseBefore = existingLoose;
+        sd.looseBalloons = total - unitsGained * perBag;
+        looseAfter = sd.looseBalloons;
+        delta = unitsGained;
+        perBagAtTime = perBag;
       } else {
         delta = e.delta;
       }
@@ -6496,11 +6531,26 @@ function invApplyInventoryTransactions(entries) {
         remainderAfter = 0;
         sd.usageRemainder = 0;
       }
+      // Same rule, extended to looseBalloons: a direct count is the new whole truth. If this
+      // recount explicitly restates the loose count (e.entry.looseBalloons, an absolute set — see
+      // invSubmitAdjust/the per-size Backstock field's balloons mode), use it; otherwise a plain
+      // bags-only recount supersedes whatever loose count was previously known, same as it already
+      // does for usageRemainder. Never runs for a balloonsUsed/looseBalloonsReceived entry — those
+      // already set looseBefore/looseAfter themselves above.
+      if (balloonsUsed === null && typeof e.looseBalloonsReceived !== 'number' && (type === 'ADJUSTMENT' || type === 'INITIAL_COUNT')) {
+        const existingLoose = sd.looseBalloons || 0;
+        const newLoose = typeof e.looseBalloons === 'number' ? e.looseBalloons : 0;
+        if (existingLoose !== newLoose) {
+          looseBefore = existingLoose;
+          looseAfter = newLoose;
+          sd.looseBalloons = newLoose;
+        }
+      }
 
       txDocs.push({
         id: psNewInventoryTransactionId(), itemId: e.itemId, size: e.size, color: item.color, brand: item.brand,
         type, unit: trackingUnit, delta, previousBalance, newBalance,
-        balloonsUsed, perBagAtTime, remainderBefore, remainderAfter,
+        balloonsUsed, perBagAtTime, remainderBefore, remainderAfter, looseBefore, looseAfter,
         jobId: e.jobId || null, jobName: e.jobName || null,
         reference: e.reference || '', note: e.note || '',
         who: actor.who, whoEmail: actor.whoEmail,
@@ -7412,7 +7462,7 @@ function invCsvRenderImport() {
 // corrected. usageRemainder starts at 0 — nothing pending until a balloon-denominated pull exists.
 function invBlankSizeData() {
   const sizes = {};
-  INV_SIZES.forEach(s => { sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100, usageRemainder: 0 }; });
+  INV_SIZES.forEach(s => { sizes[s] = { price: 0, openStatus: 'Empty', backstock: 0, par: 0, perBag: 100, usageRemainder: 0, looseBalloons: 0 }; });
   return sizes;
 }
 function invFindItem(id) { return INVENTORY_ITEMS.find(i => i.id === id); }
@@ -7571,7 +7621,9 @@ function invNeedBreakdown(sd, upcoming, pendingBags) {
     // real "you're fully stocked" answer.
     return { urgentBags: 0, restockBags: 0, totalBags: 0, configMissing: true };
   }
-  const balloonsAvailable = ((sd.backstock || 0) + pendingBags) * perBag;
+  // looseBalloons is real physical stock (unlike usageRemainder, which is consumption already
+  // gone and deliberately excluded here) — it counts toward what's actually available.
+  const balloonsAvailable = ((sd.backstock || 0) + pendingBags) * perBag + (sd.looseBalloons || 0);
   const urgentBalloons = Math.max(0, upcoming - balloonsAvailable);
   const urgentBags = Math.ceil(urgentBalloons / perBag);
   const leftoverBagsAfterJobs = Math.floor(Math.max(0, balloonsAvailable - upcoming) / perBag);
@@ -8056,9 +8108,10 @@ function invBatchSetQty(itemId, size, value) {
   const row = invBatch.rows.find(r => r.itemId === itemId && r.size === size);
   if (row) row.qty = parseFloat(value) || 0;
 }
-// Receive-only: lets a row be entered as a balloon count instead of a Standard Package count —
-// "I bought four 25-count bags" shouldn't require doing the division by hand. Pull stays
-// bags-only; this doesn't apply there.
+// Lets a row be entered as an individual-balloon count instead of a Standard Package count — e.g.
+// "I found a partial bag with 8 loose balloons" during Receive, or "pull 5 balloons" during Pull.
+// This is a per-row, per-entry choice only (see invBatchToggleRow's default of 'bags') — it never
+// changes the business's own default tracking unit, and the next row/session starts on Bags again.
 function invBatchSetQtyUnit(itemId, size, unit) {
   if (!invBatch) return;
   const row = invBatch.rows.find(r => r.itemId === itemId && r.size === size);
@@ -8087,13 +8140,29 @@ function invRenderBatchRoot() {
     <div style="margin-bottom:0.6rem;">
       ${invBatch.rows.map(r => {
         const rowItem = invFindItem(r.itemId);
-        const rowPerBag = rowItem ? rowItem.sizes[r.size].perBag : null;
-        const inBalloons = isReceive && r.qtyUnit === 'balloons';
+        const sd = rowItem ? rowItem.sizes[r.size] : null;
+        const rowPerBag = sd ? sd.perBag : null;
+        const existingLoose = sd ? (sd.looseBalloons || 0) : 0;
+        const inBalloons = r.qtyUnit === 'balloons';
         let conversionNote = '';
         if (inBalloons) {
-          if (!rowPerBag || rowPerBag <= 0) conversionNote = `<div style="color:var(--warning-text); font-size:11px;">Standard Package Qty not set for this size</div>`;
-          else if (r.qty % rowPerBag !== 0) conversionNote = `<div style="color:var(--warning-text); font-size:11px;">Not a whole number of ${rowPerBag}-count packages</div>`;
-          else conversionNote = `<div style="color:var(--text-secondary); font-size:11px;">= ${r.qty / rowPerBag} standard package${(r.qty / rowPerBag) === 1 ? '' : 's'}</div>`;
+          if (!rowPerBag || rowPerBag <= 0) {
+            conversionNote = `<div style="color:var(--warning-text); font-size:11px;">Standard Package Qty not set for this size</div>`;
+          } else if (isReceive) {
+            // Adds to known loose stock, auto-consolidating into a whole package once the total
+            // crosses one — never a whole-multiple requirement, and never touches usageRemainder.
+            const total = existingLoose + r.qty;
+            const unitsGained = Math.floor(total / rowPerBag);
+            const newLoose = total - unitsGained * rowPerBag;
+            conversionNote = `<div style="color:var(--text-secondary); font-size:11px;">${unitsGained > 0 ? `= +${unitsGained} standard package${unitsGained === 1 ? '' : 's'}, ` : ''}${newLoose} loose balloon${newLoose === 1 ? '' : 's'} on hand</div>`;
+          } else {
+            // Uses known loose balloons first — only the shortfall draws from Standard Package Qty.
+            const usedFromLoose = Math.min(existingLoose, r.qty);
+            const remaining = r.qty - usedFromLoose;
+            conversionNote = remaining > 0
+              ? `<div style="color:var(--text-secondary); font-size:11px;">Uses ${usedFromLoose} known loose balloon${usedFromLoose === 1 ? '' : 's'}, draws the remaining ${remaining} from Standard Package Qty</div>`
+              : `<div style="color:var(--text-secondary); font-size:11px;">Fully covered by ${usedFromLoose} known loose balloon${usedFromLoose === 1 ? '' : 's'} — Backstock unaffected</div>`;
+          }
         }
         return `
         <div style="padding:0.4rem 0; border-bottom:0.5px solid var(--border);">
@@ -8102,11 +8171,11 @@ function invRenderBatchRoot() {
             <input type="number" step="0.01" min="0" value="${r.qty}" style="width:70px; padding:6px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); font-size:14px;" onchange="invBatchSetQty('${r.itemId}','${invAttr(r.size)}', this.value)">
             <button class="icon-btn" style="padding:4px;" onclick="invBatchRemoveRow('${r.itemId}','${invAttr(r.size)}')"><i class="fa-solid fa-xmark"></i></button>
           </div>
-          ${isReceive ? `<div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
-            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${!inBalloons ? 'var(--accent-border)' : 'var(--border-strong)'}; ${!inBalloons ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','bags')">Packages</button>
-            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${inBalloons ? 'var(--accent-border)' : 'var(--border-strong)'}; ${inBalloons ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','balloons')">Balloons</button>
+          <div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
+            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${!inBalloons ? 'var(--accent-border)' : 'var(--border-strong)'}; ${!inBalloons ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','bags')">Bags</button>
+            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${inBalloons ? 'var(--accent-border)' : 'var(--border-strong)'}; ${inBalloons ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','balloons')">Individual Balloons</button>
             ${conversionNote}
-          </div>` : ''}
+          </div>
         </div>`;
       }).join('')}
     </div>` : ''}
@@ -8153,33 +8222,33 @@ async function invSubmitBatch() {
   if (!invBatch || invBatch.rows.length === 0) return;
   const isReceive = invBatch.mode === 'receive';
   const job = invBatch.jobId ? psFindJob(invBatch.jobId) : null;
-  // A row entered in balloons must convert to an exact whole number of Standard Packages before
-  // it becomes a real Receive — no receive-side remainder pool, per the approved design (that
-  // pool exists only for Production usage). Reject the whole submit rather than partially apply
-  // some rows and silently skip others.
-  const rowQtys = {};
+  // A row entered in individual balloons never requires a whole-multiple amount — Receive adds it
+  // to known loose stock (looseBalloons), auto-consolidating into a package once the total crosses
+  // one; Pull uses known loose stock first, drawing from Standard Package Qty only for the
+  // shortfall. Both go through invApplyInventoryTransactions's own accumulator logic, so the only
+  // client-side check left is the one every balloons-mode row still needs regardless of direction.
   for (const r of invBatch.rows) {
-    if (isReceive && r.qtyUnit === 'balloons') {
+    if (r.qtyUnit === 'balloons') {
       const rowItem = invFindItem(r.itemId);
       const perBag = rowItem ? rowItem.sizes[r.size].perBag : null;
-      if (!perBag || perBag <= 0) { alert(`Standard Package Qty isn't set for ${r.color} ${r.size} — set it before receiving in balloons.`); return; }
-      if (r.qty % perBag !== 0) { alert(`${r.qty} balloons isn't a whole number of ${perBag}-count standard packages for ${r.color} ${r.size} — try ${Math.floor(r.qty / perBag) * perBag} or ${Math.ceil(r.qty / perBag) * perBag}.`); return; }
-      rowQtys[`${r.itemId}|${r.size}`] = r.qty / perBag;
-    } else {
-      rowQtys[`${r.itemId}|${r.size}`] = r.qty;
+      if (!perBag || perBag <= 0) { alert(`Standard Package Qty isn't set for ${r.color} ${r.size} — set it before entering individual balloons.`); return; }
     }
   }
   const entries = invBatch.rows.map(r => {
-    const qty = rowQtys[`${r.itemId}|${r.size}`];
-    return {
+    const base = {
       itemId: r.itemId, size: r.size,
       type: isReceive ? 'RECEIVE' : 'PULL',
-      delta: isReceive ? Math.abs(qty) : -Math.abs(qty),
       reference: isReceive ? (invBatch.reference || '') : '',
       note: isReceive ? '' : (invBatch.reference || ''),
       jobId: job ? job.id : null,
       jobName: job ? (job.jobName || 'Untitled job') : null,
     };
+    if (r.qtyUnit === 'balloons') {
+      return isReceive
+        ? { ...base, looseBalloonsReceived: Math.abs(r.qty) }
+        : { ...base, balloonsUsed: Math.abs(r.qty) };
+    }
+    return { ...base, delta: isReceive ? Math.abs(r.qty) : -Math.abs(r.qty) };
   });
   try {
     await invApplyInventoryTransactions(entries);
@@ -8197,9 +8266,9 @@ async function invSubmitBatch() {
 // actual Backstock field in each expanded card does the identical operation already (both route
 // through invApplyInventoryTransactions as an ADJUSTMENT) — this exists purely so someone doesn't
 // have to scroll to find one specific item first.
-let invAdjust = null; // { search, selected: {itemId, size} | null }
+let invAdjust = null; // { search, selected: {itemId, size} | null, qtyUnit: 'bags' | 'balloons' }
 function invOpenAdjust() {
-  invAdjust = { search: '', selected: null };
+  invAdjust = { search: '', selected: null, qtyUnit: 'bags' };
   invRenderAdjustRoot();
 }
 function invCloseAdjust() {
@@ -8214,15 +8283,47 @@ function invAdjustSetSearch(value) {
 function invAdjustSelect(itemId, size) {
   if (!invAdjust) return;
   invAdjust.selected = { itemId, size };
+  invAdjust.qtyUnit = 'bags';
+  invRenderAdjustRoot();
+}
+// Jumps straight into Adjust already scoped to one item+size — used by the per-size Backstock
+// field's "Enter as individual balloons…" shortcut so a found partial bag doesn't require
+// searching for the color a second time.
+function invOpenAdjustFor(itemId, size) {
+  invOpenAdjust();
+  invAdjustSelect(itemId, size);
+  invAdjustSetQtyUnit('balloons');
+  // #inv-adjust-root is mounted near the top of the screen, well above a color card that's been
+  // scrolled down to — without this, the shortcut would open a form the user can't see.
+  const root = document.getElementById('inv-adjust-root');
+  if (root) root.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+// Per-entry only, same as the Receive/Pull toggle — defaults back to Bags every time Adjust is
+// reopened (invOpenAdjust/invAdjustSelect above), never persisted as the item's own unit.
+function invAdjustSetQtyUnit(unit) {
+  if (!invAdjust) return;
+  invAdjust.qtyUnit = unit;
   invRenderAdjustRoot();
 }
 function invAdjustPreview(value) {
   const preview = document.getElementById('inv-adjust-preview');
   if (!preview || !invAdjust || !invAdjust.selected) return;
   const item = invFindItem(invAdjust.selected.itemId);
-  const current = item.sizes[invAdjust.selected.size].backstock || 0;
+  const sd = item.sizes[invAdjust.selected.size];
+  const current = sd.backstock || 0;
   const actual = parseFloat(value);
   if (isNaN(actual)) { preview.innerHTML = ''; return; }
+  if (invAdjust.qtyUnit === 'balloons') {
+    // Individual Balloons mode: the typed number is the TOTAL balloons actually counted (sealed
+    // + loose combined) — split via the same floor/modulo math as everywhere else into whole
+    // Standard Packages plus a precise loose-balloon remainder, set as the new absolute truth.
+    const perBag = sd.perBag;
+    if (!perBag || perBag <= 0) { preview.innerHTML = `<span style="color:var(--warning-text);">Standard Package Qty not set for this size</span>`; return; }
+    const units = Math.floor(actual / perBag);
+    const loose = actual - units * perBag;
+    preview.innerHTML = `= <b>${units}</b> standard package${units === 1 ? '' : 's'} + <b>${loose}</b> loose balloon${loose === 1 ? '' : 's'}`;
+    return;
+  }
   const delta = actual - current;
   preview.innerHTML = `Adjustment: <b>${delta > 0 ? '+' : ''}${invFmtQty(delta)}</b> — New balance: <b>${invFmtQty(actual)}</b>`;
 }
@@ -8244,12 +8345,19 @@ function invRenderAdjustRoot() {
   } else {
     const item = invFindItem(invAdjust.selected.itemId);
     const size = invAdjust.selected.size;
-    const current = item.sizes[size].backstock || 0;
+    const sd = item.sizes[size];
+    const current = sd.backstock || 0;
+    const currentLoose = sd.looseBalloons || 0;
+    const unit = invAdjust.qtyUnit || 'bags';
     root.innerHTML = `<div class="card">
       <div style="font-size:14px; font-weight:700; margin-bottom:0.3rem;">Adjust Inventory</div>
       <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.6rem;">${psEscape(item.color)} ${psEscape(item.brand || '')} — ${psEscape(size)}</div>
-      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.4rem;">BBT currently says: <b style="color:var(--text);">${invFmtQty(current)} ${invUnitLabel()}</b></div>
-      <div class="settings-field" style="margin-bottom:0.4rem;"><label>Actual quantity counted</label><input type="number" step="0.01" min="0" id="inv-adjust-actual" placeholder="e.g. ${current}" oninput="invAdjustPreview(this.value)"></div>
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.4rem;">BBT currently says: <b style="color:var(--text);">${invFmtQty(current)} ${invUnitLabel()}</b>${currentLoose ? ` + <b style="color:var(--text);">${currentLoose} loose balloon${currentLoose === 1 ? '' : 's'}</b>` : ''}</div>
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:0.4rem;">
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${unit !== 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${unit !== 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invAdjustSetQtyUnit('bags')">Bags</button>
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${unit === 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${unit === 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invAdjustSetQtyUnit('balloons')">Individual Balloons</button>
+      </div>
+      <div class="settings-field" style="margin-bottom:0.4rem;"><label>${unit === 'balloons' ? 'Actual balloons counted (total)' : 'Actual quantity counted'}</label><input type="number" step="0.01" min="0" id="inv-adjust-actual" placeholder="e.g. ${current}" oninput="invAdjustPreview(this.value)"></div>
       <div id="inv-adjust-preview" style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;"></div>
       <div class="settings-field" style="margin-bottom:0.6rem;"><label>Reason (optional)</label><input type="text" id="inv-adjust-note" placeholder="e.g. Damaged/Popped"></div>
       <div style="display:flex; gap:8px;">
@@ -8277,14 +8385,32 @@ async function invSubmitAdjust() {
   if (!invAdjust || !invAdjust.selected) return;
   const { itemId, size } = invAdjust.selected;
   const item = invFindItem(itemId);
+  const sd = item.sizes[size];
   const actual = parseFloat((document.getElementById('inv-adjust-actual') || {}).value);
   if (isNaN(actual) || actual < 0) { alert('Enter the actual quantity counted.'); return; }
-  const current = item.sizes[size].backstock || 0;
-  const delta = actual - current;
-  if (delta === 0) { invCloseAdjust(); return; }
+  const current = sd.backstock || 0;
+  const currentLoose = sd.looseBalloons || 0;
   const note = (document.getElementById('inv-adjust-note') || {}).value || '';
+  let delta, entryExtra = {};
+  if (invAdjust.qtyUnit === 'balloons') {
+    const perBag = sd.perBag;
+    if (!perBag || perBag <= 0) { alert("Standard Package Qty isn't set for this size — set it before entering individual balloons."); return; }
+    const units = Math.floor(actual / perBag);
+    const newLoose = actual - units * perBag;
+    delta = units - current;
+    // A plain bags-mode Adjust with no real change is a no-op (existing behavior); in balloons
+    // mode the loose count is part of what's being asserted, so also skip only if BOTH match.
+    if (delta === 0 && newLoose === currentLoose) { invCloseAdjust(); return; }
+    entryExtra = { looseBalloons: newLoose };
+  } else {
+    delta = actual - current;
+    // Even at delta 0, a plain count still resets any previously-known loose balloons (same
+    // "a direct assertion is the new whole truth" rule already governing usageRemainder) — only
+    // truly skip when nothing at all would change.
+    if (delta === 0 && currentLoose === 0) { invCloseAdjust(); return; }
+  }
   try {
-    await invApplyInventoryTransactions([{ itemId, size, type: 'ADJUSTMENT', delta, note: note.trim() }]);
+    await invApplyInventoryTransactions([{ itemId, size, type: 'ADJUSTMENT', delta, note: note.trim(), ...entryExtra }]);
     invAdjust = null;
     invRenderLatex();
   } catch (err) {
@@ -9945,6 +10071,11 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
           </div>
           <div class="settings-field" style="margin-bottom:0"><label>Backstock (${invUnitLabel()})</label><input type="number" min="0" class="inv-backstock-input" data-size-idx="${sizeIdx}" value="${sd.backstock}" onfocus="this.select()" onwheel="this.blur()" onkeydown="invBackstockTabKey(event, ${sizeIdx})" onchange="invUpdateSizeField('${item.id}','${invAttr(size)}','backstock',this.value)"></div>
         </div>`;
+        // A found partial/mystery bag — e.g. 8 loose balloons — shouldn't require doing the
+        // division into bags by hand. Rather than crowding this fast multi-size entry grid with a
+        // second toggle per row, this jumps straight into Adjust (which already has the Bags |
+        // Individual Balloons toggle) prefilled to this exact item+size.
+        html += `<div style="margin-top:0.3rem;"><button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10.5px; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invOpenAdjustFor('${item.id}','${invAttr(size)}')">Enter as individual balloons…</button></div>`;
         // Editing the field only records a count if the typed value actually differs from what
         // was showing — a genuinely-correct-as-is size (including a real zero) needs an explicit
         // way to be marked counted, since no change event fires when nothing was typed.
@@ -9965,6 +10096,11 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
       // informational, not something to edit directly.
       if (invTrackingUnit === 'bags' && sd.usageRemainder) {
         html += `<div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Pending usage: ${sd.usageRemainder} balloon${sd.usageRemainder === 1 ? '' : 's'} not yet reflected in Backstock</div>`;
+      }
+      // Known loose balloons — a real physical asset (a found partial bag), not pending usage —
+      // shown separately from the note above so the two are never visually or semantically merged.
+      if (invTrackingUnit === 'bags' && sd.looseBalloons) {
+        html += `<div style="font-size:11px; color:var(--text-secondary); margin-top:4px;"><i class="fa-solid fa-circle-half-stroke"></i> ${sd.looseBalloons} loose balloon${sd.looseBalloons === 1 ? '' : 's'} on hand (partial bag)</div>`;
       }
       // Flagging works the same in either mode — noticing something's off shouldn't require
       // switching the whole team into Editing just to say so. Visible to everyone; only
@@ -10171,7 +10307,7 @@ function spFilteredItems() {
 
 function spOpenAdd() {
   spAddOpen = true;
-  spAddDraft = { kind: spKindTab, brand: '', brandOther: '', color: '', sizeType: '', sizeOther: '', pattern: '', printGroupId: '', printGroupNewName: '', shape: '', descriptor: '', perBag: 100, costPerBag: 0, backstock: 0 };
+  spAddDraft = { kind: spKindTab, brand: '', brandOther: '', color: '', sizeType: '', sizeOther: '', pattern: '', printGroupId: '', printGroupNewName: '', shape: '', descriptor: '', perBag: 100, costPerBag: 0, backstock: 0, backstockUnit: 'bags' };
   spRenderScreen();
 }
 function spCancelAdd() { spAddOpen = false; spAddDraft = null; spRenderScreen(); }
@@ -10185,9 +10321,9 @@ function spSetDraftField(field, value) {
     spAddDraft.sizeType = '';
     spAddDraft.sizeOther = '';
     spRenderScreen();
-  } else if (field === 'brand' || field === 'sizeType' || field === 'printGroupId') {
-    // Selecting "Other"/"Custom"/"+ Add new group" needs to reveal its free-text input, which only
-    // exists in the freshly-rendered HTML — without this, the field silently can't be filled in.
+  } else if (field === 'brand' || field === 'sizeType' || field === 'printGroupId' || field === 'backstockUnit') {
+    // Selecting "Other"/"Custom"/"+ Add new group"/the balloons toggle needs to swap the field's
+    // label or reveal its free-text input, which only exists in the freshly-rendered HTML.
     spRenderScreen();
   }
 }
@@ -10215,6 +10351,19 @@ function spSubmitAdd() {
   const identityExtra = d.kind === 'printed' ? pattern : d.kind === 'shapes' ? shape : '';
   const dup = spFindCollision(d.kind, brand, color, sizeType, identityExtra, null);
   if (dup) { alert(`An item with this Brand/Color/Size${identityExtra ? '/' + (d.kind === 'printed' ? 'Pattern' : 'Shape') : ''} already exists.`); return; }
+  const perBag = parseFloat(d.perBag) || 0;
+  // Individual Balloons mode: the typed Backstock number is a TOTAL balloon count, split via the
+  // same floor/modulo math used everywhere else into whole bags + a precise loose-balloon
+  // remainder — never a fractional backstock value. Bags mode is unchanged (no loose balloons).
+  let backstock, looseBalloons = 0;
+  if (d.backstockUnit === 'balloons') {
+    if (!perBag || perBag <= 0) { alert("Balloons/bag isn't set — set it before entering individual balloons."); return; }
+    const totalBalloons = parseFloat(d.backstock) || 0;
+    backstock = Math.floor(totalBalloons / perBag);
+    looseBalloons = totalBalloons - backstock * perBag;
+  } else {
+    backstock = parseFloat(d.backstock) || 0;
+  }
   const item = {
     id: psNewSpecialtyItemId(),
     kind: d.kind,
@@ -10225,9 +10374,10 @@ function spSubmitAdd() {
     printGroupId: d.kind === 'printed' ? printGroupId : null,
     shape,
     descriptor: (d.descriptor || '').trim(),
-    perBag: parseFloat(d.perBag) || 0,
+    perBag,
     costPerBag: parseFloat(d.costPerBag) || 0,
-    backstock: parseFloat(d.backstock) || 0,
+    backstock,
+    looseBalloons,
     active: true,
   };
   SPECIALTY_ITEMS.push(item);
@@ -10244,6 +10394,39 @@ function spUpdateField(itemId, field, value) {
   if (!item) return;
   item[field] = (field === 'backstock' || field === 'perBag' || field === 'costPerBag') ? (parseFloat(value) || 0) : value;
   spSaveItem(item);
+}
+// Per-entry Bags | Individual Balloons choice for an existing item's Backstock field — a plain
+// transient map, never persisted to the item or any setting, so it always starts back on Bags the
+// next time this card is expanded (mirrors invAdjust's own qtyUnit for Standard Latex).
+let spQtyUnitByItem = {};
+function spSetQtyUnitFor(itemId, unit) {
+  spQtyUnitByItem[itemId] = unit;
+  spRenderResults();
+}
+// Individual Balloons mode: the typed number is the TOTAL balloons actually counted, split via the
+// same floor/modulo math as Standard Latex's Adjust into whole bags + a precise loose-balloon
+// remainder — Backstock itself never becomes fractional. Bags mode is unchanged, and (matching
+// Standard Latex's own rule) a plain bags-mode entry resets any previously-known loose balloons,
+// since a direct count is the new whole truth.
+function spSubmitBackstockEntry(itemId, value) {
+  const item = spFindItem(itemId);
+  if (!item) return;
+  const actual = parseFloat(value);
+  if (isNaN(actual) || actual < 0) return;
+  const unit = spQtyUnitByItem[itemId] || 'bags';
+  if (unit === 'balloons') {
+    const perBag = item.perBag || 0;
+    if (!perBag || perBag <= 0) { alert("Balloons/bag isn't set for this item — set it before entering individual balloons."); return; }
+    const units = Math.floor(actual / perBag);
+    item.backstock = units;
+    item.looseBalloons = actual - units * perBag;
+  } else {
+    item.backstock = actual;
+    item.looseBalloons = 0;
+  }
+  spSaveItem(item);
+  delete spQtyUnitByItem[itemId]; // back to Bags for the next entry
+  spRenderResults();
 }
 // Reclassifying an already-saved item's Print Group — separate from the add-form's draft-based
 // "+ Add new group" reveal since there's no in-progress draft here to preserve; a plain prompt()
@@ -10631,7 +10814,14 @@ function spAddFormHtml() {
     <div class="row">
       <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${d.perBag}" oninput="spSetDraftField('perBag', this.value)"></div>
       <div class="settings-field" style="margin-bottom:0"><label>Cost/bag</label><input type="number" step="0.01" min="0" value="${d.costPerBag}" oninput="spSetDraftField('costPerBag', this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${d.backstock}" oninput="spSetDraftField('backstock', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0">
+        <label>${d.backstockUnit === 'balloons' ? 'Backstock (total balloons)' : 'Backstock (bags)'}</label>
+        <input type="number" min="0" value="${d.backstock}" oninput="spSetDraftField('backstock', this.value)">
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px; margin:-0.4rem 0 0.75rem;">
+      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${d.backstockUnit !== 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${d.backstockUnit !== 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="spSetDraftField('backstockUnit','bags')">Bags</button>
+      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${d.backstockUnit === 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${d.backstockUnit === 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="spSetDraftField('backstockUnit','balloons')">Individual Balloons</button>
     </div>
     <button class="save-btn" onclick="spSubmitAdd()">Save item</button>
   </div>`;
@@ -10662,10 +10852,21 @@ function spItemCardHtml(item) {
         </select>
       </div>
     </div>`;
-    html += `<div class="row">
-      <div class="settings-field" style="margin-bottom:0"><label>Backstock (bags)</label><input type="number" min="0" value="${item.backstock}" onchange="spUpdateField('${item.id}','backstock',this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${item.perBag || 100}" onchange="spUpdateField('${item.id}','perBag',this.value)"></div>
-    </div>`;
+    { // scoped block, not a new function — keeps qtyUnit local to this render pass
+      const qtyUnit = spQtyUnitByItem[item.id] || 'bags';
+      html += `<div class="row">
+        <div class="settings-field" style="margin-bottom:0">
+          <label>${qtyUnit === 'balloons' ? 'Backstock (total balloons)' : 'Backstock (bags)'}</label>
+          <input type="number" min="0" value="${qtyUnit === 'balloons' ? '' : item.backstock}" placeholder="${qtyUnit === 'balloons' ? 'e.g. 108' : ''}" onchange="spSubmitBackstockEntry('${item.id}', this.value)">
+        </div>
+        <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${item.perBag || 100}" onchange="spUpdateField('${item.id}','perBag',this.value)"></div>
+      </div>`;
+      html += `<div style="display:flex; align-items:center; gap:8px; margin:-0.4rem 0 0.6rem;">
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${qtyUnit !== 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${qtyUnit !== 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="spSetQtyUnitFor('${item.id}','bags')">Bags</button>
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${qtyUnit === 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${qtyUnit === 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="spSetQtyUnitFor('${item.id}','balloons')">Individual Balloons</button>
+      </div>`;
+      if (item.looseBalloons) html += `<div style="font-size:11px; color:var(--text-secondary); margin-bottom:0.5rem;"><i class="fa-solid fa-circle-half-stroke"></i> ${item.looseBalloons} loose balloon${item.looseBalloons === 1 ? '' : 's'} on hand (partial bag)</div>`;
+    }
     html += `<div class="row">
       <div class="settings-field" style="margin-bottom:0"><label>Cost/bag</label><input type="number" step="0.01" min="0" value="${item.costPerBag}" onchange="spUpdateField('${item.id}','costPerBag',this.value)"></div>
     </div>`;
