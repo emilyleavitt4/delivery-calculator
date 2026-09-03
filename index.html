@@ -1046,6 +1046,12 @@
   window.fbSaveSupplyItem = (item) => setDoc(doc(supplyItemsRef, item.id), item);
   window.fbDeleteSupplyItem = (id) => deleteDoc(doc(supplyItemsRef, id));
 
+  // Alpha-testing feedback widget — a lightweight, admin-reviewed inbox. No delete wrapper: nothing
+  // in this pass ever removes a submission, only its status.
+  const feedbackItemsRef = collection(db, 'businesses', BUSINESS_ID, 'feedbackItems');
+  window.fbOnSnapshotFeedbackItems = (onNext, onError) => onSnapshot(feedbackItemsRef, onNext, onError);
+  window.fbSaveFeedbackItem = (item) => setDoc(doc(feedbackItemsRef, item.id), item);
+
   // ═══ BBT Master Catalog — the first genuinely global (non-business-scoped) data in this app ═══
   // Deliberately NOT under businesses/{BUSINESS_ID} — this is BBT-maintained reference data meant
   // to be shared and read by every business, not owned by this one. Firestore Security Rules must
@@ -1788,6 +1794,18 @@
 
   </div><!-- end view-settings -->
 
+  <!-- ═══════════════════════════════════════ GLOBAL FEEDBACK WIDGET ═══════════════════════════════════════ -->
+  <!-- A sibling of every .view, not nested inside one, so it's unaffected by showView()'s
+       display toggling and stays available everywhere. Sits below #auth-gate's z-index:9999, so
+       it's naturally hidden until sign-in. No admin gate here — any signed-in user can report
+       feedback; only the Settings inbox (see fbInboxRenderShell) is admin-gated. -->
+  <button id="fb-fab" onclick="fbOpenWidget()" aria-label="Send Feedback" title="Send Feedback" style="position:fixed; right:calc(16px + env(safe-area-inset-right)); bottom:calc(16px + env(safe-area-inset-bottom)); z-index:1000; width:52px; height:52px; border-radius:50%; background:var(--accent); color:#fff; border:none; box-shadow:0 2px 8px rgba(0,0,0,0.25); display:flex; align-items:center; justify-content:center; font-size:20px; cursor:pointer;">
+    <i class="fa-solid fa-comment-dots"></i>
+  </button>
+  <div id="fb-modal-backdrop" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.4); align-items:center; justify-content:center; padding:1rem;" onclick="if (event.target === this) fbCloseWidget()">
+    <div id="fb-panel-root" style="max-width:420px; width:100%; max-height:85vh; overflow-y:auto;"></div>
+  </div>
+
 </div><!-- end app -->
 
 <script>
@@ -2214,6 +2232,7 @@ const SETTINGS_SECTIONS = [
   // client-side gate here is a convenience, not the real security boundary.
   { id: 'masterManufacturers', label: 'Master Manufacturers', group: 'bbtMaster', containerId: 'mst-mfr-root', icon: 'fa-solid fa-industry' },
   { id: 'masterColors', label: 'Master Colors', group: 'bbtMaster', containerId: 'mst-color-root', icon: 'fa-solid fa-palette' },
+  { id: 'feedbackInbox', label: 'Feedback Inbox', group: 'account', containerId: 'fb-inbox-root' },
 ];
 
 // Every group shown as its own tile on the Settings home grid — 'account' and 'pricing' hold
@@ -5983,6 +6002,7 @@ function settingsRefreshAdminSections() {
   mstRenderColorsSection();
   invRenderColorsList();
   renderAdminPasscodeBlock();
+  fbInboxRenderShell();
   bsUpdateHomeBanner();
 }
 
@@ -14258,6 +14278,207 @@ function suppliesRenderScreen() {
   suppliesRenderResults();
 }
 
+// ═══════════════════════════════════════ FEEDBACK (alpha-testing widget) ═══════════════════════════════════════
+//
+// A lightweight "report this right now" tool, deliberately kept small: one Firestore collection,
+// no ledger, no threading/assignment/attachments. The floating button (see the global HTML block
+// near the end of <body>) is available to every signed-in user everywhere; only the admin-gated
+// Settings inbox below can see/triage submissions. who/whoEmail reuse invResolveActor exactly like
+// the inventory ledger does; screen/context are captured automatically so the reporter never has
+// to type where they were.
+let FEEDBACK_ITEMS = [];
+const FEEDBACK_TYPES = [
+  { value: 'bug', label: "Bug / Something isn't working" },
+  { value: 'confusing', label: 'Confusing / Hard to use' },
+  { value: 'feature', label: 'Feature request / Idea' },
+  { value: 'other', label: 'Other' },
+];
+function fbTypeLabel(type) { return (FEEDBACK_TYPES.find(t => t.value === type) || {}).label || type; }
+const FEEDBACK_STATUS_BADGE = {
+  new: { label: 'New', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
+  reviewed: { label: 'Reviewed', bg: 'var(--info-bg)', color: 'var(--info-text)' },
+  resolved: { label: 'Resolved', bg: 'var(--accent-light)', color: 'var(--accent)' },
+};
+function psNewFeedbackId() { return 'feedback_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+function fbStartListeners() {
+  window.fbOnSnapshotFeedbackItems(
+    (snapshot) => {
+      FEEDBACK_ITEMS = snapshot.docs.map(d => d.data());
+      fbInboxRenderShell();
+    },
+    (err) => console.error('Feedback sync error:', err)
+  );
+}
+// The current view id + its human-readable title — always accurate from anywhere, since there's no
+// single global "current view" variable that includes Settings (lastToolView deliberately excludes
+// it). Reading the DOM directly is the same pattern goBack() already relies on.
+function fbCurrentViewInfo() {
+  const el = document.querySelector('.view.active');
+  const view = el ? el.id.replace(/^view-/, '') : '';
+  const titleEl = document.getElementById('topbar-title');
+  const label = (titleEl && titleEl.textContent) || (TOOL_META[view] && TOOL_META[view].title) || view || 'Unknown';
+  return { view, label };
+}
+// Best-effort, deliberately tiny — a handful of already-global state variables checked defensively,
+// never a state dump. Safe to extend later (one more `if` per screen worth covering) without
+// touching the submit/render path at all.
+function fbLightweightContext() {
+  const ctx = {};
+  try {
+    const { view } = fbCurrentViewInfo();
+    if (view === 'inventory-extras' && typeof invxCategoryTab !== 'undefined') {
+      ctx.category = invxCategoryTab;
+    } else if (view === 'inventory-foil' && typeof foilCategoryTab !== 'undefined') {
+      ctx.category = foilCategoryTab;
+      if (foilCategoryTab === 'lettersNumbers' && typeof foilCharTypeTab !== 'undefined') ctx.subTab = foilCharTypeTab;
+      if (foilCategoryTab === 'decoratorShapes' && typeof foilDecoratorSelectedFamily !== 'undefined' && foilDecoratorSelectedFamily !== undefined) {
+        const g = pgFindGroup(foilDecoratorSelectedFamily);
+        ctx.family = g ? g.name : 'Uncategorized';
+      }
+    } else if (view === 'inventory-specialty' && typeof spKindTab !== 'undefined') {
+      ctx.kind = spKindTab;
+    } else if (view === 'production' && typeof PS_EXPANDED_JOB_ID !== 'undefined' && PS_EXPANDED_JOB_ID) {
+      ctx.jobId = PS_EXPANDED_JOB_ID;
+    }
+  } catch (e) { /* context is a nice-to-have — never let it block a real submission */ }
+  return ctx;
+}
+
+let fbWidgetOpen = false;
+let fbDraft = null;
+let fbShowingSuccess = false;
+function fbOpenWidget() {
+  fbWidgetOpen = true;
+  fbShowingSuccess = false;
+  fbDraft = { type: 'bug', text: '' };
+  fbRenderWidget();
+}
+function fbCloseWidget() {
+  fbWidgetOpen = false;
+  fbShowingSuccess = false;
+  fbDraft = null;
+  fbRenderWidget();
+}
+function fbSetDraftField(field, value) {
+  if (!fbDraft) return;
+  fbDraft[field] = value;
+}
+function fbSubmit() {
+  if (!fbDraft) return;
+  const text = (fbDraft.text || '').trim();
+  if (!text) { alert('Please describe the problem, confusing step, or idea before sending.'); return; }
+  const actor = invResolveActor();
+  const view = fbCurrentViewInfo();
+  const item = {
+    id: psNewFeedbackId(),
+    type: FEEDBACK_TYPES.some(t => t.value === fbDraft.type) ? fbDraft.type : 'other',
+    text,
+    status: 'new',
+    screenView: view.view,
+    screenLabel: view.label,
+    who: actor.who,
+    whoEmail: actor.whoEmail,
+    context: fbLightweightContext(),
+    createdAt: Date.now(),
+  };
+  FEEDBACK_ITEMS.push(item);
+  window.fbSaveFeedbackItem(item).catch(err => console.error('Feedback save failed:', err));
+  fbDraft = null;
+  fbShowingSuccess = true;
+  fbRenderWidget();
+  setTimeout(() => { fbShowingSuccess = false; fbWidgetOpen = false; fbRenderWidget(); }, 1400);
+}
+function fbRenderWidget() {
+  const backdrop = document.getElementById('fb-modal-backdrop');
+  const root = document.getElementById('fb-panel-root');
+  const fab = document.getElementById('fb-fab');
+  if (!backdrop || !root) return;
+  if (fab) fab.style.display = fbWidgetOpen ? 'none' : 'flex';
+  if (!fbWidgetOpen) { backdrop.style.display = 'none'; root.innerHTML = ''; return; }
+  backdrop.style.display = 'flex';
+  if (fbShowingSuccess) {
+    root.innerHTML = `<div class="card" style="text-align:center; padding:2rem 1.5rem;">
+      <i class="fa-solid fa-circle-check" style="font-size:32px; color:var(--accent); margin-bottom:0.75rem; display:block;"></i>
+      <strong>Thanks — feedback sent!</strong>
+    </div>`;
+    return;
+  }
+  const d = fbDraft || { type: 'bug', text: '' };
+  root.innerHTML = `<div class="card">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.75rem;">
+      <strong style="font-size:15px;">Send Feedback</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="fbCloseWidget()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field"><label>Type</label>
+      <select onchange="fbSetDraftField('type', this.value)">
+        ${FEEDBACK_TYPES.map(t => `<option value="${t.value}" ${t.value === d.type ? 'selected' : ''}>${psEscape(t.label)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="settings-field"><label>What's going on?</label>
+      <textarea rows="4" style="width:100%; resize:vertical; font-family:inherit; font-size:14px; padding:8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);" placeholder="Describe the problem, confusing step, or idea..." oninput="fbSetDraftField('text', this.value)">${psEscape(d.text)}</textarea>
+    </div>
+    <div style="font-size:11px; color:var(--text-secondary); margin-bottom:0.75rem;">We'll automatically include the screen you're on and your name — no need to add that yourself.</div>
+    <button class="save-btn" onclick="fbSubmit()">Send Feedback</button>
+  </div>`;
+}
+
+// ── Admin inbox (Settings > Account > Feedback Inbox) ──
+let fbInboxFilter = 'new';
+function fbInboxSetFilter(f) { fbInboxFilter = f; fbInboxRenderShell(); }
+function fbInboxSetStatus(id, status) {
+  const item = FEEDBACK_ITEMS.find(i => i.id === id);
+  if (!item) return;
+  item.status = status;
+  window.fbSaveFeedbackItem(item).catch(err => console.error('Feedback status save failed:', err));
+  fbInboxRenderShell();
+}
+function fbInboxInit() { fbInboxRenderShell(); }
+function fbInboxRenderShell() {
+  const root = document.getElementById('fb-inbox-root');
+  if (!root) return;
+  if (!invAdminUnlocked) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">Unlock admin (above) to view submitted feedback.</div>`;
+    return;
+  }
+  const counts = { new: 0, reviewed: 0, resolved: 0 };
+  FEEDBACK_ITEMS.forEach(i => { const s = i.status || 'new'; counts[s] = (counts[s] || 0) + 1; });
+  const filtered = fbInboxFilter === 'all' ? FEEDBACK_ITEMS : FEEDBACK_ITEMS.filter(i => (i.status || 'new') === fbInboxFilter);
+  const sorted = [...filtered].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  let html = `<div class="trip-toggle" style="margin-bottom:0.75rem;">
+    <button class="trip-btn ${fbInboxFilter === 'new' ? 'active' : ''}" onclick="fbInboxSetFilter('new')">New (${counts.new})</button>
+    <button class="trip-btn ${fbInboxFilter === 'reviewed' ? 'active' : ''}" onclick="fbInboxSetFilter('reviewed')">Reviewed (${counts.reviewed})</button>
+    <button class="trip-btn ${fbInboxFilter === 'resolved' ? 'active' : ''}" onclick="fbInboxSetFilter('resolved')">Resolved (${counts.resolved})</button>
+    <button class="trip-btn ${fbInboxFilter === 'all' ? 'active' : ''}" onclick="fbInboxSetFilter('all')">All (${FEEDBACK_ITEMS.length})</button>
+  </div>`;
+  html += sorted.length === 0
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No feedback here.</div>`
+    : `<div class="inv-color-list">` + sorted.map(fbInboxItemHtml).join('') + `</div>`;
+  root.innerHTML = html;
+}
+function fbInboxItemHtml(item) {
+  const badge = FEEDBACK_STATUS_BADGE[item.status || 'new'] || FEEDBACK_STATUS_BADGE.new;
+  const date = item.createdAt ? new Date(item.createdAt).toLocaleString() : '';
+  const ctxEntries = item.context && typeof item.context === 'object' ? Object.entries(item.context) : [];
+  return `<div class="inv-color-row" style="padding:0.75rem;">
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:0.5rem;">
+      <div style="min-width:0;">
+        <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-tertiary);">${psEscape(fbTypeLabel(item.type))}</div>
+        <div style="font-size:11px; color:var(--text-secondary); margin-top:2px;">${psEscape(item.who || 'Unknown')} · ${psEscape(item.screenLabel || item.screenView || '')} · ${psEscape(date)}</div>
+      </div>
+      <div style="font-size:11px; font-weight:700; border-radius:5px; padding:3px 8px; background:${badge.bg}; color:${badge.color}; white-space:nowrap; flex-shrink:0;">${badge.label}</div>
+    </div>
+    <div style="font-size:13px; margin-bottom:0.5rem; white-space:pre-wrap;">${psEscape(item.text)}</div>
+    ${ctxEntries.length > 0 ? `<div style="font-size:11px; color:var(--text-secondary); margin-bottom:0.5rem;">${ctxEntries.map(([k, v]) => `${psEscape(k)}: ${psEscape(String(v))}`).join(' · ')}</div>` : ''}
+    <div class="settings-field" style="margin-bottom:0;">
+      <select onchange="fbInboxSetStatus('${item.id}', this.value)">
+        <option value="new" ${(item.status || 'new') === 'new' ? 'selected' : ''}>New</option>
+        <option value="reviewed" ${item.status === 'reviewed' ? 'selected' : ''}>Reviewed</option>
+        <option value="resolved" ${item.status === 'resolved' ? 'selected' : ''}>Resolved</option>
+      </select>
+    </div>
+  </div>`;
+}
+
 // ═══════════════════════════════════════ BBT MASTER COLOR CATALOG ═══════════════════════════════════════
 //
 // Phase 1 (data foundation) of the approved BBT Master Catalog architecture — see the "BBT Master
@@ -16547,6 +16768,8 @@ function bootApp() {
   try { assetsStartListeners(); } catch (e) { console.error('Assets listeners failed to start:', e); }
   try { suppliesStartListeners(); } catch (e) { console.error('Supplies listeners failed to start:', e); }
   try { mstStartListeners(); } catch (e) { console.error('BBT Master Catalog listeners failed to start:', e); }
+  try { fbStartListeners(); } catch (e) { console.error('Feedback listeners failed to start:', e); }
+  try { fbInboxInit(); } catch (e) { console.error('fbInboxInit failed:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { bsUpdateHomeBanner(); } catch (e) { console.error('bsUpdateHomeBanner failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
