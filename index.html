@@ -1017,6 +1017,27 @@
   window.fbSaveFoilItem = (item) => setDoc(doc(foilItemsRef, item.id), item);
   window.fbDeleteFoilItem = (id) => deleteDoc(doc(foilItemsRef, id));
 
+  // Inventory "extras" (Add-Ons live now; Job Materials/Job Components-Hardware/Raw Framing
+  // reserved for later) — one flat collection with a `category` discriminator, same proven shape
+  // as foilItems, so a future category is just a new category value plus its own seeded Groups,
+  // never a new collection or a new set of CRUD functions.
+  const invxItemsRef = collection(db, 'businesses', BUSINESS_ID, 'invExtraItems');
+  window.fbOnSnapshotInvxItems = (onNext, onError) => onSnapshot(invxItemsRef, onNext, onError);
+  window.fbSaveInvxItem = (item) => setDoc(doc(invxItemsRef, item.id), item);
+  window.fbDeleteInvxItem = (id) => deleteDoc(doc(invxItemsRef, id));
+
+  // Assets (backdrops, arches, pipe & drape, marquee letters, etc.) — a sibling system to
+  // Inventory, not nested under it: reusable job property the business retains and expects back,
+  // as opposed to Inventory's consumed-through-jobs cost model. Collection + stable ids exist now
+  // so a future assignment/reservation record can reference assetId — deliberately no
+  // `assignments` array on the Asset itself, per the explicit decision to model that relationship
+  // as its own separate record (assetId + jobId + date range + status) later, not an ever-growing
+  // array here. No item-level UI ships yet — this pass only stands up the Groups skeleton.
+  const assetItemsRef = collection(db, 'businesses', BUSINESS_ID, 'assetItems');
+  window.fbOnSnapshotAssetItems = (onNext, onError) => onSnapshot(assetItemsRef, onNext, onError);
+  window.fbSaveAssetItem = (item) => setDoc(doc(assetItemsRef, item.id), item);
+  window.fbDeleteAssetItem = (id) => deleteDoc(doc(assetItemsRef, id));
+
   // ═══ BBT Master Catalog — the first genuinely global (non-business-scoped) data in this app ═══
   // Deliberately NOT under businesses/{BUSINESS_ID} — this is BBT-maintained reference data meant
   // to be shared and read by every business, not owned by this one. Firestore Security Rules must
@@ -1471,8 +1492,28 @@
         <div class="tool-tile-icon"><i class="fa-solid fa-star"></i></div>
         <div class="tool-tile-title">Foil</div>
       </div>
-      <div class="tool-tile soon">
+      <div class="tool-tile" onclick="invxOpenCategory('addOns')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-ribbon"></i></div>
+        <div class="tool-tile-title">Add-Ons</div>
+      </div>
+      <div class="tool-tile soon" onclick="invxOpenCategory('jobMaterials')">
         <div class="tool-tile-icon"><i class="fa-solid fa-toolbox"></i></div>
+        <div class="tool-tile-title">Job Materials</div>
+      </div>
+      <div class="tool-tile soon" onclick="invxOpenCategory('jobComponents')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-gears"></i></div>
+        <div class="tool-tile-title">Job Components / Hardware</div>
+      </div>
+      <div class="tool-tile soon" onclick="invxOpenCategory('rawFraming')">
+        <div class="tool-tile-icon"><i class="fa-solid fa-ruler-combined"></i></div>
+        <div class="tool-tile-title">Raw Framing Materials</div>
+      </div>
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-layer-group"></i></div>
+        <div class="tool-tile-title">Vinyl</div>
+      </div>
+      <div class="tool-tile soon">
+        <div class="tool-tile-icon"><i class="fa-solid fa-screwdriver-wrench"></i></div>
         <div class="tool-tile-title">Equipment</div>
       </div>
     </div>
@@ -1485,6 +1526,26 @@
   <div class="view" id="view-inventory-foil">
     <div id="inv-foil-root"></div>
   </div><!-- end view-inventory-foil -->
+
+  <!-- ═══════════════════════════════════════ INVENTORY EXTRAS (Add-Ons live now; Job Materials/
+       Job Components-Hardware/Raw Framing reserved for later) VIEW -->
+  <!-- ONE shared view for every Inventory-extras category — not a bespoke view per category —
+       so a future category (Job Materials, etc.) reuses this same mount point by calling
+       invxOpenCategory('jobMaterials') from its own tile rather than needing new markup. Built
+       entirely in JS from INVX_ITEMS, discriminated by `category`. See invxRenderScreen. -->
+  <div class="view" id="view-inventory-extras">
+    <div id="invx-root"></div>
+  </div><!-- end view-inventory-extras -->
+
+  <!-- ═══════════════════════════════════════ ASSETS (sibling top-level system to Inventory) -->
+  <!-- Reusable job property the business retains and expects back (backdrops, arches, pipe &
+       drape, marquee letters, etc.) — a fundamentally different cost model than Inventory's
+       consumed-through-jobs items, so it lives as its own Home tile, not nested under Inventory.
+       This pass ships the Groups organizational skeleton only (business-editable categories,
+       closed by default) — no item-level add/edit UI yet; see assetsRenderScreen. -->
+  <div class="view" id="view-assets">
+    <div id="assets-root"></div>
+  </div><!-- end view-assets -->
 
   <!-- ═══════════════════════════════════════ LATEX CATEGORY PICKER -->
   <!-- Sits between the Inventory category picker and the two actual Latex screens — Standard
@@ -2005,6 +2066,8 @@ const TOOL_META = {
   'inventory-latex': { title: 'Standard Latex',         icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
   'inventory-specialty': { title: 'Specialty Latex',    icon: 'fa-solid fa-shapes',              showBack: true,  showGear: true  },
   'inventory-foil': { title: 'Foil Inventory',          icon: 'fa-solid fa-star',                showBack: true,  showGear: true  },
+  'inventory-extras': { title: 'Add-Ons',               icon: 'fa-solid fa-ribbon',              showBack: true,  showGear: true  },
+  assets:     { title: 'Assets',                        icon: 'fa-solid fa-warehouse',           showBack: true,  showGear: true  },
   letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: true  },
   jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: true  },
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: true  },
@@ -2031,6 +2094,7 @@ const HOME_TOOLS = [
   { id: 'letters', view: 'letters', icon: 'fa-solid fa-font', title: 'Letter Styling Calculator' },
   { id: 'formulas', view: 'formulas', icon: 'fa-solid fa-flask', title: 'Custom Recipes' },
   { id: 'inventory', view: 'inventory', icon: 'fa-solid fa-boxes-stacked', title: 'Inventory' },
+  { id: 'assets', view: 'assets', icon: 'fa-solid fa-warehouse', title: 'Assets' },
   { id: 'timetracker', view: 'timetracker', icon: 'fa-solid fa-clock', title: 'Time Tracker' },
   { id: 'vehiclemaintenance', view: null, icon: 'fa-solid fa-car', title: 'Vehicle Maintenance Log', soon: true },
 ];
@@ -5905,6 +5969,8 @@ function settingsRefreshAdminSections() {
   acRenderShell();
   pgRenderManage(spKindTab);
   pgRenderManage('foilDecoratorShapes');
+  pgRenderManage('assets');
+  pgRenderManage('addOns');
   heRenderSettingsSection();
   heRenderShell();
   mstRenderManufacturersSection();
@@ -10643,14 +10709,32 @@ function pgAddGroup(kind, name, quantityMode) {
   pgSave();
   return group;
 }
+// Central kind -> {items, manageRootId, listRootId, rerender} registry. Every shared Group
+// function below reads through this instead of hardcoding a per-area branch, so a new area (Assets,
+// a new Inventory-extras category) plugs in by adding one entry here rather than editing every pg*
+// function again. Specialty Latex's four kinds (printed/twisting/linking/shapes) all share one
+// config since they're one screen/one item array with `kind` as just a sub-filter within it.
+const PG_SPECIALTY_CONFIG = { items: () => SPECIALTY_ITEMS, manageRootId: 'sp-manage-root', listRootId: 'pg-list', rerender: () => spRenderResults() };
+function pgKindConfig(kind) {
+  if (kind === 'foilDecoratorShapes') {
+    return { items: () => FOIL_ITEMS, manageRootId: 'foil-manage-root', listRootId: 'foil-group-list', rerender: () => { if (typeof foilRenderScreen === 'function') foilRenderScreen(); } };
+  }
+  if (kind === 'assets') {
+    return { items: () => ASSET_ITEMS, manageRootId: 'assets-manage-root', listRootId: 'assets-group-list', rerender: () => { if (typeof assetsRenderScreen === 'function') assetsRenderScreen(); } };
+  }
+  if (typeof INVX_CATEGORY_IDS !== 'undefined' && INVX_CATEGORY_IDS.includes(kind)) {
+    // Every Inventory-extras category (Add-Ons live now; Job Materials/Job Components-Hardware/
+    // Raw Framing reserved) shares one item array/collection, discriminated by `category` — and
+    // `category` and `kind` are deliberately the same string, so no separate mapping is needed.
+    return { items: () => INVX_ITEMS.filter(i => i.category === kind), manageRootId: 'invx-manage-root', listRootId: 'invx-group-list', rerender: () => { if (typeof invxRenderScreen === 'function') invxRenderScreen(); } };
+  }
+  return PG_SPECIALTY_CONFIG;
+}
 // Every group knows which screen/render function it belongs to (its own `kind`), so rename/move/
 // archive/restore/delete can re-render the right screen without threading a kind param through
 // every call site — only functions with no existing group to inspect (add/manage/list) need one
 // passed in explicitly.
-function pgRerenderScreenFor(kind) {
-  if (kind === 'foilDecoratorShapes') { if (typeof foilRenderScreen === 'function') foilRenderScreen(); }
-  else { spRenderResults(); }
-}
+function pgRerenderScreenFor(kind) { pgKindConfig(kind).rerender(); }
 function pgRenameGroup(id, name) {
   const group = pgFindGroup(id);
   if (!group) return;
@@ -10706,7 +10790,7 @@ function pgRestoreGroup(id) {
 function pgDeleteGroup(id) {
   const group = pgFindGroup(id);
   if (!group) return;
-  const items = group.kind === 'foilDecoratorShapes' ? FOIL_ITEMS : SPECIALTY_ITEMS;
+  const items = pgKindConfig(group.kind).items();
   const usedBy = items.filter(i => i.printGroupId === id).length;
   if (usedBy > 0) { alert(`"${group.name}" is used by ${usedBy} item${usedBy === 1 ? '' : 's'} — reassign those items' group first.`); return; }
   if (!confirm(`Permanently delete the "${group.name}" group? This can't be undone.`)) return;
@@ -10749,7 +10833,8 @@ function pgLockAdmin() {
 let pgManageCollapsed = true;
 function pgToggleManageCollapsed(kind) { pgManageCollapsed = !pgManageCollapsed; pgRenderManage(kind); }
 function pgRenderManage(kind) {
-  const root = document.getElementById(kind === 'foilDecoratorShapes' ? 'foil-manage-root' : 'sp-manage-root');
+  const cfg = pgKindConfig(kind);
+  const root = document.getElementById(cfg.manageRootId);
   if (!root) return;
   root.innerHTML = `
     <div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="pgToggleManageCollapsed('${kind}')">
@@ -10764,7 +10849,7 @@ function pgRenderManage(kind) {
           ? `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="pgLockAdmin()">Lock</button>`
           : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="pgUnlockAdmin()">Unlock</button>`}
       </div>
-      <div id="${kind === 'foilDecoratorShapes' ? 'foil-group-list' : 'pg-list'}"></div>
+      <div id="${cfg.listRootId}"></div>
       ${invAdminUnlocked ? `
         <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="pgAddGroupPrompt('${kind}')"><i class="fa-solid fa-plus"></i> Add group</button>
         ${kind === 'printed' ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px; margin-left:8px;" onclick="pgAssimilateExistingPatterns()"><i class="fa-solid fa-wand-magic-sparkles"></i> Assimilate existing patterns</button>` : ''}
@@ -10774,11 +10859,12 @@ function pgRenderManage(kind) {
   pgRenderList(kind);
 }
 function pgRenderList(kind) {
-  const container = document.getElementById(kind === 'foilDecoratorShapes' ? 'foil-group-list' : 'pg-list');
+  const cfg = pgKindConfig(kind);
+  const container = document.getElementById(cfg.listRootId);
   if (!container) return;
   const active = pgGroupsForKind(kind, false);
   const archived = pgGroupsForKind(kind, true).filter(g => g.active === false);
-  const items = kind === 'foilDecoratorShapes' ? FOIL_ITEMS : SPECIALTY_ITEMS;
+  const items = cfg.items();
   const countFor = (id) => items.filter(i => i.printGroupId === id).length;
   const quantityModeSelectHtml = (g) => kind !== 'foilDecoratorShapes' ? '' : `
       <select style="flex-shrink:0; font-size:11px; width:auto;" ${invAdminUnlocked ? '' : 'disabled'} onchange="pgSetGroupQuantityMode('${g.id}', this.value)">
@@ -12525,6 +12611,519 @@ function foilRenderScreen() {
   root.innerHTML = html;
   if (foilCategoryTab === 'lettersNumbers') foilRenderLNContent();
   else if (foilCategoryTab === 'decoratorShapes') { pgRenderManage('foilDecoratorShapes'); foilRenderDecoratorResults(); }
+}
+
+// ═══════════════════════════════════════ INVENTORY EXTRAS (Add-Ons live now; Job Materials /
+// Job Components-Hardware / Raw Framing reserved for later) ═══════════════════════════════════
+//
+// One flat collection (INVX_ITEMS), discriminated by `category` — the same proven pattern as
+// FOIL_ITEMS across three structurally different shapes. Add-Ons is the first live category; the
+// other three exist as reserved category ids + placeholder tiles only. Extending this later is
+// "add a starter-group seed list + flip `soon` on its tile" — never a new collection or a new set
+// of CRUD functions, since every function below is written generically against `invxCategoryTab`.
+// Reuses the shared Group system (PRINT_GROUPS) with `kind === category` — see pgKindConfig.
+//
+// consumableBehavior ('consumable' | 'recoverable') is stored per item now, per the approved
+// architecture, purely as configuration — nothing reads it yet. It exists so the future
+// Production/ledger dispatch (Outstanding/Returned for recoverable items) has something stable to
+// branch on later; this pass does not build that workflow.
+let INVX_ITEMS = [];
+let INVX_ITEMS_TRASHED = [];
+const INVX_CATEGORIES = [
+  { id: 'addOns', label: 'Add-Ons', soon: false },
+  { id: 'jobMaterials', label: 'Job Materials', soon: true },
+  { id: 'jobComponents', label: 'Job Components / Hardware', soon: true },
+  { id: 'rawFraming', label: 'Raw Framing Materials', soon: true },
+];
+const INVX_CATEGORY_IDS = INVX_CATEGORIES.map(c => c.id);
+// Starter groups, seeded once per category the first time it's opened with zero groups already
+// present — business-editable/renameable/archiveable afterward like any group. Only Add-Ons has a
+// seed list since it's the only live category; a future category adds its own entry here.
+const INVX_GROUP_SEEDS = {
+  addOns: ['Fringe / Tassels', 'Florals / Greenery', 'Stickers / Butterflies', 'Ribbons / Streamers', 'Specialty Accents', 'Other'],
+};
+function invxEnsureGroupsSeeded(category) {
+  const seed = INVX_GROUP_SEEDS[category];
+  if (!seed || pgGroupsForKind(category, true).length > 0) return;
+  seed.forEach(name => pgAddGroup(category, name));
+}
+let invxCategoryTab = 'addOns';
+let invxSearchQuery = '';
+let invxExpandedItem = null;
+let invxAddOpen = false;
+let invxAddDraft = null;
+
+function invxStartListeners() {
+  invxRenderScreen(); // shell first, same pattern as invStartListeners/spStartListeners/foilStartListeners
+  window.fbOnSnapshotInvxItems(
+    (snapshot) => {
+      const all = snapshot.docs.map(d => d.data());
+      INVX_ITEMS = all.filter(i => !i.deletedAt);
+      INVX_ITEMS_TRASHED = all.filter(i => i.deletedAt);
+      invxRenderScreen();
+    },
+    (err) => console.error('Inventory extras sync error:', err)
+  );
+}
+function psNewInvxItemId() { return 'invxitem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+function invxFindItem(id) { return INVX_ITEMS.find(i => i.id === id) || INVX_ITEMS_TRASHED.find(i => i.id === id); }
+function invxSaveItem(item) {
+  window.fbSaveInvxItem(item).catch(err => {
+    console.error(err);
+    alert("Couldn't save that change — check your connection and try again.");
+  });
+}
+// No hardcoded "universal" size/color list — both grow organically from whatever's already been
+// entered, same philosophy as every other Inventory category this session. Brand gets
+// Generic/Unknown + Other, matching Specialty Latex/Foil's exact pattern.
+function invxKnownColors() { return [...new Set(INVX_ITEMS.map(i => i.color).filter(Boolean))].sort(); }
+function invxKnownSizes() { return [...new Set(INVX_ITEMS.map(i => i.size).filter(Boolean))].sort(); }
+function invxKnownBrands() { return [...new Set(INVX_ITEMS.map(i => i.brand).filter(b => b && b !== 'Generic/Unknown'))].sort(); }
+function invxBrandOptions() { return [...invxKnownBrands(), 'Generic/Unknown', 'Other']; }
+
+// Entry point from the Inventory picker's tiles — blocks a not-yet-live category with the same
+// "coming in a later phase" alert convention used for Themed Foils, rather than leaving the tile
+// dead like the old inert Equipment placeholder.
+function invxOpenCategory(cat) {
+  const c = INVX_CATEGORIES.find(x => x.id === cat);
+  if (c && c.soon) { alert(`${c.label} is coming in a later phase.`); return; }
+  showView('inventory-extras');
+  invxSetCategoryTab(cat);
+}
+function invxSetCategoryTab(cat) {
+  invxCategoryTab = cat;
+  invxExpandedItem = null;
+  invxEnsureGroupsSeeded(cat);
+  // Default every group section to collapsed on opening the category, same convention already
+  // used for every other grouped Inventory screen this session (seeded once on tab entry, not on
+  // every render, so an in-visit expand/collapse choice isn't overwritten by an unrelated re-render).
+  pgGroupsForKind(cat, true).forEach(g => invCollapsedGroups.add('invx-group:' + g.id));
+  invCollapsedGroups.add('invx-group:(uncategorized)');
+  invxRenderScreen();
+}
+function invxSetSearch(q) { invxSearchQuery = q; invxRenderResults(); }
+function invxToggleExpand(id) { invxExpandedItem = invxExpandedItem === id ? null : id; invxRenderResults(); }
+
+function invxFilteredItems() {
+  const q = invxSearchQuery.trim().toLowerCase();
+  const items = INVX_ITEMS.filter(i => i.category === invxCategoryTab);
+  if (!q) return items;
+  return items.filter(i => [i.name, i.brand, i.color, i.size, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)));
+}
+// Identity = Group + Name + Color + Size + Brand (case/whitespace-insensitive) — the same real
+// item shouldn't get a second competing record just because someone re-typed a field slightly
+// differently. Quantity/cost/notes/consumableBehavior are never part of identity.
+function invxFindCollision(category, printGroupId, name, color, size, brand, excludeId) {
+  const norm = s => (s || '').trim().toLowerCase();
+  return INVX_ITEMS.find(i => i.id !== excludeId && i.category === category &&
+    (i.printGroupId || null) === (printGroupId || null) &&
+    norm(i.name) === norm(name) && norm(i.color) === norm(color) && norm(i.size) === norm(size) && norm(i.brand) === norm(brand));
+}
+// Mirrors spGroupedItems/foilGroupedDecoratorItems's {key,label,items} shape (Uncategorized pinned
+// last, sections ordered by each group's manual order) against INVX_ITEMS instead.
+function invxGroupedItems(items) {
+  const byGroup = {};
+  items.forEach(i => { const key = i.printGroupId || '(uncategorized)'; (byGroup[key] = byGroup[key] || []).push(i); });
+  const orderById = {};
+  pgGroupsForKind(invxCategoryTab, true).forEach((g, idx) => { orderById[g.id] = idx; });
+  const comparator = (a, b) => (a.name || '').localeCompare(b.name || '') || (a.color || '').localeCompare(b.color || '') || (a.size || '').localeCompare(b.size || '') || (a.brand || '').localeCompare(b.brand || '');
+  return Object.keys(byGroup).sort((a, b) => {
+    if (a === '(uncategorized)') return 1;
+    if (b === '(uncategorized)') return -1;
+    return (orderById[a] ?? 999999) - (orderById[b] ?? 999999);
+  }).map(key => ({
+    key: 'invx-group:' + key,
+    label: key === '(uncategorized)' ? 'Uncategorized' : ((pgFindGroup(key) || {}).name || 'Uncategorized'),
+    items: [...byGroup[key]].sort(comparator),
+  }));
+}
+function invxToggleGroup(key) {
+  if (invCollapsedGroups.has(key)) invCollapsedGroups.delete(key);
+  else invCollapsedGroups.add(key);
+  invxRenderResults();
+}
+
+function invxOpenAdd() {
+  invxAddOpen = true;
+  invxAddDraft = { printGroupId: '', printGroupNewName: '', name: '', brand: '', brandOther: '', color: '', size: '', quantity: 0, consumableBehavior: 'consumable', costPerUnit: '', storageLocation: '', notes: '' };
+  invxRenderScreen();
+}
+function invxCancelAdd() { invxAddOpen = false; invxAddDraft = null; invxRenderScreen(); }
+function invxSetDraftField(field, value) {
+  if (!invxAddDraft) return;
+  invxAddDraft[field] = value;
+  if (field === 'brand' || field === 'printGroupId') invxRenderScreen(); // reveal Other/new-group free text
+}
+function invxSubmitAdd() {
+  if (!invxAddDraft) return;
+  const d = invxAddDraft;
+  const name = (d.name || '').trim();
+  if (!name) { alert('Enter a name/description.'); return; }
+  if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
+  const brand = resolveBrandValue(d.brand, d.brandOther);
+  if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
+  const color = (d.color || '').trim();
+  const size = (d.size || '').trim();
+
+  let printGroupId = null;
+  if (d.printGroupId === '__new__') {
+    const groupName = (d.printGroupNewName || '').trim();
+    if (!groupName) { alert('Type a name for the new group, or choose an existing one.'); return; }
+    printGroupId = pgAddGroup(invxCategoryTab, groupName).id;
+  } else if (d.printGroupId) {
+    printGroupId = d.printGroupId;
+  }
+
+  const dup = invxFindCollision(invxCategoryTab, printGroupId, name, color, size, brand, null);
+  if (dup) {
+    alert(`"${name}" already exists in this Group with the same Color/Size/Brand — opening it instead of creating another.`);
+    invxAddOpen = false;
+    invxAddDraft = null;
+    invCollapsedGroups.delete('invx-group:' + (printGroupId || '(uncategorized)'));
+    invxExpandedItem = dup.id;
+    invxRenderScreen();
+    return;
+  }
+
+  const item = {
+    id: psNewInvxItemId(),
+    category: invxCategoryTab,
+    printGroupId,
+    name, brand, color, size,
+    quantity: parseInt(d.quantity, 10) || 0,
+    consumableBehavior: d.consumableBehavior === 'recoverable' ? 'recoverable' : 'consumable',
+    costPerUnit: d.costPerUnit === '' ? null : (parseFloat(d.costPerUnit) || 0),
+    storageLocation: (d.storageLocation || '').trim(),
+    notes: (d.notes || '').trim(),
+    active: true,
+  };
+  INVX_ITEMS.push(item);
+  invxSaveItem(item);
+  invxAddOpen = false;
+  invxAddDraft = null;
+  invCollapsedGroups.delete('invx-group:' + (printGroupId || '(uncategorized)'));
+  invxExpandedItem = item.id;
+  invxRenderScreen();
+}
+// Plain saves, matching every other Inventory category built this session — no ledger here either.
+function invxUpdateField(itemId, field, value) {
+  const item = invxFindItem(itemId);
+  if (!item) return;
+  if (field === 'quantity') item[field] = parseInt(value, 10) || 0;
+  else if (field === 'costPerUnit') item[field] = value === '' ? null : (parseFloat(value) || 0);
+  else if (field === 'consumableBehavior') item[field] = value === 'recoverable' ? 'recoverable' : 'consumable';
+  else item[field] = value;
+  invxSaveItem(item);
+  invxRenderResults();
+}
+// Group stays directly editable in the expanded card (not behind Edit Details) — same precedent
+// as Specialty Latex/Decorator Shapes' Group selector.
+function invxSetItemGroup(itemId, value) {
+  const item = invxFindItem(itemId);
+  if (!item) return;
+  if (value === '__new__') {
+    const groupName = prompt('New group name:');
+    if (groupName === null || !groupName.trim()) { invxRenderResults(); return; }
+    item.printGroupId = pgAddGroup(item.category, groupName.trim()).id;
+  } else {
+    item.printGroupId = value || null;
+  }
+  invxSaveItem(item);
+  invxRenderResults();
+}
+function invxItemLabel(item) { return [item.name, item.color, item.size, item.brand].filter(Boolean).join(' — '); }
+function invxDeleteItem(itemId) {
+  const item = invxFindItem(itemId);
+  if (!item) return;
+  const label = invxItemLabel(item);
+  if (!confirm(`Move "${label}" to Recently Deleted? You can restore it from there anytime.`)) return;
+  if (invxExpandedItem === itemId) invxExpandedItem = null;
+  item.deletedAt = Date.now();
+  invxSaveItem(item);
+  INVX_ITEMS = INVX_ITEMS.filter(i => i.id !== itemId);
+  INVX_ITEMS_TRASHED = INVX_ITEMS_TRASHED.concat([item]);
+  invxRenderScreen();
+}
+function invxRestoreItem(itemId) {
+  const item = INVX_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  delete item.deletedAt;
+  invxSaveItem(item);
+  INVX_ITEMS_TRASHED = INVX_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  INVX_ITEMS = INVX_ITEMS.concat([item]);
+  invxRenderScreen();
+}
+function invxPermanentlyDeleteItem(itemId) {
+  const item = INVX_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  const typed = prompt(`This permanently erases this item — even Recently Deleted won't have it anymore. This truly can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not deleted — you must type DELETE exactly.'); return; }
+  window.fbDeleteInvxItem(itemId).catch(err => console.error('Permanent delete failed:', err));
+  INVX_ITEMS_TRASHED = INVX_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  invxRenderScreen();
+}
+// ── Edit Details: Name/Brand/Color/Size — the fundamental identifying fields. Group and every
+// operational field (Quantity/Cost/Storage/Notes/Behavior) stay directly editable in the card,
+// same precedent established for Decorator Shapes. ──
+let invxEditDetailsItemId = null;
+let invxEditDetailsDraft = null;
+function invxOpenEditDetails(itemId) {
+  const item = invxFindItem(itemId);
+  if (!item) return;
+  const options = invxBrandOptions();
+  const isKnownBrand = options.includes(item.brand);
+  invxEditDetailsItemId = itemId;
+  invxEditDetailsDraft = {
+    name: item.name || '', color: item.color || '', size: item.size || '',
+    brand: isKnownBrand ? item.brand : 'Other', brandOther: isKnownBrand ? '' : (item.brand || ''),
+  };
+  invxRenderResults();
+}
+function invxCancelEditDetails() { invxEditDetailsItemId = null; invxEditDetailsDraft = null; invxRenderResults(); }
+function invxSetEditDetailsField(field, value) {
+  if (!invxEditDetailsDraft) return;
+  invxEditDetailsDraft[field] = value;
+  if (field === 'brand') invxRenderResults();
+}
+function invxSubmitEditDetails(itemId) {
+  const item = invxFindItem(itemId);
+  if (!item || !invxEditDetailsDraft) return;
+  const d = invxEditDetailsDraft;
+  const name = (d.name || '').trim();
+  if (!name) { alert('Enter a name/description.'); return; }
+  if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
+  const brand = resolveBrandValue(d.brand, d.brandOther);
+  if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
+  const color = (d.color || '').trim();
+  const size = (d.size || '').trim();
+  const collision = invxFindCollision(item.category, item.printGroupId, name, color, size, brand, item.id);
+  if (collision) { alert('This would collide with an existing item in the same Group. Edit that one instead, or change one of these fields.'); return; }
+  item.name = name;
+  item.color = color;
+  item.size = size;
+  item.brand = brand;
+  invxSaveItem(item);
+  invxEditDetailsItemId = null;
+  invxEditDetailsDraft = null;
+  invxRenderResults();
+}
+function invxEditDetailsFormHtml(item) {
+  const d = invxEditDetailsDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.5rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Edit Details</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invxCancelEditDetails()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field"><label>Name / Description</label>
+      <input type="text" value="${invAttr(d.name)}" oninput="invxSetEditDetailsField('name', this.value)">
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Color</label><input type="text" list="invx-color-suggestions" value="${invAttr(d.color)}" oninput="invxSetEditDetailsField('color', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Size</label><input type="text" list="invx-size-suggestions" value="${invAttr(d.size)}" oninput="invxSetEditDetailsField('size', this.value)"></div>
+    </div>
+    <div class="settings-field"><label>Brand</label>
+      ${brandSelectorHtml({ options: invxBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "invxSetEditDetailsField('brand', this.value)", onOtherInput: "invxSetEditDetailsField('brandOther', this.value)" })}
+    </div>
+    <button class="save-btn" onclick="invxSubmitEditDetails('${item.id}')">Save Details</button>
+  </div>`;
+}
+function invxAddFormHtml() {
+  const d = invxAddDraft;
+  const category = INVX_CATEGORIES.find(c => c.id === invxCategoryTab) || INVX_CATEGORIES[0];
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Add ${psEscape(category.label)}</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invxCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field"><label>Group <span style="font-weight:400;">(optional)</span></label>
+      <select onchange="invxSetDraftField('printGroupId', this.value)">
+        <option value="" ${d.printGroupId === '' ? 'selected' : ''}>Uncategorized</option>
+        ${pgGroupsForKind(invxCategoryTab, false).map(g => `<option value="${invAttr(g.id)}" ${g.id === d.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+        <option value="__new__" ${d.printGroupId === '__new__' ? 'selected' : ''}>+ Add new group…</option>
+      </select>
+      ${d.printGroupId === '__new__' ? `<input type="text" style="margin-top:6px;" placeholder="New group name" value="${invAttr(d.printGroupNewName)}" oninput="invxSetDraftField('printGroupNewName', this.value)">` : ''}
+    </div>
+    <div class="settings-field"><label>Name / Description</label>
+      <input type="text" placeholder="e.g. Gold Fringe Curtain" value="${invAttr(d.name)}" oninput="invxSetDraftField('name', this.value)">
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Color <span style="font-weight:400;">(optional)</span></label>
+        <input type="text" list="invx-color-suggestions" value="${invAttr(d.color)}" oninput="invxSetDraftField('color', this.value)">
+        <datalist id="invx-color-suggestions">${invxKnownColors().map(c => `<option value="${invAttr(c)}">`).join('')}</datalist>
+      </div>
+      <div class="settings-field" style="margin-bottom:0"><label>Size <span style="font-weight:400;">(optional)</span></label>
+        <input type="text" list="invx-size-suggestions" value="${invAttr(d.size)}" oninput="invxSetDraftField('size', this.value)">
+        <datalist id="invx-size-suggestions">${invxKnownSizes().map(s => `<option value="${invAttr(s)}">`).join('')}</datalist>
+      </div>
+    </div>
+    <div class="settings-field"><label>Brand</label>
+      ${brandSelectorHtml({ options: invxBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "invxSetDraftField('brand', this.value)", onOtherInput: "invxSetDraftField('brandOther', this.value)" })}
+    </div>
+    <div class="settings-field"><label>Behavior <span style="font-weight:400;">(how this item is used up)</span></label>
+      <select onchange="invxSetDraftField('consumableBehavior', this.value)">
+        <option value="consumable" ${d.consumableBehavior !== 'recoverable' ? 'selected' : ''}>Consumable — used up on each job</option>
+        <option value="recoverable" ${d.consumableBehavior === 'recoverable' ? 'selected' : ''}>Recoverable / multi-use — often comes back, but not required</option>
+      </select>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${d.quantity}" oninput="invxSetDraftField('quantity', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Cost per unit <span style="font-weight:400;">(optional)</span></label><input type="number" step="0.01" min="0" value="${invAttr(d.costPerUnit)}" oninput="invxSetDraftField('costPerUnit', this.value)"></div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.storageLocation)}" oninput="invxSetDraftField('storageLocation', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Notes <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.notes)}" oninput="invxSetDraftField('notes', this.value)"></div>
+    </div>
+    <button class="save-btn" onclick="invxSubmitAdd()">Save item</button>
+  </div>`;
+}
+function invxItemCardHtml(item) {
+  const expanded = invxExpandedItem === item.id;
+  const subtitle = [item.color, item.size, item.brand || 'Generic/Unknown'].filter(Boolean).join(' · ');
+  let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
+  html += `<div class="inv-color-row-header" onclick="invxToggleExpand('${item.id}')">
+    <div class="inv-color-row-text">
+      <div class="inv-color-row-name">${psEscape(item.name)}</div>
+      <div class="inv-color-row-brand">${psEscape(subtitle)}</div>
+    </div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.quantity || 0) === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${(item.quantity || 0) === 0 ? 'var(--accent)' : 'var(--info-text)'};">${item.quantity || 0}</div>
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+  </div>`;
+  if (expanded) {
+    html += `<div class="ps-job-body">`;
+    if (item.notes) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">${psEscape(item.notes)}</div>`;
+    html += `<div class="settings-field">
+      <label>Group</label>
+      <select onchange="invxSetItemGroup('${item.id}', this.value)">
+        <option value="" ${!item.printGroupId ? 'selected' : ''}>Uncategorized</option>
+        ${pgGroupsForKind(item.category, false).map(g => `<option value="${invAttr(g.id)}" ${g.id === item.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+        <option value="__new__">+ Add new group…</option>
+      </select>
+    </div>`;
+    html += `<div class="settings-field">
+      <label>Behavior</label>
+      <select onchange="invxUpdateField('${item.id}','consumableBehavior',this.value)">
+        <option value="consumable" ${item.consumableBehavior !== 'recoverable' ? 'selected' : ''}>Consumable — used up on each job</option>
+        <option value="recoverable" ${item.consumableBehavior === 'recoverable' ? 'selected' : ''}>Recoverable / multi-use — often comes back, but not required</option>
+      </select>
+    </div>`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${item.quantity || 0}" onchange="invxUpdateField('${item.id}','quantity',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Cost per unit</label><input type="number" step="0.01" min="0" value="${item.costPerUnit == null ? '' : item.costPerUnit}" placeholder="optional" onchange="invxUpdateField('${item.id}','costPerUnit',this.value)"></div>
+    </div>`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="invxUpdateField('${item.id}','notes',this.value)"></div>
+    </div>`;
+    html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invxOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invxDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+    </div>`;
+    if (invxEditDetailsItemId === item.id) html += invxEditDetailsFormHtml(item);
+    html += `</div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+function invxRenderResults() {
+  const root = document.getElementById('invx-results-root');
+  if (!root) return;
+  const items = invxFilteredItems();
+  if (items.length === 0) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No items yet.</div>`;
+    return;
+  }
+  const groups = invxGroupedItems(items);
+  root.innerHTML = groups.map(g => {
+    const collapsed = invCollapsedGroups.has(g.key);
+    return `<div class="inv-group-header" onclick="invxToggleGroup('${g.key}')">
+      <span>${psEscape(g.label)} (${g.items.length})</span>
+      <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+    </div>
+    ${collapsed ? '' : `<div class="inv-color-list">` + g.items.map(invxItemCardHtml).join('') + `</div>`}`;
+  }).join('');
+}
+function invxRenderScreen() {
+  const root = document.getElementById('invx-root');
+  if (!root) return;
+  const category = INVX_CATEGORIES.find(c => c.id === invxCategoryTab) || INVX_CATEGORIES[0];
+  let html = `<div class="card">
+    <div class="settings-field" style="margin-bottom:0.6rem;">
+      ${invSearchFieldHtml({ id: 'invx-search', placeholder: 'Search name, brand, color, size...', value: invxSearchQuery, onInput: 'invxSetSearch(this.value)', onClear: "invxSetSearch('')" })}
+    </div>
+    <button class="save-btn" onclick="invxOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${psEscape(category.label)}</button>
+  </div>`;
+  html += `<div id="invx-manage-root" style="margin-bottom:0.75rem;"></div>`;
+  if (invxAddOpen) html += invxAddFormHtml();
+  html += `<div id="invx-results-root"></div>`;
+
+  const trashed = INVX_ITEMS_TRASHED.filter(i => i.category === invxCategoryTab);
+  if (trashed.length > 0) {
+    html += `<div class="section-label">Recently deleted (${trashed.length})</div>
+    <div class="card">
+      ${trashed.map(item => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:600;">${psEscape(invxItemLabel(item))}</div>
+          </div>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invxRestoreItem('${item.id}')">Restore</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="invxPermanentlyDeleteItem('${item.id}')">Delete forever</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
+  root.innerHTML = html;
+  pgRenderManage(invxCategoryTab);
+  invxRenderResults();
+}
+
+// ═══════════════════════════════════════ ASSETS (sibling top-level system to Inventory) ═══════════════
+//
+// Reusable job property the business retains and expects back (backdrops, arches, pipe & drape,
+// marquee letters, etc.) — a fundamentally different cost model than Inventory's consumed-through-
+// jobs items, so this is its own Home tile, not nested under Inventory. This pass ships only the
+// Groups organizational skeleton (business-editable categories, seeded starters below, closed by
+// default via the Manage panel's own default-collapsed state) — no item-level add/edit UI yet.
+// ASSET_ITEMS/psNewAssetId already exist so stable, real ids are ready the moment item tracking is
+// built, and — per explicit decision — an Asset record deliberately does NOT carry an
+// `assignments` array: that relationship is planned as its own separate record later
+// (assetId + jobId + date range + status), not an ever-growing array on the Asset itself.
+let ASSET_ITEMS = [];
+let ASSET_ITEMS_TRASHED = [];
+const ASSETS_GROUP_SEED = [
+  'Backdrops / Walls', 'Hoops / Arches', 'Pipe & Drape', 'Shimmer Walls', 'Pedestals / Displays',
+  'Props', 'Fabricated / Specialty Frames', 'Bases / Weights', 'Marquee / Light-Up Letters & Numbers', 'Other',
+];
+function assetsEnsureGroupsSeeded() {
+  if (pgGroupsForKind('assets', true).length > 0) return;
+  ASSETS_GROUP_SEED.forEach(name => pgAddGroup('assets', name));
+}
+function psNewAssetId() { return 'asset_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+function assetsStartListeners() {
+  assetsRenderScreen(); // shell first, same pattern as every other category's listener bootstrap
+  window.fbOnSnapshotAssetItems(
+    (snapshot) => {
+      const all = snapshot.docs.map(d => d.data());
+      ASSET_ITEMS = all.filter(i => !i.deletedAt);
+      ASSET_ITEMS_TRASHED = all.filter(i => i.deletedAt);
+      assetsRenderScreen();
+    },
+    (err) => console.error('Assets sync error:', err)
+  );
+}
+function assetsRenderScreen() {
+  const root = document.getElementById('assets-root');
+  if (!root) return;
+  assetsEnsureGroupsSeeded();
+  root.innerHTML = `
+    <div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">
+      Asset item tracking is coming soon. For now, set up your categories below — item tracking and
+      job reservations will build on top of these.
+    </div>
+    <div id="assets-manage-root" style="margin-top:0.75rem;"></div>
+  `;
+  pgRenderManage('assets');
 }
 
 // ═══════════════════════════════════════ BBT MASTER COLOR CATALOG ═══════════════════════════════════════
@@ -14697,6 +15296,10 @@ function goBack() {
   // Foil sits directly under the Inventory category picker, a sibling to Latex — not nested.
   const inFoilInventory = document.getElementById('view-inventory-foil').classList.contains('active');
   if (inFoilInventory) { showView('inventory'); return; }
+  // Inventory-extras (Add-Ons now; Job Materials etc. later) is the same shape as Foil — directly
+  // under the Inventory picker, sibling to Latex/Foil.
+  const inExtrasInventory = document.getElementById('view-inventory-extras').classList.contains('active');
+  if (inExtrasInventory) { showView('inventory'); return; }
   // Guided Setup only ever launches from Business Setup — the topbar back arrow always returns
   // there (in-flow "Back" between questions is a separate control, handled by gsBack()).
   const inGuidedSetup = document.getElementById('view-guidedSetup').classList.contains('active');
@@ -14808,6 +15411,8 @@ function bootApp() {
   try { invStartListeners(); } catch (e) { console.error('Inventory listeners failed to start:', e); }
   try { spStartListeners(); } catch (e) { console.error('Specialty Latex listeners failed to start:', e); }
   try { foilStartListeners(); } catch (e) { console.error('Foil inventory listeners failed to start:', e); }
+  try { invxStartListeners(); } catch (e) { console.error('Inventory extras listeners failed to start:', e); }
+  try { assetsStartListeners(); } catch (e) { console.error('Assets listeners failed to start:', e); }
   try { mstStartListeners(); } catch (e) { console.error('BBT Master Catalog listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { bsUpdateHomeBanner(); } catch (e) { console.error('bsUpdateHomeBanner failed:', e); }
