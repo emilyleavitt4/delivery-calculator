@@ -1038,6 +1038,14 @@
   window.fbSaveAssetItem = (item) => setDoc(doc(assetItemsRef, item.id), item);
   window.fbDeleteAssetItem = (id) => deleteDoc(doc(assetItemsRef, id));
 
+  // Supplies — deliberately its own small collection, not a row in invExtraItems: a Supply has no
+  // quantity/cost/ledger concept at all (the real need is "flag this as running low"), so folding
+  // it into the quantity-tracked Inventory item shape would just mean carrying unused fields.
+  const supplyItemsRef = collection(db, 'businesses', BUSINESS_ID, 'supplyItems');
+  window.fbOnSnapshotSupplyItems = (onNext, onError) => onSnapshot(supplyItemsRef, onNext, onError);
+  window.fbSaveSupplyItem = (item) => setDoc(doc(supplyItemsRef, item.id), item);
+  window.fbDeleteSupplyItem = (id) => deleteDoc(doc(supplyItemsRef, id));
+
   // ═══ BBT Master Catalog — the first genuinely global (non-business-scoped) data in this app ═══
   // Deliberately NOT under businesses/{BUSINESS_ID} — this is BBT-maintained reference data meant
   // to be shared and read by every business, not owned by this one. Firestore Security Rules must
@@ -1496,25 +1504,9 @@
         <div class="tool-tile-icon"><i class="fa-solid fa-ribbon"></i></div>
         <div class="tool-tile-title">Add-Ons</div>
       </div>
-      <div class="tool-tile soon" onclick="invxOpenCategory('jobMaterials')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-toolbox"></i></div>
-        <div class="tool-tile-title">Job Materials</div>
-      </div>
-      <div class="tool-tile soon" onclick="invxOpenCategory('jobComponents')">
-        <div class="tool-tile-icon"><i class="fa-solid fa-gears"></i></div>
-        <div class="tool-tile-title">Job Components / Hardware</div>
-      </div>
-      <div class="tool-tile soon" onclick="invxOpenCategory('rawFraming')">
+      <div class="tool-tile" onclick="invxOpenCategory('framework')">
         <div class="tool-tile-icon"><i class="fa-solid fa-ruler-combined"></i></div>
-        <div class="tool-tile-title">Raw Framing Materials</div>
-      </div>
-      <div class="tool-tile soon">
-        <div class="tool-tile-icon"><i class="fa-solid fa-layer-group"></i></div>
-        <div class="tool-tile-title">Vinyl</div>
-      </div>
-      <div class="tool-tile soon">
-        <div class="tool-tile-icon"><i class="fa-solid fa-screwdriver-wrench"></i></div>
-        <div class="tool-tile-title">Equipment</div>
+        <div class="tool-tile-title">Framework</div>
       </div>
     </div>
   </div><!-- end view-inventory -->
@@ -1541,11 +1533,19 @@
   <!-- Reusable job property the business retains and expects back (backdrops, arches, pipe &
        drape, marquee letters, etc.) — a fundamentally different cost model than Inventory's
        consumed-through-jobs items, so it lives as its own Home tile, not nested under Inventory.
-       This pass ships the Groups organizational skeleton only (business-editable categories,
-       closed by default) — no item-level add/edit UI yet; see assetsRenderScreen. -->
+       See assetsRenderScreen. -->
   <div class="view" id="view-assets">
     <div id="assets-root"></div>
   </div><!-- end view-assets -->
+
+  <!-- ═══════════════════════════════════════ SUPPLIES / NEEDS ORDERING (sibling to Inventory and
+       Assets) -->
+  <!-- Ordinary shop/build/install supplies where quantity is deliberately NOT tracked — the real
+       need is "flag this as running low so Emily can order more," not a quantity-based Inventory
+       system. See suppliesRenderScreen. -->
+  <div class="view" id="view-supplies">
+    <div id="supplies-root"></div>
+  </div><!-- end view-supplies -->
 
   <!-- ═══════════════════════════════════════ LATEX CATEGORY PICKER -->
   <!-- Sits between the Inventory category picker and the two actual Latex screens — Standard
@@ -2068,6 +2068,7 @@ const TOOL_META = {
   'inventory-foil': { title: 'Foil Inventory',          icon: 'fa-solid fa-star',                showBack: true,  showGear: true  },
   'inventory-extras': { title: 'Add-Ons',               icon: 'fa-solid fa-ribbon',              showBack: true,  showGear: true  },
   assets:     { title: 'Assets',                        icon: 'fa-solid fa-warehouse',           showBack: true,  showGear: true  },
+  supplies:   { title: 'Supply Order',                  icon: 'fa-solid fa-cart-shopping',       showBack: true,  showGear: true  },
   letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: true  },
   jobcost:    { title: 'Job Cost Calculator',           icon: 'fa-solid fa-tags',                showBack: true,  showGear: true  },
   helium:     { title: 'Helium Cost Calculator',        icon: 'fa-solid fa-wind',                showBack: true,  showGear: true  },
@@ -2095,6 +2096,7 @@ const HOME_TOOLS = [
   { id: 'formulas', view: 'formulas', icon: 'fa-solid fa-flask', title: 'Custom Recipes' },
   { id: 'inventory', view: 'inventory', icon: 'fa-solid fa-boxes-stacked', title: 'Inventory' },
   { id: 'assets', view: 'assets', icon: 'fa-solid fa-warehouse', title: 'Assets' },
+  { id: 'supplies', view: 'supplies', icon: 'fa-solid fa-cart-shopping', title: 'Supply Order' },
   { id: 'timetracker', view: 'timetracker', icon: 'fa-solid fa-clock', title: 'Time Tracker' },
   { id: 'vehiclemaintenance', view: null, icon: 'fa-solid fa-car', title: 'Vehicle Maintenance Log', soon: true },
 ];
@@ -5970,7 +5972,11 @@ function settingsRefreshAdminSections() {
   pgRenderManage(spKindTab);
   pgRenderManage('foilDecoratorShapes');
   pgRenderManage('assets');
-  pgRenderManage('addOns');
+  // Add-Ons and Framework share one DOM mount point (#invx-manage-root, swapped by
+  // invxCategoryTab) — call with whichever category is actually current, never both, or the
+  // wrong one could win the render.
+  pgRenderManage(invxCategoryTab);
+  pgRenderManage('supplies');
   heRenderSettingsSection();
   heRenderShell();
   mstRenderManufacturersSection();
@@ -10680,6 +10686,12 @@ function pgInit() {
       // this is safe to call regardless of where it's defined textually in the file.
       foilConsolidateDecoratorFamilies();
       foilRenderScreen();
+      // Add-Ons/Framework/Assets group-name cleanup only ever touches PRINT_GROUPS (never item
+      // data), so it has no load-order race to guard against — safe to run the moment groups load.
+      invxConsolidateGroups();
+      invxRenderScreen();
+      if (typeof assetsRenderScreen === 'function') assetsRenderScreen();
+      if (typeof suppliesRenderScreen === 'function') suppliesRenderScreen();
     }
   }).catch(err => console.error('Print groups load failed:', err));
 }
@@ -10702,7 +10714,7 @@ function pgFindByName(kind, name) {
   const norm = s => (s || '').trim().toLowerCase();
   return PRINT_GROUPS.find(g => g.kind === kind && norm(g.name) === norm(name));
 }
-function pgAddGroup(kind, name, quantityMode) {
+function pgAddGroup(kind, name, quantityMode, itemShape) {
   const trimmed = (name || '').trim();
   if (!trimmed) return null;
   const existing = pgFindByName(kind, trimmed);
@@ -10711,6 +10723,7 @@ function pgAddGroup(kind, name, quantityMode) {
   const maxOrder = siblings.reduce((m, g) => Math.max(m, g.order || 0), -1);
   const group = { id: psNewPrintGroupId(), kind, name: trimmed, order: maxOrder + 1, active: true };
   if (quantityMode) group.quantityMode = quantityMode;
+  if (itemShape) group.itemShape = itemShape;
   PRINT_GROUPS.push(group);
   pgSave();
   return group;
@@ -10728,10 +10741,13 @@ function pgKindConfig(kind) {
   if (kind === 'assets') {
     return { items: () => ASSET_ITEMS, manageRootId: 'assets-manage-root', listRootId: 'assets-group-list', rerender: () => { if (typeof assetsRenderScreen === 'function') assetsRenderScreen(); } };
   }
+  if (kind === 'supplies') {
+    return { items: () => SUPPLY_ITEMS, manageRootId: 'supplies-manage-root', listRootId: 'supplies-group-list', rerender: () => { if (typeof suppliesRenderScreen === 'function') suppliesRenderScreen(); } };
+  }
   if (typeof INVX_CATEGORY_IDS !== 'undefined' && INVX_CATEGORY_IDS.includes(kind)) {
-    // Every Inventory-extras category (Add-Ons live now; Job Materials/Job Components-Hardware/
-    // Raw Framing reserved) shares one item array/collection, discriminated by `category` — and
-    // `category` and `kind` are deliberately the same string, so no separate mapping is needed.
+    // Every Inventory-extras category (Add-Ons, Framework) shares one item array/collection,
+    // discriminated by `category` — and `category` and `kind` are deliberately the same string,
+    // so no separate mapping is needed.
     return { items: () => INVX_ITEMS.filter(i => i.category === kind), manageRootId: 'invx-manage-root', listRootId: 'invx-group-list', rerender: () => { if (typeof invxRenderScreen === 'function') invxRenderScreen(); } };
   }
   return PG_SPECIALTY_CONFIG;
@@ -10817,6 +10833,18 @@ function pgSetGroupQuantityMode(id, mode) {
   pgRenderList(group.kind);
   pgRerenderScreenFor(group.kind);
 }
+// Only Add-Ons/Framework groups ever show/use this — determines which fields an item's Add/Edit
+// form shows (see invxItemShapeFor). A group with no itemShape (every other kind, forever) simply
+// defaults to 'piece' wherever it's read.
+function pgSetGroupItemShape(id, shape) {
+  const group = pgFindGroup(id);
+  if (!group) return;
+  const valid = ['piece', 'rawStock', 'fabricated', 'vinyl'];
+  group.itemShape = valid.includes(shape) ? shape : 'piece';
+  pgSave();
+  pgRenderList(group.kind);
+  pgRerenderScreenFor(group.kind);
+}
 function pgAddGroupPrompt(kind) {
   const name = prompt('New group name:');
   if (name === null) return;
@@ -10877,6 +10905,13 @@ function pgRenderList(kind) {
         <option value="individual" ${g.quantityMode !== 'packages' ? 'selected' : ''}>Individual</option>
         <option value="packages" ${g.quantityMode === 'packages' ? 'selected' : ''}>Packages</option>
       </select>`;
+  const itemShapeSelectHtml = (g) => (kind !== 'addOns' && kind !== 'framework') ? '' : `
+      <select style="flex-shrink:0; font-size:11px; width:auto;" ${invAdminUnlocked ? '' : 'disabled'} onchange="pgSetGroupItemShape('${g.id}', this.value)">
+        <option value="piece" ${!g.itemShape || g.itemShape === 'piece' ? 'selected' : ''}>Standard item</option>
+        <option value="rawStock" ${g.itemShape === 'rawStock' ? 'selected' : ''}>Raw stock (diameter/length)</option>
+        <option value="fabricated" ${g.itemShape === 'fabricated' ? 'selected' : ''}>Fabricated structure</option>
+        <option value="vinyl" ${g.itemShape === 'vinyl' ? 'selected' : ''}>Vinyl (approximate)</option>
+      </select>`;
   if (active.length === 0 && archived.length === 0) {
     container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary);">No groups yet.</div>`;
     return;
@@ -10886,6 +10921,7 @@ function pgRenderList(kind) {
     return `<div style="display:flex; align-items:center; gap:6px; margin-bottom:0.5rem;">
       <input type="text" style="flex:1;" value="${invAttr(g.name)}" ${invAdminUnlocked ? '' : 'disabled'} onchange="pgRenameGroup('${g.id}', this.value)">
       ${quantityModeSelectHtml(g)}
+      ${itemShapeSelectHtml(g)}
       <span style="font-size:11px; color:var(--text-secondary); flex-shrink:0;">${count} item${count === 1 ? '' : 's'}</span>
       ${invAdminUnlocked ? `
         <button class="icon-btn" style="padding:4px; ${idx === 0 ? 'opacity:0.3;' : ''}" ${idx === 0 ? 'disabled' : ''} onclick="pgMoveGroup('${g.id}','up')" aria-label="Move up"><i class="fa-solid fa-arrow-up"></i></button>
@@ -12775,22 +12811,70 @@ let INVX_ITEMS = [];
 let INVX_ITEMS_TRASHED = [];
 const INVX_CATEGORIES = [
   { id: 'addOns', label: 'Add-Ons', soon: false },
-  { id: 'jobMaterials', label: 'Job Materials', soon: true },
-  { id: 'jobComponents', label: 'Job Components / Hardware', soon: true },
-  { id: 'rawFraming', label: 'Raw Framing Materials', soon: true },
+  { id: 'framework', label: 'Framework', soon: false },
 ];
 const INVX_CATEGORY_IDS = INVX_CATEGORIES.map(c => c.id);
 // Starter groups, seeded once per category the first time it's opened with zero groups already
-// present — business-editable/renameable/archiveable afterward like any group. Only Add-Ons has a
-// seed list since it's the only live category; a future category adds its own entry here.
+// present — business-editable/renameable/archiveable afterward like any group. Each entry may
+// carry an `itemShape` (see invxItemShapeFor) determining which fields that group's Add/Edit form
+// shows — 'piece' (the default, omitted here) is the standard Name/Brand/Color/Size/Quantity shape
+// identical to a plain Add-On; 'rawStock' is dimensional stock (diameter/length); 'fabricated' is a
+// built structure (name/height); 'vinyl' is the simplified approximate-remaining shape.
 const INVX_GROUP_SEEDS = {
-  addOns: ['Fringe / Tassels', 'Florals / Greenery', 'Stickers / Butterflies', 'Ribbons / Streamers', 'Specialty Accents', 'Other'],
+  addOns: [
+    { name: 'Florals & Greenery' }, { name: 'Fringe & Tassels' }, { name: 'Ribbons & Bows' },
+    { name: 'Vinyl', itemShape: 'vinyl' }, { name: 'Fillers & Effects' },
+    { name: 'Packaging & Presentation' }, { name: 'Paper Decor' }, { name: 'Themed Decor' },
+    { name: 'Decorative Accents' }, { name: 'Other' },
+  ],
+  framework: [
+    { name: 'PVC', itemShape: 'rawStock' }, { name: 'EMT / Conduit', itemShape: 'rawStock' },
+    { name: 'Aluminum Rod', itemShape: 'rawStock' }, { name: 'Poles / Uprights' },
+    { name: 'Lamp Stands' }, { name: 'Centerpiece Stands' }, { name: 'Bases / Weights' },
+    { name: 'Connectors / Fittings' }, { name: 'Yard Stakes' },
+    { name: 'Fabricated Framework', itemShape: 'fabricated' }, { name: 'Other' },
+  ],
 };
 function invxEnsureGroupsSeeded(category) {
   const seed = INVX_GROUP_SEEDS[category];
   if (!seed || pgGroupsForKind(category, true).length > 0) return;
-  seed.forEach(name => pgAddGroup(category, name));
+  seed.forEach(({ name, itemShape }) => pgAddGroup(category, name, null, itemShape));
 }
+// One-time, idempotent cleanup: a few Add-Ons/Assets starter names from an earlier pass used
+// different punctuation than the finalized names here (e.g. "Fringe / Tassels" vs. "Fringe &
+// Tassels") — the same real-world concept, so this is a pure cosmetic pgRenameGroup (same id, same
+// items, same everything), never a data migration. Every other pre-existing group (Stickers /
+// Butterflies, Ribbons / Streamers, Specialty Accents, Pedestals / Displays, Fabricated / Specialty
+// Frames, Marquee / Light-Up Letters & Numbers) is NOT unambiguously the same concept as any new
+// name, so those are left completely untouched — new groups are added alongside them instead of
+// forcing a reclassification. Only fires if the new name isn't already separately in use (e.g. this
+// already ran, or the business already created one by hand) so it can never merge two groups.
+// Runs on every Print-Groups load (this only touches PRINT_GROUPS, not item data, so — unlike the
+// Decorator Shapes item-repointing migration — it has no load-order race to guard against).
+const INVX_GROUP_RENAMES = {
+  addOns: [{ from: 'Fringe / Tassels', to: 'Fringe & Tassels' }, { from: 'Florals / Greenery', to: 'Florals & Greenery' }],
+  assets: [{ from: 'Backdrops / Walls', to: 'Backdrops & Walls' }, { from: 'Props', to: 'Props / Signs' }],
+};
+function invxConsolidateGroups() {
+  Object.entries(INVX_GROUP_RENAMES).forEach(([kind, renames]) => {
+    renames.forEach(({ from, to }) => {
+      const g = pgFindByName(kind, from);
+      if (g && !pgFindByName(kind, to)) { g.name = to; pgSave(); }
+    });
+  });
+  Object.keys(INVX_GROUP_SEEDS).forEach(category => {
+    INVX_GROUP_SEEDS[category].forEach(({ name, itemShape }) => pgAddGroup(category, name, null, itemShape));
+  });
+  if (typeof ASSETS_GROUP_SEED !== 'undefined') ASSETS_GROUP_SEED.forEach(name => pgAddGroup('assets', name));
+}
+// Determines which fields an item's Add/Edit form and card show. A group with no itemShape (every
+// non-Add-Ons/Framework kind, and any ad-hoc group a business creates on the fly) defaults to
+// 'piece' — the standard shape every original Add-Ons item already used.
+function invxItemShapeFor(printGroupId) {
+  const g = printGroupId ? pgFindGroup(printGroupId) : null;
+  return (g && g.itemShape) || 'piece';
+}
+function invxKnownThemes() { return [...new Set(INVX_ITEMS.map(i => i.theme).filter(Boolean))].sort(); }
 let invxCategoryTab = 'addOns';
 let invxSearchQuery = '';
 let invxExpandedItem = null;
@@ -12799,6 +12883,7 @@ let invxAddDraft = null;
 
 function invxStartListeners() {
   invxRenderScreen(); // shell first, same pattern as invStartListeners/spStartListeners/foilStartListeners
+  invxConsolidateGroups();
   window.fbOnSnapshotInvxItems(
     (snapshot) => {
       const all = snapshot.docs.map(d => d.data());
@@ -12838,11 +12923,19 @@ function invxSetCategoryTab(cat) {
   invxCategoryTab = cat;
   invxExpandedItem = null;
   invxEnsureGroupsSeeded(cat);
-  // Default every group section to collapsed on opening the category, same convention already
-  // used for every other grouped Inventory screen this session (seeded once on tab entry, not on
-  // every render, so an in-visit expand/collapse choice isn't overwritten by an unrelated re-render).
+  // Default every group section (and any theme sub-section) to collapsed on opening the category,
+  // same convention already used for every other grouped Inventory screen this session (seeded
+  // once on tab entry, not on every render, so an in-visit expand/collapse choice isn't overwritten
+  // by an unrelated re-render).
   pgGroupsForKind(cat, true).forEach(g => invCollapsedGroups.add('invx-group:' + g.id));
   invCollapsedGroups.add('invx-group:(uncategorized)');
+  invxGroupedItems(INVX_ITEMS.filter(i => i.category === cat)).forEach(g => { if (g.themes) g.themes.forEach(t => invCollapsedGroups.add(t.key)); });
+  // Add-Ons and Framework share one view/topbar entry (TOOL_META['inventory-extras']) — update the
+  // title live so it always names whichever category is actually showing, since both are equally
+  // live now (unlike Foil's single-live-category case this pattern was first built for).
+  const titleEl = document.getElementById('topbar-title');
+  const catMeta = INVX_CATEGORIES.find(c => c.id === cat);
+  if (titleEl && catMeta) titleEl.textContent = catMeta.label;
   invxRenderScreen();
 }
 function invxSetSearch(q) { invxSearchQuery = q; invxRenderResults(); }
@@ -12852,19 +12945,30 @@ function invxFilteredItems() {
   const q = invxSearchQuery.trim().toLowerCase();
   const items = INVX_ITEMS.filter(i => i.category === invxCategoryTab);
   if (!q) return items;
-  return items.filter(i => [i.name, i.brand, i.color, i.size, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)));
+  return items.filter(i => [i.name, i.brand, i.color, i.size, i.theme, i.storageLocation, i.notes, i.diameter, i.length, i.overallHeight, i.width, i.approxRemaining].some(f => (f || '').toString().toLowerCase().includes(q)));
 }
-// Identity = Group + Name + Color + Size + Brand (case/whitespace-insensitive) — the same real
-// item shouldn't get a second competing record just because someone re-typed a field slightly
-// differently. Quantity/cost/notes/consumableBehavior are never part of identity.
-function invxFindCollision(category, printGroupId, name, color, size, brand, excludeId) {
-  const norm = s => (s || '').trim().toLowerCase();
-  return INVX_ITEMS.find(i => i.id !== excludeId && i.category === category &&
-    (i.printGroupId || null) === (printGroupId || null) &&
-    norm(i.name) === norm(name) && norm(i.color) === norm(color) && norm(i.size) === norm(size) && norm(i.brand) === norm(brand));
+// Identity depends on the item's effective shape (see invxItemShapeFor) — a rawStock item's real
+// identity is its diameter+length, a fabricated structure's is its name+height, Vinyl's is its
+// color+width, and everything else (the standard 'piece' shape) is Name+Color+Size+Brand, same as
+// the original Add-Ons rule. Quantity/cost/notes/consumableBehavior/theme are never part of
+// identity for any shape.
+function invxFindCollision(category, printGroupId, fields, excludeId) {
+  const norm = s => (s == null ? '' : String(s)).trim().toLowerCase();
+  const shape = invxItemShapeFor(printGroupId);
+  return INVX_ITEMS.find(i => {
+    if (i.id === excludeId || i.category !== category) return false;
+    if ((i.printGroupId || null) !== (printGroupId || null)) return false;
+    if (shape === 'rawStock') return norm(i.diameter) === norm(fields.diameter) && norm(i.length) === norm(fields.length);
+    if (shape === 'fabricated') return norm(i.name) === norm(fields.name) && norm(i.overallHeight) === norm(fields.overallHeight);
+    if (shape === 'vinyl') return norm(i.color) === norm(fields.color) && norm(i.width) === norm(fields.width);
+    return norm(i.name) === norm(fields.name) && norm(i.color) === norm(fields.color) && norm(i.size) === norm(fields.size) && norm(i.brand) === norm(fields.brand);
+  });
 }
 // Mirrors spGroupedItems's {key,label,items} shape (Uncategorized pinned last, sections ordered by
-// each group's manual order) against INVX_ITEMS instead.
+// each group's manual order) against INVX_ITEMS instead. When any item in a group has a `theme`
+// set, that group gets a second collapsible level (Group -> Theme -> items) — generic and
+// reusable by any group (most useful for Themed Decor), never hardcoded to one group name. A group
+// where nobody uses theming renders exactly as flat as before.
 function invxGroupedItems(items) {
   const byGroup = {};
   items.forEach(i => { const key = i.printGroupId || '(uncategorized)'; (byGroup[key] = byGroup[key] || []).push(i); });
@@ -12875,11 +12979,26 @@ function invxGroupedItems(items) {
     if (a === '(uncategorized)') return 1;
     if (b === '(uncategorized)') return -1;
     return (orderById[a] ?? 999999) - (orderById[b] ?? 999999);
-  }).map(key => ({
-    key: 'invx-group:' + key,
-    label: key === '(uncategorized)' ? 'Uncategorized' : ((pgFindGroup(key) || {}).name || 'Uncategorized'),
-    items: [...byGroup[key]].sort(comparator),
-  }));
+  }).map(key => {
+    const groupItems = [...byGroup[key]].sort(comparator);
+    const hasThemes = groupItems.some(i => (i.theme || '').trim());
+    let themes = null;
+    if (hasThemes) {
+      const byTheme = {};
+      groupItems.forEach(i => { const t = (i.theme || '').trim() || '(Ungrouped)'; (byTheme[t] = byTheme[t] || []).push(i); });
+      themes = Object.keys(byTheme).sort((a, b) => a === '(Ungrouped)' ? 1 : b === '(Ungrouped)' ? -1 : a.localeCompare(b)).map(theme => ({
+        key: 'invx-theme:' + key + '|' + theme,
+        theme,
+        items: byTheme[theme],
+      }));
+    }
+    return {
+      key: 'invx-group:' + key,
+      label: key === '(uncategorized)' ? 'Uncategorized' : ((pgFindGroup(key) || {}).name || 'Uncategorized'),
+      items: groupItems,
+      themes,
+    };
+  });
 }
 function invxToggleGroup(key) {
   if (invCollapsedGroups.has(key)) invCollapsedGroups.delete(key);
@@ -12889,25 +13008,30 @@ function invxToggleGroup(key) {
 
 function invxOpenAdd() {
   invxAddOpen = true;
-  invxAddDraft = { printGroupId: '', printGroupNewName: '', name: '', brand: '', brandOther: '', color: '', size: '', quantity: 0, consumableBehavior: 'consumable', costPerUnit: '', storageLocation: '', notes: '' };
+  invxAddDraft = {
+    printGroupId: '', printGroupNewName: '', name: '', brand: '', brandOther: '', color: '', size: '', theme: '',
+    quantity: 0, consumableBehavior: 'consumable', costPerUnit: '', storageLocation: '', notes: '',
+    diameter: '', length: '', overallHeight: '', width: '', approxRemaining: '',
+  };
   invxRenderScreen();
 }
 function invxCancelAdd() { invxAddOpen = false; invxAddDraft = null; invxRenderScreen(); }
 function invxSetDraftField(field, value) {
   if (!invxAddDraft) return;
   invxAddDraft[field] = value;
-  if (field === 'brand' || field === 'printGroupId') invxRenderScreen(); // reveal Other/new-group free text
+  if (field === 'printGroupId') {
+    // Fabricated Framework defaults to recoverable ("recoverable Inventory by default, NOT
+    // automatically an Asset"); every other shape keeps the standard consumable default. Group is
+    // always the first field in this form, so resetting the not-yet-seen Behavior selector here
+    // never overwrites a deliberate choice.
+    const shape = invxItemShapeFor(value === '__new__' ? null : value);
+    invxAddDraft.consumableBehavior = shape === 'fabricated' ? 'recoverable' : 'consumable';
+  }
+  if (field === 'brand' || field === 'printGroupId') invxRenderScreen(); // reveal Other/new-group free text, or switch field shape
 }
 function invxSubmitAdd() {
   if (!invxAddDraft) return;
   const d = invxAddDraft;
-  const name = (d.name || '').trim();
-  if (!name) { alert('Enter a name/description.'); return; }
-  if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
-  const brand = resolveBrandValue(d.brand, d.brandOther);
-  if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
-  const color = (d.color || '').trim();
-  const size = (d.size || '').trim();
 
   let printGroupId = null;
   if (d.printGroupId === '__new__') {
@@ -12918,35 +13042,65 @@ function invxSubmitAdd() {
     printGroupId = d.printGroupId;
   }
 
-  const dup = invxFindCollision(invxCategoryTab, printGroupId, name, color, size, brand, null);
-  if (dup) {
-    alert(`"${name}" already exists in this Group with the same Color/Size/Brand — opening it instead of creating another.`);
-    invxAddOpen = false;
-    invxAddDraft = null;
-    invCollapsedGroups.delete('invx-group:' + (printGroupId || '(uncategorized)'));
-    invxExpandedItem = dup.id;
-    invxRenderScreen();
-    return;
+  const shape = invxItemShapeFor(printGroupId);
+  const item = { id: psNewInvxItemId(), category: invxCategoryTab, printGroupId, active: true };
+
+  if (shape === 'rawStock') {
+    const diameter = (d.diameter || '').trim();
+    const length = (d.length || '').trim();
+    if (!diameter) { alert('Enter a diameter.'); return; }
+    if (!length) { alert('Enter a length.'); return; }
+    const dup = invxFindCollision(invxCategoryTab, printGroupId, { diameter, length }, null);
+    if (dup) { invxOpenExistingInstead(dup, printGroupId); return; }
+    Object.assign(item, { diameter, length, quantity: parseInt(d.quantity, 10) || 0, storageLocation: (d.storageLocation || '').trim(), consumableBehavior: 'consumable' });
+  } else if (shape === 'fabricated') {
+    const name = (d.name || '').trim();
+    if (!name) { alert('Enter a name.'); return; }
+    const overallHeight = (d.overallHeight || '').trim();
+    const dup = invxFindCollision(invxCategoryTab, printGroupId, { name, overallHeight }, null);
+    if (dup) { invxOpenExistingInstead(dup, printGroupId); return; }
+    Object.assign(item, { name, overallHeight, quantity: parseInt(d.quantity, 10) || 0, notes: (d.notes || '').trim(), storageLocation: (d.storageLocation || '').trim(), consumableBehavior: d.consumableBehavior === 'consumable' ? 'consumable' : 'recoverable' });
+  } else if (shape === 'vinyl') {
+    const color = (d.color || '').trim();
+    const width = (d.width || '').trim();
+    if (!color) { alert('Enter a color.'); return; }
+    const dup = invxFindCollision(invxCategoryTab, printGroupId, { color, width }, null);
+    if (dup) { invxOpenExistingInstead(dup, printGroupId); return; }
+    Object.assign(item, { name: (d.name || '').trim(), color, width, approxRemaining: (d.approxRemaining || '').trim(), storageLocation: (d.storageLocation || '').trim() });
+  } else {
+    const name = (d.name || '').trim();
+    if (!name) { alert('Enter a name/description.'); return; }
+    if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
+    const brand = resolveBrandValue(d.brand, d.brandOther);
+    if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
+    const color = (d.color || '').trim();
+    const size = (d.size || '').trim();
+    const dup = invxFindCollision(invxCategoryTab, printGroupId, { name, color, size, brand }, null);
+    if (dup) { invxOpenExistingInstead(dup, printGroupId); return; }
+    Object.assign(item, {
+      name, brand, color, size, theme: (d.theme || '').trim(),
+      quantity: parseInt(d.quantity, 10) || 0,
+      consumableBehavior: d.consumableBehavior === 'recoverable' ? 'recoverable' : 'consumable',
+      costPerUnit: d.costPerUnit === '' ? null : (parseFloat(d.costPerUnit) || 0),
+      storageLocation: (d.storageLocation || '').trim(),
+      notes: (d.notes || '').trim(),
+    });
   }
 
-  const item = {
-    id: psNewInvxItemId(),
-    category: invxCategoryTab,
-    printGroupId,
-    name, brand, color, size,
-    quantity: parseInt(d.quantity, 10) || 0,
-    consumableBehavior: d.consumableBehavior === 'recoverable' ? 'recoverable' : 'consumable',
-    costPerUnit: d.costPerUnit === '' ? null : (parseFloat(d.costPerUnit) || 0),
-    storageLocation: (d.storageLocation || '').trim(),
-    notes: (d.notes || '').trim(),
-    active: true,
-  };
   INVX_ITEMS.push(item);
   invxSaveItem(item);
   invxAddOpen = false;
   invxAddDraft = null;
   invCollapsedGroups.delete('invx-group:' + (printGroupId || '(uncategorized)'));
   invxExpandedItem = item.id;
+  invxRenderScreen();
+}
+function invxOpenExistingInstead(dup, printGroupId) {
+  alert(`"${invxItemLabel(dup)}" already exists in this Group — opening it instead of creating another.`);
+  invxAddOpen = false;
+  invxAddDraft = null;
+  invCollapsedGroups.delete('invx-group:' + (printGroupId || '(uncategorized)'));
+  invxExpandedItem = dup.id;
   invxRenderScreen();
 }
 // Plain saves, matching every other Inventory category built this session — no ledger here either.
@@ -12961,7 +13115,9 @@ function invxUpdateField(itemId, field, value) {
   invxRenderResults();
 }
 // Group stays directly editable in the expanded card (not behind Edit Details) — same precedent
-// as Specialty Latex/Decorator Shapes' Group selector.
+// as Specialty Latex/Decorator Shapes' Group selector. Reassigning to a group with a different
+// itemShape doesn't retroactively rewrite the item's fields — it just means whichever
+// shape-specific fields it already has stop being shown/editable until moved back.
 function invxSetItemGroup(itemId, value) {
   const item = invxFindItem(itemId);
   if (!item) return;
@@ -12975,7 +13131,13 @@ function invxSetItemGroup(itemId, value) {
   invxSaveItem(item);
   invxRenderResults();
 }
-function invxItemLabel(item) { return [item.name, item.color, item.size, item.brand].filter(Boolean).join(' — '); }
+function invxItemLabel(item) {
+  const shape = invxItemShapeFor(item.printGroupId);
+  if (shape === 'rawStock') return [item.diameter, item.length].filter(Boolean).join(' × ');
+  if (shape === 'fabricated') return [item.name, item.overallHeight].filter(Boolean).join(' — ');
+  if (shape === 'vinyl') return [item.name, item.color, item.width].filter(Boolean).join(' — ');
+  return [item.name, item.color, item.size, item.brand].filter(Boolean).join(' — ');
+}
 function invxDeleteItem(itemId) {
   const item = invxFindItem(itemId);
   if (!item) return;
@@ -13007,9 +13169,9 @@ function invxPermanentlyDeleteItem(itemId) {
   INVX_ITEMS_TRASHED = INVX_ITEMS_TRASHED.filter(i => i.id !== itemId);
   invxRenderScreen();
 }
-// ── Edit Details: Name/Brand/Color/Size — the fundamental identifying fields. Group and every
-// operational field (Quantity/Cost/Storage/Notes/Behavior) stay directly editable in the card,
-// same precedent established for Decorator Shapes. ──
+// ── Edit Details: the fundamental identifying fields for the item's effective shape. Group and
+// every operational field stay directly editable in the card, same precedent established for
+// Decorator Shapes. ──
 let invxEditDetailsItemId = null;
 let invxEditDetailsDraft = null;
 function invxOpenEditDetails(itemId) {
@@ -13021,6 +13183,7 @@ function invxOpenEditDetails(itemId) {
   invxEditDetailsDraft = {
     name: item.name || '', color: item.color || '', size: item.size || '',
     brand: isKnownBrand ? item.brand : 'Other', brandOther: isKnownBrand ? '' : (item.brand || ''),
+    diameter: item.diameter || '', length: item.length || '', overallHeight: item.overallHeight || '', width: item.width || '',
   };
   invxRenderResults();
 }
@@ -13034,19 +13197,42 @@ function invxSubmitEditDetails(itemId) {
   const item = invxFindItem(itemId);
   if (!item || !invxEditDetailsDraft) return;
   const d = invxEditDetailsDraft;
-  const name = (d.name || '').trim();
-  if (!name) { alert('Enter a name/description.'); return; }
-  if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
-  const brand = resolveBrandValue(d.brand, d.brandOther);
-  if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
-  const color = (d.color || '').trim();
-  const size = (d.size || '').trim();
-  const collision = invxFindCollision(item.category, item.printGroupId, name, color, size, brand, item.id);
-  if (collision) { alert('This would collide with an existing item in the same Group. Edit that one instead, or change one of these fields.'); return; }
-  item.name = name;
-  item.color = color;
-  item.size = size;
-  item.brand = brand;
+  const shape = invxItemShapeFor(item.printGroupId);
+
+  if (shape === 'rawStock') {
+    const diameter = (d.diameter || '').trim();
+    const length = (d.length || '').trim();
+    if (!diameter) { alert('Enter a diameter.'); return; }
+    if (!length) { alert('Enter a length.'); return; }
+    const collision = invxFindCollision(item.category, item.printGroupId, { diameter, length }, item.id);
+    if (collision) { alert('This would collide with an existing item in the same Group.'); return; }
+    item.diameter = diameter; item.length = length;
+  } else if (shape === 'fabricated') {
+    const name = (d.name || '').trim();
+    if (!name) { alert('Enter a name.'); return; }
+    const overallHeight = (d.overallHeight || '').trim();
+    const collision = invxFindCollision(item.category, item.printGroupId, { name, overallHeight }, item.id);
+    if (collision) { alert('This would collide with an existing item in the same Group.'); return; }
+    item.name = name; item.overallHeight = overallHeight;
+  } else if (shape === 'vinyl') {
+    const color = (d.color || '').trim();
+    const width = (d.width || '').trim();
+    if (!color) { alert('Enter a color.'); return; }
+    const collision = invxFindCollision(item.category, item.printGroupId, { color, width }, item.id);
+    if (collision) { alert('This would collide with an existing item in the same Group.'); return; }
+    item.name = (d.name || '').trim(); item.color = color; item.width = width;
+  } else {
+    const name = (d.name || '').trim();
+    if (!name) { alert('Enter a name/description.'); return; }
+    if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
+    const brand = resolveBrandValue(d.brand, d.brandOther);
+    if (!brand) { alert('Type a brand name, or choose Generic/Unknown.'); return; }
+    const color = (d.color || '').trim();
+    const size = (d.size || '').trim();
+    const collision = invxFindCollision(item.category, item.printGroupId, { name, color, size, brand }, item.id);
+    if (collision) { alert('This would collide with an existing item in the same Group. Edit that one instead, or change one of these fields.'); return; }
+    item.name = name; item.color = color; item.size = size; item.brand = brand;
+  }
   invxSaveItem(item);
   invxEditDetailsItemId = null;
   invxEditDetailsDraft = null;
@@ -13054,12 +13240,24 @@ function invxSubmitEditDetails(itemId) {
 }
 function invxEditDetailsFormHtml(item) {
   const d = invxEditDetailsDraft;
-  return `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.5rem;">
-    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
-      <strong style="font-size:14px;">Edit Details</strong>
-      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invxCancelEditDetails()"><i class="fa-solid fa-xmark"></i> Close</button>
-    </div>
-    <div class="settings-field"><label>Name / Description</label>
+  const shape = invxItemShapeFor(item.printGroupId);
+  let fieldsHtml;
+  if (shape === 'rawStock') {
+    fieldsHtml = `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Diameter</label><input type="text" value="${invAttr(d.diameter)}" oninput="invxSetEditDetailsField('diameter', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Length</label><input type="text" value="${invAttr(d.length)}" oninput="invxSetEditDetailsField('length', this.value)"></div>
+    </div>`;
+  } else if (shape === 'fabricated') {
+    fieldsHtml = `<div class="settings-field"><label>Name</label><input type="text" value="${invAttr(d.name)}" oninput="invxSetEditDetailsField('name', this.value)"></div>
+    <div class="settings-field"><label>Overall Height</label><input type="text" value="${invAttr(d.overallHeight)}" oninput="invxSetEditDetailsField('overallHeight', this.value)"></div>`;
+  } else if (shape === 'vinyl') {
+    fieldsHtml = `<div class="settings-field"><label>Name <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.name)}" oninput="invxSetEditDetailsField('name', this.value)"></div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Color</label><input type="text" list="invx-color-suggestions" value="${invAttr(d.color)}" oninput="invxSetEditDetailsField('color', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Width</label><input type="text" value="${invAttr(d.width)}" oninput="invxSetEditDetailsField('width', this.value)"></div>
+    </div>`;
+  } else {
+    fieldsHtml = `<div class="settings-field"><label>Name / Description</label>
       <input type="text" value="${invAttr(d.name)}" oninput="invxSetEditDetailsField('name', this.value)">
     </div>
     <div class="row">
@@ -13068,27 +13266,67 @@ function invxEditDetailsFormHtml(item) {
     </div>
     <div class="settings-field"><label>Brand</label>
       ${brandSelectorHtml({ options: invxBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "invxSetEditDetailsField('brand', this.value)", onOtherInput: "invxSetEditDetailsField('brandOther', this.value)" })}
+    </div>`;
+  }
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.5rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Edit Details</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invxCancelEditDetails()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
+    ${fieldsHtml}
     <button class="save-btn" onclick="invxSubmitEditDetails('${item.id}')">Save Details</button>
   </div>`;
 }
 function invxAddFormHtml() {
   const d = invxAddDraft;
   const category = INVX_CATEGORIES.find(c => c.id === invxCategoryTab) || INVX_CATEGORIES[0];
-  return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
-    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
-      <strong style="font-size:14px;">Add ${psEscape(category.label)}</strong>
-      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invxCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
-    </div>
-    <div class="settings-field"><label>Group <span style="font-weight:400;">(optional)</span></label>
+  const shape = invxItemShapeFor(d.printGroupId === '__new__' ? null : d.printGroupId);
+  const groupPickerHtml = `<div class="settings-field"><label>Group <span style="font-weight:400;">(optional)</span></label>
       <select onchange="invxSetDraftField('printGroupId', this.value)">
         <option value="" ${d.printGroupId === '' ? 'selected' : ''}>Uncategorized</option>
         ${pgGroupsForKind(invxCategoryTab, false).map(g => `<option value="${invAttr(g.id)}" ${g.id === d.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
         <option value="__new__" ${d.printGroupId === '__new__' ? 'selected' : ''}>+ Add new group…</option>
       </select>
       ${d.printGroupId === '__new__' ? `<input type="text" style="margin-top:6px;" placeholder="New group name" value="${invAttr(d.printGroupNewName)}" oninput="invxSetDraftField('printGroupNewName', this.value)">` : ''}
+    </div>`;
+  const storageNotesHtml = `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.storageLocation)}" oninput="invxSetDraftField('storageLocation', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Notes <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.notes)}" oninput="invxSetDraftField('notes', this.value)"></div>
+    </div>`;
+
+  let fieldsHtml;
+  if (shape === 'rawStock') {
+    fieldsHtml = `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Diameter</label><input type="text" placeholder="e.g. 1/2&quot;" value="${invAttr(d.diameter)}" oninput="invxSetDraftField('diameter', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Length</label><input type="text" placeholder="e.g. 10 ft" value="${invAttr(d.length)}" oninput="invxSetDraftField('length', this.value)"></div>
     </div>
-    <div class="settings-field"><label>Name / Description</label>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${d.quantity}" oninput="invxSetDraftField('quantity', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.storageLocation)}" oninput="invxSetDraftField('storageLocation', this.value)"></div>
+    </div>`;
+  } else if (shape === 'fabricated') {
+    fieldsHtml = `<div class="settings-field"><label>Name</label><input type="text" placeholder="e.g. Candy Cane Frame" value="${invAttr(d.name)}" oninput="invxSetDraftField('name', this.value)"></div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Overall Height <span style="font-weight:400;">(optional)</span></label><input type="text" placeholder="e.g. 7 ft" value="${invAttr(d.overallHeight)}" oninput="invxSetDraftField('overallHeight', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${d.quantity}" oninput="invxSetDraftField('quantity', this.value)"></div>
+    </div>
+    <div class="settings-field"><label>Behavior</label>
+      <select onchange="invxSetDraftField('consumableBehavior', this.value)">
+        <option value="recoverable" ${d.consumableBehavior !== 'consumable' ? 'selected' : ''}>Recoverable / multi-use — often comes back, but not required</option>
+        <option value="consumable" ${d.consumableBehavior === 'consumable' ? 'selected' : ''}>Consumable — used up on each job</option>
+      </select>
+    </div>
+    ${storageNotesHtml}`;
+  } else if (shape === 'vinyl') {
+    fieldsHtml = `<div class="settings-field"><label>Name <span style="font-weight:400;">(optional)</span></label><input type="text" placeholder="e.g. Permanent Vinyl" value="${invAttr(d.name)}" oninput="invxSetDraftField('name', this.value)"></div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Color</label><input type="text" list="invx-color-suggestions" value="${invAttr(d.color)}" oninput="invxSetDraftField('color', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Width <span style="font-weight:400;">(optional)</span></label><input type="text" placeholder="e.g. 12&quot;" value="${invAttr(d.width)}" oninput="invxSetDraftField('width', this.value)"></div>
+    </div>
+    <div class="settings-field"><label>Amount remaining <span style="font-weight:400;">(approximate — e.g. "~40 yards" or "half roll")</span></label><input type="text" value="${invAttr(d.approxRemaining)}" oninput="invxSetDraftField('approxRemaining', this.value)"></div>
+    <div class="settings-field"><label>Storage location <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.storageLocation)}" oninput="invxSetDraftField('storageLocation', this.value)"></div>`;
+  } else {
+    fieldsHtml = `<div class="settings-field"><label>Name / Description</label>
       <input type="text" placeholder="e.g. Gold Fringe Curtain" value="${invAttr(d.name)}" oninput="invxSetDraftField('name', this.value)">
     </div>
     <div class="row">
@@ -13104,6 +13342,10 @@ function invxAddFormHtml() {
     <div class="settings-field"><label>Brand</label>
       ${brandSelectorHtml({ options: invxBrandOptions(), brand: d.brand, brandOther: d.brandOther, onBrandChange: "invxSetDraftField('brand', this.value)", onOtherInput: "invxSetDraftField('brandOther', this.value)" })}
     </div>
+    <div class="settings-field"><label>Theme / Sub-group <span style="font-weight:400;">(optional — e.g. "80s", "Easter"; groups items within this Group by theme)</span></label>
+      <input type="text" list="invx-theme-suggestions" value="${invAttr(d.theme)}" oninput="invxSetDraftField('theme', this.value)">
+      <datalist id="invx-theme-suggestions">${invxKnownThemes().map(t => `<option value="${invAttr(t)}">`).join('')}</datalist>
+    </div>
     <div class="settings-field"><label>Behavior <span style="font-weight:400;">(how this item is used up)</span></label>
       <select onchange="invxSetDraftField('consumableBehavior', this.value)">
         <option value="consumable" ${d.consumableBehavior !== 'recoverable' ? 'selected' : ''}>Consumable — used up on each job</option>
@@ -13114,23 +13356,39 @@ function invxAddFormHtml() {
       <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${d.quantity}" oninput="invxSetDraftField('quantity', this.value)"></div>
       <div class="settings-field" style="margin-bottom:0"><label>Cost per unit <span style="font-weight:400;">(optional)</span></label><input type="number" step="0.01" min="0" value="${invAttr(d.costPerUnit)}" oninput="invxSetDraftField('costPerUnit', this.value)"></div>
     </div>
-    <div class="row">
-      <div class="settings-field" style="margin-bottom:0"><label>Storage location <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.storageLocation)}" oninput="invxSetDraftField('storageLocation', this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0"><label>Notes <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.notes)}" oninput="invxSetDraftField('notes', this.value)"></div>
+    ${storageNotesHtml}`;
+  }
+
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Add ${psEscape(category.label)}</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invxCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
+    ${groupPickerHtml}
+    ${fieldsHtml}
     <button class="save-btn" onclick="invxSubmitAdd()">Save item</button>
   </div>`;
 }
 function invxItemCardHtml(item) {
   const expanded = invxExpandedItem === item.id;
-  const subtitle = [item.color, item.size, item.brand || 'Generic/Unknown'].filter(Boolean).join(' · ');
+  const shape = invxItemShapeFor(item.printGroupId);
+  const displayQty = shape === 'vinyl' ? (item.approxRemaining || '—') : (item.quantity || 0);
+  const isZero = shape === 'vinyl' ? !item.approxRemaining : !(item.quantity || 0);
+  const headerName = shape === 'rawStock' ? [item.diameter, item.length].filter(Boolean).join(' × ')
+    : shape === 'fabricated' ? item.name
+    : shape === 'vinyl' ? (item.name || item.color || 'Vinyl')
+    : item.name;
+  const subtitle = shape === 'rawStock' ? ''
+    : shape === 'fabricated' ? (item.overallHeight ? `Height: ${item.overallHeight}` : '')
+    : shape === 'vinyl' ? [item.color, item.width].filter(Boolean).join(' · ')
+    : [item.color, item.size, item.brand || 'Generic/Unknown'].filter(Boolean).join(' · ');
   let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
   html += `<div class="inv-color-row-header" onclick="invxToggleExpand('${item.id}')">
     <div class="inv-color-row-text">
-      <div class="inv-color-row-name">${psEscape(item.name)}</div>
-      <div class="inv-color-row-brand">${psEscape(subtitle)}</div>
+      <div class="inv-color-row-name">${psEscape(headerName)}</div>
+      ${subtitle ? `<div class="inv-color-row-brand">${psEscape(subtitle)}</div>` : ''}
     </div>
-    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.quantity || 0) === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${(item.quantity || 0) === 0 ? 'var(--accent)' : 'var(--info-text)'};">${item.quantity || 0}</div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${isZero ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${isZero ? 'var(--accent)' : 'var(--info-text)'};">${psEscape(String(displayQty))}</div>
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
   </div>`;
   if (expanded) {
@@ -13144,21 +13402,50 @@ function invxItemCardHtml(item) {
         <option value="__new__">+ Add new group…</option>
       </select>
     </div>`;
-    html += `<div class="settings-field">
-      <label>Behavior</label>
-      <select onchange="invxUpdateField('${item.id}','consumableBehavior',this.value)">
-        <option value="consumable" ${item.consumableBehavior !== 'recoverable' ? 'selected' : ''}>Consumable — used up on each job</option>
-        <option value="recoverable" ${item.consumableBehavior === 'recoverable' ? 'selected' : ''}>Recoverable / multi-use — often comes back, but not required</option>
-      </select>
-    </div>`;
-    html += `<div class="row">
-      <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${item.quantity || 0}" onchange="invxUpdateField('${item.id}','quantity',this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0"><label>Cost per unit</label><input type="number" step="0.01" min="0" value="${item.costPerUnit == null ? '' : item.costPerUnit}" placeholder="optional" onchange="invxUpdateField('${item.id}','costPerUnit',this.value)"></div>
-    </div>`;
-    html += `<div class="row">
-      <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="invxUpdateField('${item.id}','notes',this.value)"></div>
-    </div>`;
+    if (shape === 'rawStock') {
+      html += `<div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${item.quantity || 0}" onchange="invxUpdateField('${item.id}','quantity',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
+      </div>`;
+    } else if (shape === 'fabricated') {
+      html += `<div class="settings-field">
+        <label>Behavior</label>
+        <select onchange="invxUpdateField('${item.id}','consumableBehavior',this.value)">
+          <option value="recoverable" ${item.consumableBehavior !== 'consumable' ? 'selected' : ''}>Recoverable / multi-use — often comes back, but not required</option>
+          <option value="consumable" ${item.consumableBehavior === 'consumable' ? 'selected' : ''}>Consumable — used up on each job</option>
+        </select>
+      </div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${item.quantity || 0}" onchange="invxUpdateField('${item.id}','quantity',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
+      </div>
+      <div class="settings-field"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="invxUpdateField('${item.id}','notes',this.value)"></div>`;
+    } else if (shape === 'vinyl') {
+      html += `<div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Amount remaining</label><input type="text" value="${invAttr(item.approxRemaining)}" placeholder="approximate" onchange="invxUpdateField('${item.id}','approxRemaining',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
+      </div>`;
+    } else {
+      html += `<div class="settings-field">
+        <label>Behavior</label>
+        <select onchange="invxUpdateField('${item.id}','consumableBehavior',this.value)">
+          <option value="consumable" ${item.consumableBehavior !== 'recoverable' ? 'selected' : ''}>Consumable — used up on each job</option>
+          <option value="recoverable" ${item.consumableBehavior === 'recoverable' ? 'selected' : ''}>Recoverable / multi-use — often comes back, but not required</option>
+        </select>
+      </div>
+      <div class="settings-field"><label>Theme / Sub-group <span style="font-weight:400;">(optional)</span></label>
+        <input type="text" list="invx-theme-suggestions" value="${invAttr(item.theme)}" placeholder="optional" onchange="invxUpdateField('${item.id}','theme',this.value)">
+        <datalist id="invx-theme-suggestions">${invxKnownThemes().map(t => `<option value="${invAttr(t)}">`).join('')}</datalist>
+      </div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${item.quantity || 0}" onchange="invxUpdateField('${item.id}','quantity',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Cost per unit</label><input type="number" step="0.01" min="0" value="${item.costPerUnit == null ? '' : item.costPerUnit}" placeholder="optional" onchange="invxUpdateField('${item.id}','costPerUnit',this.value)"></div>
+      </div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="invxUpdateField('${item.id}','notes',this.value)"></div>
+      </div>`;
+    }
     html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invxOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invxDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
@@ -13180,11 +13467,26 @@ function invxRenderResults() {
   const groups = invxGroupedItems(items);
   root.innerHTML = groups.map(g => {
     const collapsed = invCollapsedGroups.has(g.key);
+    let inner = '';
+    if (!collapsed) {
+      if (g.themes) {
+        inner = g.themes.map(t => {
+          const tCollapsed = invCollapsedGroups.has(t.key);
+          return `<div class="inv-group-header" style="padding-left:1rem; opacity:0.85;" onclick="invxToggleGroup('${psJsKeyAttr(t.key)}')">
+            <span>${psEscape(t.theme === '(Ungrouped)' ? 'Ungrouped' : t.theme)} (${t.items.length})</span>
+            <i class="fa-solid fa-chevron-${tCollapsed ? 'down' : 'up'}"></i>
+          </div>
+          ${tCollapsed ? '' : `<div class="inv-color-list" style="margin-left:1rem;">` + t.items.map(invxItemCardHtml).join('') + `</div>`}`;
+        }).join('');
+      } else {
+        inner = `<div class="inv-color-list">` + g.items.map(invxItemCardHtml).join('') + `</div>`;
+      }
+    }
     return `<div class="inv-group-header" onclick="invxToggleGroup('${g.key}')">
       <span>${psEscape(g.label)} (${g.items.length})</span>
       <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
     </div>
-    ${collapsed ? '' : `<div class="inv-color-list">` + g.items.map(invxItemCardHtml).join('') + `</div>`}`;
+    ${inner}`;
   }).join('');
 }
 function invxRenderScreen() {
@@ -13224,26 +13526,35 @@ function invxRenderScreen() {
 
 // ═══════════════════════════════════════ ASSETS (sibling top-level system to Inventory) ═══════════════
 //
-// Reusable job property the business retains and expects back (backdrops, arches, pipe & drape,
-// marquee letters, etc.) — a fundamentally different cost model than Inventory's consumed-through-
-// jobs items, so this is its own Home tile, not nested under Inventory. This pass ships only the
-// Groups organizational skeleton (business-editable categories, seeded starters below, closed by
-// default via the Manage panel's own default-collapsed state) — no item-level add/edit UI yet.
-// ASSET_ITEMS/psNewAssetId already exist so stable, real ids are ready the moment item tracking is
-// built, and — per explicit decision — an Asset record deliberately does NOT carry an
-// `assignments` array: that relationship is planned as its own separate record later
-// (assetId + jobId + date range + status), not an ever-growing array on the Asset itself.
+// Controlled reusable business property the business expects back — backdrops, arches, pipe &
+// drape, reusable lighting, permanent framework, etc. — a fundamentally different concept than
+// Inventory's consumed-through-jobs items (even Inventory's own "recoverable" items don't require
+// return; Assets do). This is its own Home tile, not nested under Inventory. Reuses the same flat
+// item/Groups pattern as Add-Ons/Framework rather than a bespoke system — one generic item shape
+// covers every Asset group described so far (Backdrops' shape/material/set fields are simply
+// unused/blank for a group like Reusable Lighting that doesn't need them).
+//
+// Per explicit decision, an Asset record deliberately does NOT carry an `assignments` array — that
+// relationship is planned as its own separate record later (assetId + jobId + quantity/component +
+// date range + status), not an ever-growing array on the Asset itself. `setInfo` here is a plain
+// free-text note ("Part of 3-panel set", "Individual panel") — a placeholder for the idea that a
+// piece may belong to a set while also being usable alone, without building real relational set
+// modeling now; a future pass can add that structure without needing to migrate this field away.
 let ASSET_ITEMS = [];
 let ASSET_ITEMS_TRASHED = [];
 const ASSETS_GROUP_SEED = [
-  'Backdrops / Walls', 'Hoops / Arches', 'Pipe & Drape', 'Shimmer Walls', 'Pedestals / Displays',
-  'Props', 'Fabricated / Specialty Frames', 'Bases / Weights', 'Marquee / Light-Up Letters & Numbers', 'Other',
+  'Backdrops & Walls', 'Shimmer Walls', 'Hoops / Arches', 'Pipe & Drape', 'Covers & Soft Goods',
+  'Props / Signs', 'Reusable Lighting', 'Weights / Sandbags', 'Permanent Framework', 'Other',
 ];
 function assetsEnsureGroupsSeeded() {
   if (pgGroupsForKind('assets', true).length > 0) return;
   ASSETS_GROUP_SEED.forEach(name => pgAddGroup('assets', name));
 }
 function psNewAssetId() { return 'asset_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+let assetsSearchQuery = '';
+let assetsExpandedItem = null;
+let assetsAddOpen = false;
+let assetsAddDraft = null;
 function assetsStartListeners() {
   assetsRenderScreen(); // shell first, same pattern as every other category's listener bootstrap
   window.fbOnSnapshotAssetItems(
@@ -13256,18 +13567,695 @@ function assetsStartListeners() {
     (err) => console.error('Assets sync error:', err)
   );
 }
+function assetsFindItem(id) { return ASSET_ITEMS.find(i => i.id === id) || ASSET_ITEMS_TRASHED.find(i => i.id === id); }
+function assetsSaveItem(item) {
+  window.fbSaveAssetItem(item).catch(err => {
+    console.error(err);
+    alert("Couldn't save that change — check your connection and try again.");
+  });
+}
+function assetsKnownColors() { return [...new Set(ASSET_ITEMS.map(i => i.color).filter(Boolean))].sort(); }
+function assetsKnownMaterials() { return [...new Set(ASSET_ITEMS.map(i => i.material).filter(Boolean))].sort(); }
+function assetsSetSearch(q) { assetsSearchQuery = q; assetsRenderResults(); }
+function assetsToggleExpand(id) { assetsExpandedItem = assetsExpandedItem === id ? null : id; assetsRenderResults(); }
+function assetsFilteredItems() {
+  const q = assetsSearchQuery.trim().toLowerCase();
+  if (!q) return ASSET_ITEMS;
+  return ASSET_ITEMS.filter(i => [i.name, i.shape, i.size, i.color, i.material, i.setInfo, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)));
+}
+// Mirrors invxGroupedItems's {key,label,items} shape (Uncategorized pinned last, sections ordered
+// by each group's manual order) against ASSET_ITEMS instead. No theme sub-grouping here — nothing
+// in the Assets spec calls for it, unlike Add-Ons' Themed Decor.
+function assetsGroupedItems(items) {
+  const byGroup = {};
+  items.forEach(i => { const key = i.printGroupId || '(uncategorized)'; (byGroup[key] = byGroup[key] || []).push(i); });
+  const orderById = {};
+  pgGroupsForKind('assets', true).forEach((g, idx) => { orderById[g.id] = idx; });
+  const comparator = (a, b) => (a.name || '').localeCompare(b.name || '') || (a.color || '').localeCompare(b.color || '');
+  return Object.keys(byGroup).sort((a, b) => {
+    if (a === '(uncategorized)') return 1;
+    if (b === '(uncategorized)') return -1;
+    return (orderById[a] ?? 999999) - (orderById[b] ?? 999999);
+  }).map(key => ({
+    key: 'assets-group:' + key,
+    label: key === '(uncategorized)' ? 'Uncategorized' : ((pgFindGroup(key) || {}).name || 'Uncategorized'),
+    items: [...byGroup[key]].sort(comparator),
+  }));
+}
+function assetsToggleGroup(key) {
+  if (invCollapsedGroups.has(key)) invCollapsedGroups.delete(key);
+  else invCollapsedGroups.add(key);
+  assetsRenderResults();
+}
+// Identity = Group + Name + Shape + Size + Color + Material (case/whitespace-insensitive) —
+// quantity/setInfo/storageLocation/notes are never part of identity.
+function assetsFindCollision(printGroupId, name, shape, size, color, material, excludeId) {
+  const norm = s => (s || '').trim().toLowerCase();
+  return ASSET_ITEMS.find(i => i.id !== excludeId &&
+    (i.printGroupId || null) === (printGroupId || null) &&
+    norm(i.name) === norm(name) && norm(i.shape) === norm(shape) && norm(i.size) === norm(size) &&
+    norm(i.color) === norm(color) && norm(i.material) === norm(material));
+}
+function assetsItemLabel(item) { return [item.name, item.shape, item.size, item.color].filter(Boolean).join(' — '); }
+
+function assetsOpenAdd() {
+  assetsAddOpen = true;
+  assetsAddDraft = { printGroupId: '', printGroupNewName: '', name: '', shape: '', size: '', color: '', material: '', setInfo: '', quantity: 1, storageLocation: '', notes: '' };
+  assetsRenderScreen();
+}
+function assetsCancelAdd() { assetsAddOpen = false; assetsAddDraft = null; assetsRenderScreen(); }
+function assetsSetDraftField(field, value) {
+  if (!assetsAddDraft) return;
+  assetsAddDraft[field] = value;
+  if (field === 'printGroupId') assetsRenderScreen();
+}
+function assetsSubmitAdd() {
+  if (!assetsAddDraft) return;
+  const d = assetsAddDraft;
+  const name = (d.name || '').trim();
+  if (!name) { alert('Enter a name.'); return; }
+  const shape = (d.shape || '').trim();
+  const size = (d.size || '').trim();
+  const color = (d.color || '').trim();
+  const material = (d.material || '').trim();
+
+  let printGroupId = null;
+  if (d.printGroupId === '__new__') {
+    const groupName = (d.printGroupNewName || '').trim();
+    if (!groupName) { alert('Type a name for the new group, or choose an existing one.'); return; }
+    printGroupId = pgAddGroup('assets', groupName).id;
+  } else if (d.printGroupId) {
+    printGroupId = d.printGroupId;
+  }
+
+  const dup = assetsFindCollision(printGroupId, name, shape, size, color, material, null);
+  if (dup) {
+    alert(`"${assetsItemLabel(dup)}" already exists in this Group — opening it instead of creating another.`);
+    assetsAddOpen = false;
+    assetsAddDraft = null;
+    invCollapsedGroups.delete('assets-group:' + (printGroupId || '(uncategorized)'));
+    assetsExpandedItem = dup.id;
+    assetsRenderScreen();
+    return;
+  }
+
+  const item = {
+    id: psNewAssetId(),
+    printGroupId,
+    name, shape, size, color, material,
+    setInfo: (d.setInfo || '').trim(),
+    quantity: parseInt(d.quantity, 10) || 0,
+    storageLocation: (d.storageLocation || '').trim(),
+    notes: (d.notes || '').trim(),
+    active: true,
+  };
+  ASSET_ITEMS.push(item);
+  assetsSaveItem(item);
+  assetsAddOpen = false;
+  assetsAddDraft = null;
+  invCollapsedGroups.delete('assets-group:' + (printGroupId || '(uncategorized)'));
+  assetsExpandedItem = item.id;
+  assetsRenderScreen();
+}
+// Plain saves — no reservation/ledger tracking in this pass.
+function assetsUpdateField(itemId, field, value) {
+  const item = assetsFindItem(itemId);
+  if (!item) return;
+  item[field] = field === 'quantity' ? (parseInt(value, 10) || 0) : value;
+  assetsSaveItem(item);
+  assetsRenderResults();
+}
+function assetsSetItemGroup(itemId, value) {
+  const item = assetsFindItem(itemId);
+  if (!item) return;
+  if (value === '__new__') {
+    const groupName = prompt('New group name:');
+    if (groupName === null || !groupName.trim()) { assetsRenderResults(); return; }
+    item.printGroupId = pgAddGroup('assets', groupName.trim()).id;
+  } else {
+    item.printGroupId = value || null;
+  }
+  assetsSaveItem(item);
+  assetsRenderResults();
+}
+function assetsDeleteItem(itemId) {
+  const item = assetsFindItem(itemId);
+  if (!item) return;
+  const label = assetsItemLabel(item);
+  if (!confirm(`Move "${label}" to Recently Deleted? You can restore it from there anytime.`)) return;
+  if (assetsExpandedItem === itemId) assetsExpandedItem = null;
+  item.deletedAt = Date.now();
+  assetsSaveItem(item);
+  ASSET_ITEMS = ASSET_ITEMS.filter(i => i.id !== itemId);
+  ASSET_ITEMS_TRASHED = ASSET_ITEMS_TRASHED.concat([item]);
+  assetsRenderScreen();
+}
+function assetsRestoreItem(itemId) {
+  const item = ASSET_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  delete item.deletedAt;
+  assetsSaveItem(item);
+  ASSET_ITEMS_TRASHED = ASSET_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  ASSET_ITEMS = ASSET_ITEMS.concat([item]);
+  assetsRenderScreen();
+}
+function assetsPermanentlyDeleteItem(itemId) {
+  const item = ASSET_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  const typed = prompt(`This permanently erases this item — even Recently Deleted won't have it anymore. This truly can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not deleted — you must type DELETE exactly.'); return; }
+  window.fbDeleteAssetItem(itemId).catch(err => console.error('Permanent delete failed:', err));
+  ASSET_ITEMS_TRASHED = ASSET_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  assetsRenderScreen();
+}
+// ── Edit Details: Name/Shape/Size/Color/Material — the identifying fields. Group/Set-info/
+// Quantity/Storage/Notes stay directly editable in the card. ──
+let assetsEditDetailsItemId = null;
+let assetsEditDetailsDraft = null;
+function assetsOpenEditDetails(itemId) {
+  const item = assetsFindItem(itemId);
+  if (!item) return;
+  assetsEditDetailsItemId = itemId;
+  assetsEditDetailsDraft = { name: item.name || '', shape: item.shape || '', size: item.size || '', color: item.color || '', material: item.material || '' };
+  assetsRenderResults();
+}
+function assetsCancelEditDetails() { assetsEditDetailsItemId = null; assetsEditDetailsDraft = null; assetsRenderResults(); }
+function assetsSetEditDetailsField(field, value) {
+  if (!assetsEditDetailsDraft) return;
+  assetsEditDetailsDraft[field] = value;
+}
+function assetsSubmitEditDetails(itemId) {
+  const item = assetsFindItem(itemId);
+  if (!item || !assetsEditDetailsDraft) return;
+  const d = assetsEditDetailsDraft;
+  const name = (d.name || '').trim();
+  if (!name) { alert('Enter a name.'); return; }
+  const shape = (d.shape || '').trim();
+  const size = (d.size || '').trim();
+  const color = (d.color || '').trim();
+  const material = (d.material || '').trim();
+  const collision = assetsFindCollision(item.printGroupId, name, shape, size, color, material, item.id);
+  if (collision) { alert('This would collide with an existing item in the same Group. Edit that one instead, or change one of these fields.'); return; }
+  item.name = name; item.shape = shape; item.size = size; item.color = color; item.material = material;
+  assetsSaveItem(item);
+  assetsEditDetailsItemId = null;
+  assetsEditDetailsDraft = null;
+  assetsRenderResults();
+}
+function assetsEditDetailsFormHtml(item) {
+  const d = assetsEditDetailsDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.5rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Edit Details</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="assetsCancelEditDetails()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field"><label>Name</label><input type="text" value="${invAttr(d.name)}" oninput="assetsSetEditDetailsField('name', this.value)"></div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Shape</label><input type="text" value="${invAttr(d.shape)}" oninput="assetsSetEditDetailsField('shape', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Size</label><input type="text" value="${invAttr(d.size)}" oninput="assetsSetEditDetailsField('size', this.value)"></div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Color</label><input type="text" list="assets-color-suggestions" value="${invAttr(d.color)}" oninput="assetsSetEditDetailsField('color', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Material</label><input type="text" list="assets-material-suggestions" value="${invAttr(d.material)}" oninput="assetsSetEditDetailsField('material', this.value)"></div>
+    </div>
+    <button class="save-btn" onclick="assetsSubmitEditDetails('${item.id}')">Save Details</button>
+  </div>`;
+}
+function assetsAddFormHtml() {
+  const d = assetsAddDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Add Asset</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="assetsCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field"><label>Group <span style="font-weight:400;">(optional)</span></label>
+      <select onchange="assetsSetDraftField('printGroupId', this.value)">
+        <option value="" ${d.printGroupId === '' ? 'selected' : ''}>Uncategorized</option>
+        ${pgGroupsForKind('assets', false).map(g => `<option value="${invAttr(g.id)}" ${g.id === d.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+        <option value="__new__" ${d.printGroupId === '__new__' ? 'selected' : ''}>+ Add new group…</option>
+      </select>
+      ${d.printGroupId === '__new__' ? `<input type="text" style="margin-top:6px;" placeholder="New group name" value="${invAttr(d.printGroupNewName)}" oninput="assetsSetDraftField('printGroupNewName', this.value)">` : ''}
+    </div>
+    <div class="settings-field"><label>Name</label>
+      <input type="text" placeholder="e.g. White Arch Backdrop" value="${invAttr(d.name)}" oninput="assetsSetDraftField('name', this.value)">
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Shape <span style="font-weight:400;">(optional)</span></label><input type="text" placeholder="e.g. Round" value="${invAttr(d.shape)}" oninput="assetsSetDraftField('shape', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Size <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.size)}" oninput="assetsSetDraftField('size', this.value)"></div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Color <span style="font-weight:400;">(optional)</span></label>
+        <input type="text" list="assets-color-suggestions" value="${invAttr(d.color)}" oninput="assetsSetDraftField('color', this.value)">
+        <datalist id="assets-color-suggestions">${assetsKnownColors().map(c => `<option value="${invAttr(c)}">`).join('')}</datalist>
+      </div>
+      <div class="settings-field" style="margin-bottom:0"><label>Material <span style="font-weight:400;">(optional)</span></label>
+        <input type="text" list="assets-material-suggestions" value="${invAttr(d.material)}" oninput="assetsSetDraftField('material', this.value)">
+        <datalist id="assets-material-suggestions">${assetsKnownMaterials().map(m => `<option value="${invAttr(m)}">`).join('')}</datalist>
+      </div>
+    </div>
+    <div class="settings-field"><label>Set info <span style="font-weight:400;">(optional — e.g. "Part of 3-panel set" or "Individual panel")</span></label>
+      <input type="text" value="${invAttr(d.setInfo)}" oninput="assetsSetDraftField('setInfo', this.value)">
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${d.quantity}" oninput="assetsSetDraftField('quantity', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(d.storageLocation)}" oninput="assetsSetDraftField('storageLocation', this.value)"></div>
+    </div>
+    <div class="settings-field"><label>Notes <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(d.notes)}" oninput="assetsSetDraftField('notes', this.value)"></div>
+    <button class="save-btn" onclick="assetsSubmitAdd()">Save Asset</button>
+  </div>`;
+}
+function assetsItemCardHtml(item) {
+  const expanded = assetsExpandedItem === item.id;
+  const subtitle = [item.shape, item.size, item.color, item.material].filter(Boolean).join(' · ');
+  let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
+  html += `<div class="inv-color-row-header" onclick="assetsToggleExpand('${item.id}')">
+    <div class="inv-color-row-text">
+      <div class="inv-color-row-name">${psEscape(item.name)}</div>
+      ${subtitle ? `<div class="inv-color-row-brand">${psEscape(subtitle)}</div>` : ''}
+    </div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.quantity || 0) === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${(item.quantity || 0) === 0 ? 'var(--accent)' : 'var(--info-text)'};">${item.quantity || 0}</div>
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+  </div>`;
+  if (expanded) {
+    html += `<div class="ps-job-body">`;
+    if (item.setInfo) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.3rem;"><i class="fa-solid fa-layer-group"></i> ${psEscape(item.setInfo)}</div>`;
+    if (item.notes) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">${psEscape(item.notes)}</div>`;
+    html += `<div class="settings-field">
+      <label>Group</label>
+      <select onchange="assetsSetItemGroup('${item.id}', this.value)">
+        <option value="" ${!item.printGroupId ? 'selected' : ''}>Uncategorized</option>
+        ${pgGroupsForKind('assets', false).map(g => `<option value="${invAttr(g.id)}" ${g.id === item.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+        <option value="__new__">+ Add new group…</option>
+      </select>
+    </div>`;
+    html += `<div class="settings-field"><label>Set info</label><input type="text" value="${invAttr(item.setInfo)}" placeholder="optional" onchange="assetsUpdateField('${item.id}','setInfo',this.value)"></div>`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${item.quantity || 0}" onchange="assetsUpdateField('${item.id}','quantity',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" onchange="assetsUpdateField('${item.id}','storageLocation',this.value)"></div>
+    </div>`;
+    html += `<div class="settings-field"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="assetsUpdateField('${item.id}','notes',this.value)"></div>`;
+    html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="assetsOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="assetsDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+    </div>`;
+    if (assetsEditDetailsItemId === item.id) html += assetsEditDetailsFormHtml(item);
+    html += `</div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+function assetsRenderResults() {
+  const root = document.getElementById('assets-results-root');
+  if (!root) return;
+  const items = assetsFilteredItems();
+  if (items.length === 0) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No Assets yet.</div>`;
+    return;
+  }
+  const groups = assetsGroupedItems(items);
+  root.innerHTML = groups.map(g => {
+    const collapsed = invCollapsedGroups.has(g.key);
+    return `<div class="inv-group-header" onclick="assetsToggleGroup('${g.key}')">
+      <span>${psEscape(g.label)} (${g.items.length})</span>
+      <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+    </div>
+    ${collapsed ? '' : `<div class="inv-color-list">` + g.items.map(assetsItemCardHtml).join('') + `</div>`}`;
+  }).join('');
+}
 function assetsRenderScreen() {
   const root = document.getElementById('assets-root');
   if (!root) return;
   assetsEnsureGroupsSeeded();
-  root.innerHTML = `
-    <div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">
-      Asset item tracking is coming soon. For now, set up your categories below — item tracking and
-      job reservations will build on top of these.
+  let html = `<div class="card">
+    <div class="settings-field" style="margin-bottom:0.6rem;">
+      ${invSearchFieldHtml({ id: 'assets-search', placeholder: 'Search name, shape, color, material, storage...', value: assetsSearchQuery, onInput: 'assetsSetSearch(this.value)', onClear: "assetsSetSearch('')" })}
     </div>
-    <div id="assets-manage-root" style="margin-top:0.75rem;"></div>
-  `;
+    <button class="save-btn" onclick="assetsOpenAdd()"><i class="fa-solid fa-plus"></i> Add Asset</button>
+  </div>`;
+  html += `<div id="assets-manage-root" style="margin-bottom:0.75rem;"></div>`;
+  if (assetsAddOpen) html += assetsAddFormHtml();
+  html += `<div id="assets-results-root"></div>`;
+
+  const trashed = ASSET_ITEMS_TRASHED;
+  if (trashed.length > 0) {
+    html += `<div class="section-label">Recently deleted (${trashed.length})</div>
+    <div class="card">
+      ${trashed.map(item => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:600;">${psEscape(assetsItemLabel(item))}</div>
+          </div>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="assetsRestoreItem('${item.id}')">Restore</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="assetsPermanentlyDeleteItem('${item.id}')">Delete forever</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
+  root.innerHTML = html;
   pgRenderManage('assets');
+  assetsRenderResults();
+}
+
+// ═══════════════════════════════════════ SUPPLIES / NEEDS ORDERING ═══════════════════════════════════
+//
+// Deliberately NOT quantity-tracked Inventory — the real need employees have is "flag this as
+// running low so it gets ordered," not maintaining an on-hand count. No quantity field, no cost, no
+// ledger, no Receive/Pull. Reuses the shared Groups system (kind: 'supplies') for organization, the
+// same business-editable pattern as everywhere else. Helium is explicitly excluded — the dedicated
+// Helium Calculator + Tracker stays the source of truth for that, this never touches it.
+//
+// needsOrdering is a plain boolean anyone can set (flagging as low is open to every user, matching
+// the explicit "employees should be able to add to order" framing); clearing it back to false
+// ("Mark Restocked") is admin-gated, matching "Admin should be able to... mark restocked" and this
+// app's existing convention that the "this is handled" action needs the passcode. Restocking never
+// deletes the Supply — it just clears the flag so the same catalog entry can be flagged again later.
+let SUPPLY_ITEMS = [];
+let SUPPLY_ITEMS_TRASHED = [];
+const SUPPLIES_GROUP_SEED = [
+  'Rigging / Attachment', 'Adhesives', 'Tape', 'Balloon Service / Treatment',
+  'Transport / Protection / Packaging', 'General Build / Shop Supplies', 'Balloon Delivery Supplies', 'Other',
+];
+function suppliesEnsureGroupsSeeded() {
+  if (pgGroupsForKind('supplies', true).length > 0) return;
+  SUPPLIES_GROUP_SEED.forEach(name => pgAddGroup('supplies', name));
+}
+function psNewSupplyId() { return 'supply_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+let suppliesSearchQuery = '';
+let suppliesExpandedItem = null;
+let suppliesAddOpen = false;
+let suppliesAddDraft = null;
+let suppliesShowOnlyNeeded = false;
+
+function suppliesStartListeners() {
+  suppliesRenderScreen(); // shell first, same pattern as every other category's listener bootstrap
+  window.fbOnSnapshotSupplyItems(
+    (snapshot) => {
+      const all = snapshot.docs.map(d => d.data());
+      SUPPLY_ITEMS = all.filter(i => !i.deletedAt);
+      SUPPLY_ITEMS_TRASHED = all.filter(i => i.deletedAt);
+      suppliesRenderScreen();
+    },
+    (err) => console.error('Supplies sync error:', err)
+  );
+}
+function suppliesFindItem(id) { return SUPPLY_ITEMS.find(i => i.id === id) || SUPPLY_ITEMS_TRASHED.find(i => i.id === id); }
+function suppliesSaveItem(item) {
+  window.fbSaveSupplyItem(item).catch(err => {
+    console.error(err);
+    alert("Couldn't save that change — check your connection and try again.");
+  });
+}
+function suppliesSetSearch(q) { suppliesSearchQuery = q; suppliesRenderResults(); }
+function suppliesToggleExpand(id) { suppliesExpandedItem = suppliesExpandedItem === id ? null : id; suppliesRenderResults(); }
+function suppliesToggleShowNeeded() { suppliesShowOnlyNeeded = !suppliesShowOnlyNeeded; suppliesRenderResults(); }
+function suppliesFilteredItems() {
+  const q = suppliesSearchQuery.trim().toLowerCase();
+  let items = SUPPLY_ITEMS;
+  if (suppliesShowOnlyNeeded) items = items.filter(i => i.needsOrdering);
+  if (!q) return items;
+  return items.filter(i => [i.name, i.notes, i.storageLocation].some(f => (f || '').toLowerCase().includes(q)));
+}
+// Mirrors invxGroupedItems's {key,label,items} shape against SUPPLY_ITEMS instead.
+function suppliesGroupedItems(items) {
+  const byGroup = {};
+  items.forEach(i => { const key = i.printGroupId || '(uncategorized)'; (byGroup[key] = byGroup[key] || []).push(i); });
+  const orderById = {};
+  pgGroupsForKind('supplies', true).forEach((g, idx) => { orderById[g.id] = idx; });
+  const comparator = (a, b) => (a.name || '').localeCompare(b.name || '');
+  return Object.keys(byGroup).sort((a, b) => {
+    if (a === '(uncategorized)') return 1;
+    if (b === '(uncategorized)') return -1;
+    return (orderById[a] ?? 999999) - (orderById[b] ?? 999999);
+  }).map(key => ({
+    key: 'supplies-group:' + key,
+    label: key === '(uncategorized)' ? 'Uncategorized' : ((pgFindGroup(key) || {}).name || 'Uncategorized'),
+    items: [...byGroup[key]].sort(comparator),
+  }));
+}
+function suppliesToggleGroup(key) {
+  if (invCollapsedGroups.has(key)) invCollapsedGroups.delete(key);
+  else invCollapsedGroups.add(key);
+  suppliesRenderResults();
+}
+// Identity = Group + Name (case/whitespace-insensitive) — the same real supply shouldn't get a
+// second competing catalog entry just because someone re-typed it slightly differently.
+function suppliesFindCollision(printGroupId, name, excludeId) {
+  const norm = s => (s || '').trim().toLowerCase();
+  return SUPPLY_ITEMS.find(i => i.id !== excludeId && (i.printGroupId || null) === (printGroupId || null) && norm(i.name) === norm(name));
+}
+
+function suppliesOpenAdd() {
+  suppliesAddOpen = true;
+  suppliesAddDraft = { printGroupId: '', printGroupNewName: '', name: '', storageLocation: '', notes: '' };
+  suppliesRenderScreen();
+}
+function suppliesCancelAdd() { suppliesAddOpen = false; suppliesAddDraft = null; suppliesRenderScreen(); }
+function suppliesSetDraftField(field, value) {
+  if (!suppliesAddDraft) return;
+  suppliesAddDraft[field] = value;
+  if (field === 'printGroupId') suppliesRenderScreen();
+}
+function suppliesSubmitAdd() {
+  if (!suppliesAddDraft) return;
+  const d = suppliesAddDraft;
+  const name = (d.name || '').trim();
+  if (!name) { alert('Enter a name.'); return; }
+
+  let printGroupId = null;
+  if (d.printGroupId === '__new__') {
+    const groupName = (d.printGroupNewName || '').trim();
+    if (!groupName) { alert('Type a name for the new group, or choose an existing one.'); return; }
+    printGroupId = pgAddGroup('supplies', groupName).id;
+  } else if (d.printGroupId) {
+    printGroupId = d.printGroupId;
+  }
+
+  const dup = suppliesFindCollision(printGroupId, name, null);
+  if (dup) {
+    alert(`"${dup.name}" already exists in this Group — opening it instead of creating another.`);
+    suppliesAddOpen = false;
+    suppliesAddDraft = null;
+    invCollapsedGroups.delete('supplies-group:' + (printGroupId || '(uncategorized)'));
+    suppliesExpandedItem = dup.id;
+    suppliesRenderScreen();
+    return;
+  }
+
+  const item = {
+    id: psNewSupplyId(),
+    printGroupId,
+    name,
+    storageLocation: (d.storageLocation || '').trim(),
+    needsOrdering: false,
+    notes: (d.notes || '').trim(),
+    active: true,
+  };
+  SUPPLY_ITEMS.push(item);
+  suppliesSaveItem(item);
+  suppliesAddOpen = false;
+  suppliesAddDraft = null;
+  invCollapsedGroups.delete('supplies-group:' + (printGroupId || '(uncategorized)'));
+  suppliesExpandedItem = item.id;
+  suppliesRenderScreen();
+}
+function suppliesUpdateField(itemId, field, value) {
+  const item = suppliesFindItem(itemId);
+  if (!item) return;
+  item[field] = value;
+  suppliesSaveItem(item);
+  suppliesRenderResults();
+}
+// Open to every user — no admin gate, matching the explicit "employees should be able to flag as
+// running low" framing.
+function suppliesFlagNeeded(itemId) {
+  const item = suppliesFindItem(itemId);
+  if (!item) return;
+  item.needsOrdering = true;
+  suppliesSaveItem(item);
+  suppliesRenderResults();
+}
+function suppliesMarkRestocked(itemId) {
+  if (!invAdminUnlocked) { alert('Unlock admin (Settings) to mark items restocked.'); return; }
+  const item = suppliesFindItem(itemId);
+  if (!item) return;
+  item.needsOrdering = false;
+  suppliesSaveItem(item);
+  suppliesRenderResults();
+}
+function suppliesSetItemGroup(itemId, value) {
+  const item = suppliesFindItem(itemId);
+  if (!item) return;
+  if (value === '__new__') {
+    const groupName = prompt('New group name:');
+    if (groupName === null || !groupName.trim()) { suppliesRenderResults(); return; }
+    item.printGroupId = pgAddGroup('supplies', groupName.trim()).id;
+  } else {
+    item.printGroupId = value || null;
+  }
+  suppliesSaveItem(item);
+  suppliesRenderResults();
+}
+function suppliesDeleteItem(itemId) {
+  const item = suppliesFindItem(itemId);
+  if (!item) return;
+  if (!confirm(`Move "${item.name}" to Recently Deleted? You can restore it from there anytime.`)) return;
+  if (suppliesExpandedItem === itemId) suppliesExpandedItem = null;
+  item.deletedAt = Date.now();
+  suppliesSaveItem(item);
+  SUPPLY_ITEMS = SUPPLY_ITEMS.filter(i => i.id !== itemId);
+  SUPPLY_ITEMS_TRASHED = SUPPLY_ITEMS_TRASHED.concat([item]);
+  suppliesRenderScreen();
+}
+function suppliesRestoreItem(itemId) {
+  const item = SUPPLY_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  delete item.deletedAt;
+  suppliesSaveItem(item);
+  SUPPLY_ITEMS_TRASHED = SUPPLY_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  SUPPLY_ITEMS = SUPPLY_ITEMS.concat([item]);
+  suppliesRenderScreen();
+}
+function suppliesPermanentlyDeleteItem(itemId) {
+  const item = SUPPLY_ITEMS_TRASHED.find(i => i.id === itemId);
+  if (!item) return;
+  const typed = prompt(`This permanently erases this Supply — even Recently Deleted won't have it anymore. This truly can't be undone.\n\nType DELETE to confirm.`);
+  if (typed === null) return;
+  if (typed !== 'DELETE') { alert('Not deleted — you must type DELETE exactly.'); return; }
+  window.fbDeleteSupplyItem(itemId).catch(err => console.error('Permanent delete failed:', err));
+  SUPPLY_ITEMS_TRASHED = SUPPLY_ITEMS_TRASHED.filter(i => i.id !== itemId);
+  suppliesRenderScreen();
+}
+function suppliesAddFormHtml() {
+  const d = suppliesAddDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Add Supply</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="suppliesCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field"><label>Group <span style="font-weight:400;">(optional)</span></label>
+      <select onchange="suppliesSetDraftField('printGroupId', this.value)">
+        <option value="" ${d.printGroupId === '' ? 'selected' : ''}>Uncategorized</option>
+        ${pgGroupsForKind('supplies', false).map(g => `<option value="${invAttr(g.id)}" ${g.id === d.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+        <option value="__new__" ${d.printGroupId === '__new__' ? 'selected' : ''}>+ Add new group…</option>
+      </select>
+      ${d.printGroupId === '__new__' ? `<input type="text" style="margin-top:6px;" placeholder="New group name" value="${invAttr(d.printGroupNewName)}" oninput="suppliesSetDraftField('printGroupNewName', this.value)">` : ''}
+    </div>
+    <div class="settings-field"><label>Name</label>
+      <input type="text" placeholder="e.g. Duct Tape" value="${invAttr(d.name)}" oninput="suppliesSetDraftField('name', this.value)">
+    </div>
+    <div class="settings-field"><label>Storage location <span style="font-weight:400;">(optional)</span></label>
+      <input type="text" value="${invAttr(d.storageLocation)}" oninput="suppliesSetDraftField('storageLocation', this.value)">
+    </div>
+    <div class="settings-field"><label>Notes <span style="font-weight:400;">(optional)</span></label>
+      <input type="text" value="${invAttr(d.notes)}" oninput="suppliesSetDraftField('notes', this.value)">
+    </div>
+    <button class="save-btn" onclick="suppliesSubmitAdd()">Save Supply</button>
+  </div>`;
+}
+function suppliesItemCardHtml(item) {
+  const expanded = suppliesExpandedItem === item.id;
+  let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
+  html += `<div class="inv-color-row-header" onclick="suppliesToggleExpand('${item.id}')">
+    <div class="inv-color-row-text">
+      <div class="inv-color-row-name">${psEscape(item.name)}</div>
+      ${item.storageLocation ? `<div class="inv-color-row-brand">${psEscape(item.storageLocation)}</div>` : ''}
+    </div>
+    ${item.needsOrdering ? `<div style="text-align:center; font-size:11px; font-weight:700; border-radius:5px; padding:3px 8px; background:var(--warning-bg); color:var(--warning-text);">NEEDS ORDER</div>` : ''}
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+  </div>`;
+  if (expanded) {
+    html += `<div class="ps-job-body">`;
+    if (item.notes) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">${psEscape(item.notes)}</div>`;
+    html += `<div class="settings-field">
+      <label>Group</label>
+      <select onchange="suppliesSetItemGroup('${item.id}', this.value)">
+        <option value="" ${!item.printGroupId ? 'selected' : ''}>Uncategorized</option>
+        ${pgGroupsForKind('supplies', false).map(g => `<option value="${invAttr(g.id)}" ${g.id === item.printGroupId ? 'selected' : ''}>${psEscape(g.name)}</option>`).join('')}
+        <option value="__new__">+ Add new group…</option>
+      </select>
+    </div>`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="suppliesUpdateField('${item.id}','storageLocation',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="suppliesUpdateField('${item.id}','notes',this.value)"></div>
+    </div>`;
+    html += `<div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+      <div>
+        ${item.needsOrdering
+          ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="suppliesMarkRestocked('${item.id}')"><i class="fa-solid fa-check"></i> Mark Restocked</button>`
+          : `<button class="save-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="suppliesFlagNeeded('${item.id}')"><i class="fa-solid fa-cart-plus"></i> Add to Order</button>`}
+      </div>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="suppliesDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+    </div>`;
+    html += `</div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+function suppliesRenderResults() {
+  const root = document.getElementById('supplies-results-root');
+  if (!root) return;
+  const items = suppliesFilteredItems();
+  if (items.length === 0) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">${suppliesShowOnlyNeeded ? 'Nothing currently flagged for ordering.' : 'No supplies in the catalog yet.'}</div>`;
+    return;
+  }
+  const groups = suppliesGroupedItems(items);
+  root.innerHTML = groups.map(g => {
+    const collapsed = invCollapsedGroups.has(g.key);
+    return `<div class="inv-group-header" onclick="suppliesToggleGroup('${g.key}')">
+      <span>${psEscape(g.label)} (${g.items.length})</span>
+      <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+    </div>
+    ${collapsed ? '' : `<div class="inv-color-list">` + g.items.map(suppliesItemCardHtml).join('') + `</div>`}`;
+  }).join('');
+}
+// "Currently flagged prominent" per the explicit request — a banner at the very top of the screen
+// whenever anything is flagged, with a one-click filter to see only those.
+function suppliesRenderScreen() {
+  const root = document.getElementById('supplies-root');
+  if (!root) return;
+  suppliesEnsureGroupsSeeded();
+  const neededCount = SUPPLY_ITEMS.filter(i => i.needsOrdering).length;
+  let html = '';
+  if (neededCount > 0) {
+    html += `<div class="card" style="background:var(--warning-bg); margin-bottom:0.75rem;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <strong style="font-size:14px; color:var(--warning-text);"><i class="fa-solid fa-triangle-exclamation"></i> Needs Ordering (${neededCount})</strong>
+        <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="suppliesToggleShowNeeded()">${suppliesShowOnlyNeeded ? 'Show all supplies' : 'Show only these'}</button>
+      </div>
+    </div>`;
+  }
+  html += `<div class="card">
+    <div class="settings-field" style="margin-bottom:0.6rem;">
+      ${invSearchFieldHtml({ id: 'supplies-search', placeholder: 'Search supplies...', value: suppliesSearchQuery, onInput: 'suppliesSetSearch(this.value)', onClear: "suppliesSetSearch('')" })}
+    </div>
+    <button class="save-btn" onclick="suppliesOpenAdd()"><i class="fa-solid fa-plus"></i> Add Supply to Catalog</button>
+  </div>`;
+  html += `<div id="supplies-manage-root" style="margin-bottom:0.75rem;"></div>`;
+  if (suppliesAddOpen) html += suppliesAddFormHtml();
+  html += `<div id="supplies-results-root"></div>`;
+
+  const trashed = SUPPLY_ITEMS_TRASHED;
+  if (trashed.length > 0) {
+    html += `<div class="section-label">Recently deleted (${trashed.length})</div>
+    <div class="card">
+      ${trashed.map(item => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:600;">${psEscape(item.name)}</div>
+          </div>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="suppliesRestoreItem('${item.id}')">Restore</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="suppliesPermanentlyDeleteItem('${item.id}')">Delete forever</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
+  root.innerHTML = html;
+  pgRenderManage('supplies');
+  suppliesRenderResults();
 }
 
 // ═══════════════════════════════════════ BBT MASTER COLOR CATALOG ═══════════════════════════════════════
@@ -15557,6 +16545,7 @@ function bootApp() {
   try { foilStartListeners(); } catch (e) { console.error('Foil inventory listeners failed to start:', e); }
   try { invxStartListeners(); } catch (e) { console.error('Inventory extras listeners failed to start:', e); }
   try { assetsStartListeners(); } catch (e) { console.error('Assets listeners failed to start:', e); }
+  try { suppliesStartListeners(); } catch (e) { console.error('Supplies listeners failed to start:', e); }
   try { mstStartListeners(); } catch (e) { console.error('BBT Master Catalog listeners failed to start:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { bsUpdateHomeBanner(); } catch (e) { console.error('bsUpdateHomeBanner failed:', e); }
