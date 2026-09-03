@@ -8,6 +8,9 @@
 <meta name="apple-mobile-web-app-title" content="Balloon Calc">
 <title>Balloon Delivery Calculator</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Urbanist:wght@400;500;600;700;800&display=swap">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   :root {
@@ -21,13 +24,14 @@
     --accent: #2d6a4f;
     --accent-light: #e8f5ee;
     --accent-border: #52b788;
+    --accent-border-rgb: 82,183,136;
     --warning-bg: #fff8e6;
     --warning-text: #92600a;
     --info-bg: #e8f1fb;
     --info-text: #2f6ca3;
-    --radius: 12px;
-    --radius-sm: 8px;
-    --font: -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    --radius: 10px;
+    --radius-sm: 7px;
+    --font: 'Urbanist', -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -42,6 +46,7 @@
       --accent: #52b788;
       --accent-light: #0d2b1e;
       --accent-border: #2d6a4f;
+      --accent-border-rgb: 45,106,79;
       --warning-bg: #2a1f00;
       --warning-text: #f0a500;
       --info-bg: #10202e;
@@ -84,7 +89,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 1rem 1.25rem 0.875rem;
+    padding: 0.75rem 1.125rem 0.6875rem;
     background: var(--surface);
     border-bottom: 0.5px solid var(--border);
     position: sticky;
@@ -92,9 +97,9 @@
     z-index: 10;
   }
 
-  .topbar-left { display: flex; align-items: center; gap: 10px; }
-  .topbar-icon { font-size: 18px; color: var(--accent); }
-  .topbar h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
+  .topbar-left { display: flex; align-items: center; gap: 9px; }
+  .topbar-icon { font-size: 17px; color: var(--accent); }
+  .topbar h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.2px; }
   .app-mode-badge {
     font-size: 9.5px;
     font-weight: 700;
@@ -107,13 +112,50 @@
     padding: 2px 6px;
   }
 
+  /* BREADCRUMB — a thin, horizontally-scrolling strip so a deep trail never wraps into a second
+     line or grows the header. Hidden entirely (see inline display:none default) on Home/Settings
+     and any view with nothing to show. */
+  .breadcrumb-row {
+    align-items: center;
+    gap: 4px;
+    padding: 0.4rem 1.125rem;
+    background: var(--surface);
+    border-bottom: 0.5px solid var(--border);
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
+    position: sticky;
+    top: 58px;
+    z-index: 9;
+  }
+  .breadcrumb-row::-webkit-scrollbar { display: none; }
+  .breadcrumb-seg {
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .breadcrumb-seg:hover { color: var(--accent); text-decoration: underline; }
+  .breadcrumb-seg.current {
+    color: var(--text);
+    font-weight: 600;
+    cursor: default;
+  }
+  .breadcrumb-seg.current:hover { text-decoration: none; }
+  .breadcrumb-sep {
+    font-size: 8px;
+    color: var(--text-tertiary);
+    margin: 0 2px;
+    flex-shrink: 0;
+  }
+
   .icon-btn {
     background: none;
     border: none;
     cursor: pointer;
     padding: 8px;
     color: var(--text-secondary);
-    font-size: 20px;
+    font-size: 18px;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -141,8 +183,8 @@
     background: var(--surface);
     border: 0.5px solid var(--border);
     border-radius: var(--radius);
-    padding: 1rem 1.125rem;
-    margin-bottom: 0.75rem;
+    padding: 0.875rem 1rem;
+    margin-bottom: 0.625rem;
   }
 
   /* TOOL GRID (home screen) */
@@ -168,17 +210,17 @@
   }
   .tool-tile:hover, .tool-tile:active { background: var(--accent-light); border-color: var(--accent-border); }
   .tool-tile-icon {
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
     border-radius: var(--radius-sm);
     background: var(--accent-light);
     color: var(--accent);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 17px;
+    font-size: 15px;
   }
-  .tool-tile-title { font-size: 12px; font-weight: 600; line-height: 1.25; letter-spacing: -0.1px; }
+  .tool-tile-title { font-size: 11.5px; font-weight: 600; line-height: 1.25; letter-spacing: -0.1px; }
   .tool-tile.soon { opacity: 0.45; cursor: default; }
   .tool-tile.soon:hover, .tool-tile.soon:active { background: var(--surface); border-color: var(--border); }
   @media (min-width: 900px) {
@@ -191,8 +233,8 @@
        430px-mode ever anticipated — without this, the icon/title inside stay pinned at their
        phone-shell size, leaving a small icon adrift in a much bigger empty square. Scaling both
        up keeps the content filling the tile instead of shrinking to a corner of it. */
-    .tool-tile-icon { width: 56px; height: 56px; font-size: 24px; }
-    .tool-tile-title { font-size: 14px; }
+    .tool-tile-icon { width: 50px; height: 50px; font-size: 21px; }
+    .tool-tile-title { font-size: 13px; }
   }
 
   /* Home's "Rearrange" mode (personal per-device tile order, see HOME_TOOLS/homeTileOrder) —
@@ -221,9 +263,9 @@
   }
 
   .card-title {
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 600;
-    margin-bottom: 1rem;
+    margin-bottom: 0.875rem;
     color: var(--text-secondary);
     display: flex;
     align-items: center;
@@ -246,7 +288,7 @@
 
   .field input {
     width: 100%;
-    padding: 10px 11px;
+    padding: 9px 10px;
     border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-sm);
     font-size: 16px;
@@ -260,7 +302,7 @@
   .field input:focus {
     outline: none;
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(82,183,136,0.15);
+    box-shadow: 0 0 0 3px rgba(var(--accent-border-rgb), 0.15);
   }
 
   .field .hint {
@@ -277,7 +319,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 12px;
+    padding: 9px 11px;
     border: 0.5px solid var(--border);
     border-radius: var(--radius-sm);
     cursor: pointer;
@@ -381,11 +423,11 @@
 
   .trip-btn {
     flex: 1;
-    padding: 8px 6px;
+    padding: 7px 6px;
     border: none;
     border-radius: 6px;
     background: transparent;
-    font-size: 13px;
+    font-size: 12.5px;
     cursor: pointer;
     color: var(--text-secondary);
     font-family: var(--font);
@@ -408,7 +450,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 11px 13px;
+    padding: 10px 12px;
     border: 0.5px dashed var(--border-strong);
     border-radius: var(--radius-sm);
     background: none;
@@ -451,8 +493,8 @@
     background: var(--surface);
     border: 0.5px solid var(--border);
     border-radius: var(--radius);
-    padding: 1rem 1.125rem;
-    margin-bottom: 0.75rem;
+    padding: 0.875rem 1rem;
+    margin-bottom: 0.625rem;
   }
   .combined-row {
     display: flex;
@@ -490,7 +532,7 @@
     gap: 10px;
     margin-bottom: 1.25rem;
   }
-  .settings-back span { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
+  .settings-back span { font-size: 16px; font-weight: 600; letter-spacing: -0.2px; }
 
   .settings-field { margin-bottom: 1rem; }
   .settings-field:last-child { margin-bottom: 0; }
@@ -503,7 +545,7 @@
   }
   .settings-field input {
     width: 100%;
-    padding: 10px 11px;
+    padding: 9px 10px;
     border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-sm);
     font-size: 16px;
@@ -515,7 +557,7 @@
   .settings-field input:focus {
     outline: none;
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(82,183,136,0.15);
+    box-shadow: 0 0 0 3px rgba(var(--accent-border-rgb), 0.15);
   }
   .settings-field .hint {
     font-size: 11px;
@@ -527,11 +569,11 @@
   /* SAVE BUTTON */
   .save-btn {
     width: 100%;
-    padding: 13px;
+    padding: 11px;
     background: var(--accent);
     border: none;
     border-radius: var(--radius-sm);
-    font-size: 15px;
+    font-size: 14.5px;
     font-weight: 600;
     cursor: pointer;
     color: #fff;
@@ -557,7 +599,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 13px 14px;
+    padding: 11px 13px;
     border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-sm);
     background: var(--bg);
@@ -605,7 +647,7 @@
   /* PRODUCTION SHEET GENERATOR */
   .settings-field select {
     width: 100%;
-    padding: 10px 11px;
+    padding: 9px 10px;
     border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-sm);
     font-size: 16px;
@@ -615,7 +657,7 @@
   }
   .settings-field textarea {
     width: 100%;
-    padding: 10px 11px;
+    padding: 9px 10px;
     border: 0.5px solid var(--border-strong);
     border-radius: var(--radius-sm);
     font-size: 14px;
@@ -1099,6 +1141,10 @@
   window.fbLoadInventoryBaseline = () => window.fbLoadSettingsDoc('inventoryBaseline');
   window.fbSaveInventoryBaseline = (data) => window.fbSaveSettingsDoc('inventoryBaseline', data);
   window.fbOnSnapshotInventoryBaseline = (onNext, onError) => window.fbOnSnapshotSettingsDoc('inventoryBaseline', onNext, onError);
+  // Business-wide Accent Color preset — same plain settings-doc pattern, so every device/user
+  // agrees on the theme immediately rather than after a reload.
+  window.fbSaveAppearanceConfig = (data) => window.fbSaveSettingsDoc('appearanceConfig', data);
+  window.fbOnSnapshotAppearanceConfig = (onNext, onError) => window.fbOnSnapshotSettingsDoc('appearanceConfig', onNext, onError);
 
   // Time Tracker — clock in/out shifts (whoever's clocking in just types their name; entries
   // are shared live across the team like Jobs) and saved stopwatch task timings.
@@ -1165,6 +1211,7 @@
       <i class="fa-solid fa-gear"></i>
     </button>
   </div>
+  <div class="breadcrumb-row" id="breadcrumb-row" style="display:none;"></div>
 
   <!-- ═══════════════════════════════════════ HOME VIEW -->
   <div class="view active" id="view-home">
@@ -1675,6 +1722,7 @@
 
     <!-- Fully registry-driven group panels — settingsRenderSections() injects each
          SETTINGS_SECTIONS entry's container into the matching panel below. -->
+    <div class="settings-group-panel" data-settings-group="appearance" style="display:none"></div>
     <div class="settings-group-panel" data-settings-group="catalogs" style="display:none"></div>
     <div class="settings-group-panel" data-settings-group="templatesFormulas" style="display:none"></div>
     <div class="settings-group-panel" data-settings-group="importMapping" style="display:none"></div>
@@ -2233,6 +2281,7 @@ const SETTINGS_SECTIONS = [
   { id: 'masterManufacturers', label: 'Master Manufacturers', group: 'bbtMaster', containerId: 'mst-mfr-root', icon: 'fa-solid fa-industry' },
   { id: 'masterColors', label: 'Master Colors', group: 'bbtMaster', containerId: 'mst-color-root', icon: 'fa-solid fa-palette' },
   { id: 'feedbackInbox', label: 'Feedback Inbox', group: 'account', containerId: 'fb-inbox-root' },
+  { id: 'accentColor', label: 'Accent Color', group: 'appearance', containerId: 'appearance-settings-root', icon: 'fa-solid fa-palette' },
 ];
 
 // Every group shown as its own tile on the Settings home grid — 'account' and 'pricing' hold
@@ -2240,6 +2289,7 @@ const SETTINGS_SECTIONS = [
 // the rest are populated purely from SETTINGS_SECTIONS above.
 const SETTINGS_GROUPS = [
   { id: 'account', label: 'Account', icon: 'fa-solid fa-user' },
+  { id: 'appearance', label: 'Appearance', icon: 'fa-solid fa-palette' },
   { id: 'people', label: 'People & Access', icon: 'fa-solid fa-users' },
   // subChoice: this group's three sections (Color Library, Material Catalog, Helium Cost
   // Reference) were too much stacked on one scrolling page — instead the group opens to its
@@ -2254,6 +2304,76 @@ const SETTINGS_GROUPS = [
   // reference data (Manufacturers, Colors), not anything owned by this business.
   { id: 'bbtMaster', label: 'BBT Master Catalog', icon: 'fa-solid fa-globe', subChoice: true },
 ];
+
+// ═══════════════════════════════════════ APPEARANCE — ACCENT COLOR ═══════════════════════════════════════
+//
+// One business-wide preset, applied everywhere via the same CSS custom properties every screen
+// already renders through — never per-tile/per-user color picking. A preset only ever touches the
+// accent family of tokens (--accent/--accent-light/--accent-border/--accent-border-rgb), each with
+// its own light- and dark-mode-aware pair; every other token (bg/surface/border/text/warning/info)
+// is untouched. Safe because the whole stylesheet was already confirmed to route through these
+// tokens almost everywhere — the only 2 exceptions (hardcoded focus-ring rgba values) were folded
+// into --accent-border-rgb alongside this feature.
+const ACCENT_PRESETS = {
+  green:   { label: 'Green',   light: { accent: '#2d6a4f', accentLight: '#e8f5ee', accentBorder: '#52b788', accentBorderRgb: '82,183,136' },  dark: { accent: '#52b788', accentLight: '#0d2b1e', accentBorder: '#2d6a4f', accentBorderRgb: '45,106,79' } },
+  blue:    { label: 'Blue',    light: { accent: '#2f6ca3', accentLight: '#e8f1fb', accentBorder: '#5b9bd9', accentBorderRgb: '91,155,217' },  dark: { accent: '#5b9bd9', accentLight: '#0d1f2e', accentBorder: '#2f6ca3', accentBorderRgb: '47,108,163' } },
+  pink:    { label: 'Pink',    light: { accent: '#b8447a', accentLight: '#fbe8f1', accentBorder: '#e07ba8', accentBorderRgb: '224,123,168' }, dark: { accent: '#e07ba8', accentLight: '#2e0d1e', accentBorder: '#b8447a', accentBorderRgb: '184,68,122' } },
+  purple:  { label: 'Purple',  light: { accent: '#6b46a3', accentLight: '#f0e8fb', accentBorder: '#9b7bd9', accentBorderRgb: '155,123,217' }, dark: { accent: '#9b7bd9', accentLight: '#1e0d2e', accentBorder: '#6b46a3', accentBorderRgb: '107,70,163' } },
+  orange:  { label: 'Orange',  light: { accent: '#c1651a', accentLight: '#fdeee0', accentBorder: '#e08c40', accentBorderRgb: '224,140,64' },  dark: { accent: '#e08c40', accentLight: '#2e1c0d', accentBorder: '#c1651a', accentBorderRgb: '193,101,26' } },
+  neutral: { label: 'Neutral', light: { accent: '#52524e', accentLight: '#ececea', accentBorder: '#8a8a86', accentBorderRgb: '138,138,134' }, dark: { accent: '#b5b5b0', accentLight: '#262624', accentBorder: '#6a6a66', accentBorderRgb: '106,106,102' } },
+};
+let apAccentPreset = 'green';
+function apApplyAccent() {
+  const preset = ACCENT_PRESETS[apAccentPreset] || ACCENT_PRESETS.green;
+  const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const vals = isDark ? preset.dark : preset.light;
+  const rootStyle = document.documentElement.style;
+  rootStyle.setProperty('--accent', vals.accent);
+  rootStyle.setProperty('--accent-light', vals.accentLight);
+  rootStyle.setProperty('--accent-border', vals.accentBorder);
+  rootStyle.setProperty('--accent-border-rgb', vals.accentBorderRgb);
+}
+function apInit() {
+  apRenderSettingsSection(); // paint the picker before Firestore resolves, same pattern as invConfigInit
+  if (window.matchMedia) {
+    // Re-apply if the OS theme flips while the app is open, so the correct light/dark half of the
+    // current preset is always showing rather than whatever was resolved at load.
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', apApplyAccent);
+  }
+  window.fbOnSnapshotAppearanceConfig(
+    (snap) => {
+      const preset = snap.exists() ? snap.data().accentPreset : null;
+      apAccentPreset = ACCENT_PRESETS[preset] ? preset : 'green';
+      apApplyAccent();
+      apRenderSettingsSection();
+    },
+    (err) => console.error('Appearance config sync error:', err)
+  );
+}
+function apSetAccentPreset(preset) {
+  if (!ACCENT_PRESETS[preset]) return;
+  apAccentPreset = preset;
+  apApplyAccent();
+  apRenderSettingsSection();
+  window.fbSaveAppearanceConfig({ accentPreset: preset }).catch(err => console.error('Appearance config save failed:', err));
+}
+function apRenderSettingsSection() {
+  const root = document.getElementById('appearance-settings-root');
+  if (!root) return;
+  root.innerHTML = `<div class="card">
+    <div class="card-title">Accent Color</div>
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.85rem;">Applies everywhere in BBT, for everyone on this business's team.</div>
+    <div style="display:flex; flex-wrap:wrap; gap:10px;">
+      ${Object.entries(ACCENT_PRESETS).map(([key, preset]) => {
+        const selected = apAccentPreset === key;
+        return `<button class="icon-btn" style="width:auto; flex-direction:column; gap:6px; padding:10px 14px; border:1.5px solid ${selected ? preset.light.accent : 'var(--border-strong)'}; border-radius:var(--radius-sm);" onclick="apSetAccentPreset('${key}')">
+          <span style="display:block; width:26px; height:26px; border-radius:50%; background:${preset.light.accent};"></span>
+          <span style="font-size:11px; font-weight:600; color:var(--text); display:flex; align-items:center; gap:4px;">${psEscape(preset.label)}${selected ? ' <i class="fa-solid fa-check"></i>' : ''}</span>
+        </button>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
 
 // Builds the Settings home grid (one tile per group) and slots each registered section's
 // container into its group's panel — must run before any section's own render call (first line
@@ -2885,6 +3005,34 @@ function psEscape(str) {
   const div = document.createElement('div');
   div.textContent = str || '';
   return div.innerHTML;
+}
+
+// ═══════════════════════════════════════ SEARCH TAGS (shared, cross-screen) ═══════════════════════════════════════
+//
+// A lightweight, optional `tags: string[]` field any record shape can carry — extra keywords a
+// human might search by that aren't already covered by the record's normal fields (e.g. a Printed
+// Latex balloon tagged "linking" so it still surfaces on that search even though its primary
+// category is Printed). Never a separate search engine: every screen's own filter function folds
+// this in as one more predicate alongside its existing field list.
+function psMatchesTags(item, q) {
+  return (item.tags || []).some(t => t.toLowerCase().includes(q));
+}
+// Comma-separated free-text entry, mirroring the pipe-separated `aliases` convention already used
+// for Master Catalog — trimmed, empties dropped, so "linking, link,  " -> ['linking','link'].
+function psParseTagsInput(raw) {
+  return (raw || '').split(',').map(t => t.trim()).filter(Boolean);
+}
+function psTagsInputValue(tags) {
+  return (tags || []).join(', ');
+}
+// One shared, deliberately tiny Add/Edit form field — reused verbatim by every screen so the
+// feature never grows a screen-specific variant. `onChangeAttr` is the literal onchange handler
+// body (already knows which draft/item + field to write to).
+function psTagsFieldHtml(value, onChangeAttr) {
+  return `<div class="settings-field">
+    <label>Search Tags (optional)</label>
+    <input type="text" value="${invAttr(psTagsInputValue(value))}" placeholder="e.g. linking, link, stars" onchange="${onChangeAttr}">
+  </div>`;
 }
 
 // Sizes always listed big to small, matching how you read a pull list.
@@ -7570,7 +7718,7 @@ function invSaveItem(item) {
 function invUpdateItemField(itemId, field, value) {
   const item = invFindItem(itemId);
   if (!item) return;
-  item[field] = typeof value === 'string' ? value.trim() : value;
+  item[field] = field === 'tags' ? psParseTagsInput(value) : (typeof value === 'string' ? value.trim() : value);
   invSaveItem(item);
 }
 // Lightweight, self-growing suggestions — no separate location-management screen, just whatever's
@@ -7817,7 +7965,7 @@ function invFilteredSortedItems() {
   let items = invSortedItems().filter(i => (i.tier || 'main') === invTierTab);
   if (invUseUpOnly) items = items.filter(i => i.useUp);
   if (!q) return items;
-  return items.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q));
+  return items.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q) || psMatchesTags(i, q));
 }
 // Buckets the given (already tier-filtered) items into groups per invGroupBy — brands
 // alphabetically with blank brand last; size mode is a single list ranked by order urgency for
@@ -8295,7 +8443,7 @@ function invRenderBatchSearchResults() {
   if (!container || !invBatch) return;
   const q = invBatch.search.trim().toLowerCase();
   if (!q) { container.innerHTML = ''; return; }
-  const matches = INVENTORY_ITEMS.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q)).slice(0, 8);
+  const matches = INVENTORY_ITEMS.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q) || psMatchesTags(i, q)).slice(0, 8);
   if (matches.length === 0) { container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary); padding:0.4rem 0;">No matches.</div>`; return; }
   container.innerHTML = matches.map(item => `
     <div style="padding:0.4rem 0; border-bottom:0.5px solid var(--border);">
@@ -8465,7 +8613,7 @@ function invRenderAdjustResults() {
   if (!container || !invAdjust) return;
   const q = invAdjust.search.trim().toLowerCase();
   if (!q) { container.innerHTML = ''; return; }
-  const matches = INVENTORY_ITEMS.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q)).slice(0, 8);
+  const matches = INVENTORY_ITEMS.filter(i => i.color.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q) || psMatchesTags(i, q)).slice(0, 8);
   container.innerHTML = matches.length ? matches.map(item => `
     <div style="padding:0.4rem 0; border-bottom:0.5px solid var(--border);">
       <div style="font-size:13px; font-weight:600;">${psEscape(item.color)} <span style="font-weight:400; color:var(--text-secondary);">${psEscape(item.brand || '')}</span></div>
@@ -10139,7 +10287,8 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
           <input type="text" list="inv-location-suggestions" value="${invAttr(item.storageLocation)}" placeholder="e.g. Backstock Shelf" onchange="invUpdateItemField('${item.id}','storageLocation',this.value)">
           <datalist id="inv-location-suggestions">${invLocationSuggestions().map(l => `<option value="${invAttr(l)}">`).join('')}</datalist>
         </div>
-      </div>`;
+      </div>
+      ${psTagsFieldHtml(item.tags, `invUpdateItemField('${item.id}','tags',this.value)`)}`;
     } else if (item.notes || item.storageLocation) {
       html += `<div style="margin-top:0.75rem; font-size:12px; color:var(--text-secondary);">
         ${item.notes ? `<div style="margin-bottom:4px;">${psEscape(item.notes)}</div>` : ''}
@@ -10397,13 +10546,19 @@ function spToggleExpand(id) { spExpandedItem = spExpandedItem === id ? null : id
 
 function spFilteredItems() {
   const q = spSearchQuery.trim().toLowerCase();
+  let items = SPECIALTY_ITEMS.filter(i => (i.kind || 'twisting') === spKindTab);
+  // Tiles mode, drilled into one group — scope to just that group's items, same as Foil Decorator
+  // Shapes' own family-scoped search ("search only ever operates within one family's items").
+  if (pgGroupViewMode === 'tiles') {
+    const sel = pgDrilldownGroup['sp:' + spKindTab];
+    if (sel !== undefined) items = items.filter(i => (i.printGroupId || null) === sel);
+  }
   // Every kind is grouped now (see spGroupedItems) — this is the pre-sort within the flat filtered
   // list, using each kind's own comparator (spItemSortComparator) as the secondary sort inside
   // whatever group a search/grouping pass buckets an item into.
-  const items = SPECIALTY_ITEMS.filter(i => (i.kind || 'twisting') === spKindTab)
-    .sort(spItemSortComparator(spKindTab));
+  items = items.sort(spItemSortComparator(spKindTab));
   if (!q) return items;
-  return items.filter(i => [i.brand, i.color, i.sizeType, i.pattern, i.shape, i.descriptor].some(f => (f || '').toLowerCase().includes(q)));
+  return items.filter(i => [i.brand, i.color, i.sizeType, i.pattern, i.shape, i.descriptor].some(f => (f || '').toLowerCase().includes(q)) || psMatchesTags(i, q));
 }
 
 function spOpenAdd() {
@@ -10495,7 +10650,8 @@ function spSubmitAdd() {
 function spUpdateField(itemId, field, value) {
   const item = spFindItem(itemId);
   if (!item) return;
-  item[field] = (field === 'backstock' || field === 'perBag' || field === 'costPerBag') ? (parseFloat(value) || 0) : value;
+  item[field] = (field === 'backstock' || field === 'perBag' || field === 'costPerBag') ? (parseFloat(value) || 0)
+    : field === 'tags' ? psParseTagsInput(value) : value;
   spSaveItem(item);
 }
 // Per-entry Bags | Individual Balloons choice for an existing item's Backstock field — a plain
@@ -10754,6 +10910,65 @@ function pgAddGroup(kind, name, quantityMode, itemShape) {
 // function again. Specialty Latex's four kinds (printed/twisting/linking/shapes) all share one
 // config since they're one screen/one item array with `kind` as just a sub-filter within it.
 const PG_SPECIALTY_CONFIG = { items: () => SPECIALTY_ITEMS, manageRootId: 'sp-manage-root', listRootId: 'pg-list', rerender: () => spRenderResults() };
+// ═══════════════════════════════════════ GROUP BROWSING: TILE / LIST VIEW ═══════════════════════════════════════
+//
+// A view-mode toggle for the screens that show items organized into Groups — Specialty Latex,
+// Add-Ons/Framework, Assets, Supplies. Foil Decorator Shapes already built its own tile-grid ->
+// pick a family -> just its items -> back flow earlier this session; this generalizes that exact
+// same shape so the other screens get it for free instead of each growing a bespoke drill-down.
+// Reuses each screen's own {key,label,items} grouping function (spGroupedItems/invxGroupedItems/
+// assetsGroupedItems/suppliesGroupedItems) as the tile source — no second grouping mechanism.
+//
+// List mode renders EXACTLY as every one of these screens always has (the full always-expanded
+// accordion) — Tiles is purely additive and List stays the default, so nothing about existing
+// workflows changes unless a person opts in. The preference is remembered per-device via
+// localStorage, same rationale as homeLoadOrder's own comment: a personal browsing preference,
+// not shared business configuration, and one setting for every screen rather than one per kind.
+let pgGroupViewMode = localStorage.getItem('bbt_group_view_mode_v1') === 'tiles' ? 'tiles' : 'list';
+function pgSetGroupViewMode(mode, rerenderFn) {
+  pgGroupViewMode = mode === 'tiles' ? 'tiles' : 'list';
+  localStorage.setItem('bbt_group_view_mode_v1', pgGroupViewMode);
+  rerenderFn();
+}
+// Which group is drilled into, per independently-browsable context (e.g. 'sp:twisting',
+// 'invx:addOns', 'assets', 'supplies') — undefined = tile grid, null = Uncategorized, else a real
+// group id. Same sentinel convention foilDecoratorSelectedFamily already established.
+let pgDrilldownGroup = {};
+function pgSelectDrilldownGroup(ctxKey, groupId, rerenderFn) {
+  pgDrilldownGroup[ctxKey] = groupId;
+  rerenderFn();
+}
+function pgBackToGroupTiles(ctxKey, rerenderFn) {
+  delete pgDrilldownGroup[ctxKey];
+  rerenderFn();
+}
+// `rerenderFnToken` is the literal (unquoted) name of the screen's own render function — inserted
+// directly into the onclick attribute so it resolves to the real function reference at click time,
+// the same as any other plain onclick handler in this file.
+function pgGroupViewToggleHtml(rerenderFnToken) {
+  return `<div class="trip-toggle" style="max-width:180px; margin:0 0 0.6rem;">
+    <button class="trip-btn ${pgGroupViewMode === 'list' ? 'active' : ''}" onclick="pgSetGroupViewMode('list', ${rerenderFnToken})"><i class="fa-solid fa-list"></i> List</button>
+    <button class="trip-btn ${pgGroupViewMode === 'tiles' ? 'active' : ''}" onclick="pgSetGroupViewMode('tiles', ${rerenderFnToken})"><i class="fa-solid fa-table-cells"></i> Tiles</button>
+  </div>`;
+}
+// `groups` = the screen's own already-computed {key,label,items}[]; `prefix` = that same
+// function's key prefix (e.g. 'sp-group:'), used only to recover the raw printGroupId/
+// "(uncategorized)" string a tile needs to select itself — group ids are always plain
+// alphanumeric Firestore ids, so no quote-escaping is needed embedding one directly.
+function pgGroupTileGridHtml(groups, prefix, ctxKey, rerenderFnToken) {
+  return `<div class="tool-grid">` + groups.map(g => {
+    const raw = g.key.slice(prefix.length);
+    const groupIdJs = raw === '(uncategorized)' ? 'null' : `'${raw}'`;
+    return `<div class="tool-tile" onclick="pgSelectDrilldownGroup('${ctxKey}', ${groupIdJs}, ${rerenderFnToken})">
+      <div class="tool-tile-icon"><i class="fa-solid fa-layer-group"></i></div>
+      <div class="tool-tile-title">${psEscape(g.label)} (${g.items.length})</div>
+    </div>`;
+  }).join('') + `</div>`;
+}
+function pgGroupBackLinkHtml(ctxKey, rerenderFnToken) {
+  return `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); margin-bottom:0.6rem;" onclick="pgBackToGroupTiles('${ctxKey}', ${rerenderFnToken})"><i class="fa-solid fa-arrow-left"></i> Groups</button>`;
+}
+
 function pgKindConfig(kind) {
   if (kind === 'foilDecoratorShapes') {
     return { items: () => FOIL_ITEMS, manageRootId: 'foil-manage-root', listRootId: 'foil-group-list', rerender: () => { if (typeof foilRenderScreen === 'function') foilRenderScreen(); } };
@@ -11145,6 +11360,7 @@ function spItemCardHtml(item) {
     html += `<div class="row">
       <div class="settings-field" style="margin-bottom:0"><label>Cost/bag</label><input type="number" step="0.01" min="0" value="${item.costPerBag}" onchange="spUpdateField('${item.id}','costPerBag',this.value)"></div>
     </div>`;
+    html += psTagsFieldHtml(item.tags, `spUpdateField('${item.id}','tags',this.value)`);
     html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="spOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="spDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
@@ -11159,13 +11375,30 @@ function spItemCardHtml(item) {
 function spRenderResults() {
   const root = document.getElementById('sp-results-root');
   if (!root) return;
+  psRenderBreadcrumb('inventory-specialty');
+  const ctxKey = 'sp:' + spKindTab;
+  const searching = spSearchQuery.trim() !== '';
+  const drilled = pgGroupViewMode === 'tiles' && pgDrilldownGroup[ctxKey] !== undefined;
   const items = spFilteredItems();
-  if (items.length === 0) {
-    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${psEscape(spKindLabel(spKindTab).toLowerCase())} yet.</div>`;
+  // Tile grid only when: Tiles mode, nothing drilled into yet, and no active search — a search
+  // wants to show matching items directly, not which groups contain them.
+  if (pgGroupViewMode === 'tiles' && !drilled && !searching) {
+    const groups = spGroupedItems(items, spKindTab);
+    root.innerHTML = groups.length === 0
+      ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${psEscape(spKindLabel(spKindTab).toLowerCase())} yet.</div>`
+      : pgGroupTileGridHtml(groups, 'sp-group:', ctxKey, 'spRenderResults');
     return;
   }
-  // Every kind groups by its own Groups now, reusing the same collapsible-section look as
-  // Standard Latex's own grouped views (.inv-group-header).
+  if (items.length === 0) {
+    root.innerHTML = (drilled ? pgGroupBackLinkHtml(ctxKey, 'spRenderResults') : '') + `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${psEscape(spKindLabel(spKindTab).toLowerCase())} yet.</div>`;
+    return;
+  }
+  if (drilled) {
+    root.innerHTML = pgGroupBackLinkHtml(ctxKey, 'spRenderResults') + `<div class="inv-color-list">` + items.map(spItemCardHtml).join('') + `</div>`;
+    return;
+  }
+  // List mode (or Tiles-mode-but-searching-with-nothing-drilled-into) — unchanged, full accordion,
+  // reusing the same collapsible-section look as Standard Latex's own grouped views.
   const groups = spGroupedItems(items, spKindTab);
   root.innerHTML = groups.map(g => {
     const collapsed = invCollapsedGroups.has(g.key);
@@ -11191,6 +11424,7 @@ function spRenderScreen() {
   </div>`;
   html += `<div id="sp-manage-root" style="margin-bottom:0.75rem;"></div>`;
   if (spAddOpen) html += spAddFormHtml();
+  html += pgGroupViewToggleHtml('spRenderScreen');
   html += `<div id="sp-results-root"></div>`;
   root.innerHTML = html;
   pgRenderManage(spKindTab);
@@ -11516,7 +11750,7 @@ function foilFilteredGroups() {
   const q = foilSearchQuery.trim().toLowerCase();
   const items = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === foilCharTypeTab);
   if (!q) return items;
-  return items.filter(i => [i.size, i.color, i.brand].some(f => (f || '').toLowerCase().includes(q)));
+  return items.filter(i => [i.size, i.color, i.brand].some(f => (f || '').toLowerCase().includes(q)) || psMatchesTags(i, q));
 }
 // Groups a flat, already-filtered Letters/Numbers item list into Brand -> Size -> Color, with a
 // natural size sort and (thanks to foilFindDuplicateGroup's own dedup) exactly one item per Color
@@ -11612,7 +11846,8 @@ function foilSubmitAdd() {
 function foilUpdateField(itemId, field, value) {
   const item = foilFindItem(itemId);
   if (!item) return;
-  item[field] = field === 'costPerFoil' ? (value === '' ? null : (parseFloat(value) || 0)) : value;
+  item[field] = field === 'costPerFoil' ? (value === '' ? null : (parseFloat(value) || 0))
+    : field === 'tags' ? psParseTagsInput(value) : value;
   foilSaveItem(item);
 }
 function foilUpdateQuantity(itemId, character, value) {
@@ -11809,6 +12044,7 @@ function foilItemCardHtml(item) {
     <div class="settings-field" style="margin-bottom:0"><label>Cost per foil</label><input type="number" step="0.01" min="0" value="${item.costPerFoil == null ? '' : item.costPerFoil}" placeholder="optional" onchange="foilUpdateField('${item.id}','costPerFoil',this.value)"></div>
     <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdateField('${item.id}','storageLocation',this.value)"></div>
   </div>`;
+  html += psTagsFieldHtml(item.tags, `foilUpdateField('${item.id}','tags',this.value)`);
   html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
     <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
     <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
@@ -11877,7 +12113,7 @@ function foilPhraseFilteredItems() {
   const q = foilSearchQuery.trim().toLowerCase();
   const items = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === 'phrases');
   if (!q) return items;
-  return items.filter(i => [i.phraseText, i.size, i.color, i.brand, i.styleNotes].some(f => (f || '').toLowerCase().includes(q)));
+  return items.filter(i => [i.phraseText, i.size, i.color, i.brand, i.styleNotes].some(f => (f || '').toLowerCase().includes(q)) || psMatchesTags(i, q));
 }
 // Groups by the exact (trimmed) phrase text — deliberately not case-folded, same conservative
 // "never silently merge what was typed differently" choice made for Brand in the Letters/Numbers
@@ -11960,7 +12196,7 @@ function foilSubmitPhraseAdd() {
 function foilUpdatePhraseField(itemId, field, value) {
   const item = foilFindItem(itemId);
   if (!item) return;
-  item[field] = field === 'quantity' ? (parseInt(value, 10) || 0) : value;
+  item[field] = field === 'quantity' ? (parseInt(value, 10) || 0) : field === 'tags' ? psParseTagsInput(value) : value;
   foilSaveItem(item);
   foilRenderPhraseGroups();
 }
@@ -12078,6 +12314,7 @@ function foilPhraseVariantCardHtml(item) {
       <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdatePhraseField('${item.id}','storageLocation',this.value)"></div>
     </div>`;
     html += `<div class="settings-field"><label>Style/Notes</label><input type="text" value="${invAttr(item.styleNotes)}" placeholder="e.g. Joined letters" onchange="foilUpdatePhraseField('${item.id}','styleNotes',this.value)"></div>`;
+    html += psTagsFieldHtml(item.tags, `foilUpdatePhraseField('${item.id}','tags',this.value)`);
     html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenPhraseEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
@@ -12395,7 +12632,7 @@ function foilDecoratorFilteredItems() {
   const q = foilDecoratorSearchQuery.trim().toLowerCase();
   const items = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && i.printGroupId === foilDecoratorSelectedFamily);
   if (!q) return items;
-  return items.filter(i => [i.brand, i.color, i.size, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)));
+  return items.filter(i => [i.brand, i.color, i.size, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)) || psMatchesTags(i, q));
 }
 // Groups a family's own items by Size (the second level of the Family -> Size -> records
 // hierarchy), naturally sorted so 5"/16"/34"/40" order correctly rather than lexicographically. An
@@ -12492,6 +12729,7 @@ function foilUpdateDecoratorField(itemId, field, value) {
   if (!item) return;
   if (field === 'quantity' || field === 'packagesFull') item[field] = parseInt(value, 10) || 0;
   else if (field === 'hasPartialPackage') item[field] = !!value;
+  else if (field === 'tags') item[field] = psParseTagsInput(value);
   else item[field] = value;
   foilSaveItem(item);
   foilRenderDecoratorFamilyItems();
@@ -12693,6 +12931,7 @@ function foilDecoratorItemCardHtml(item) {
       <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdateDecoratorField('${item.id}','storageLocation',this.value)"></div>
       <div class="settings-field" style="margin-bottom:0"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="foilUpdateDecoratorField('${item.id}','notes',this.value)"></div>
     </div>`;
+    html += psTagsFieldHtml(item.tags, `foilUpdateDecoratorField('${item.id}','tags',this.value)`);
     html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenDecoratorEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
@@ -12793,6 +13032,7 @@ function foilRenderDecoratorShapes() {
 function foilRenderScreen() {
   const root = document.getElementById('inv-foil-root');
   if (!root) return;
+  psRenderBreadcrumb('inventory-foil');
   let html = `<div class="card">
     <div class="trip-toggle" style="margin:0;">
       ${FOIL_CATEGORIES.map(c => `<button class="trip-btn ${foilCategoryTab === c.id ? 'active' : ''}" style="${c.soon ? 'opacity:0.5;' : ''}" onclick="foilSetCategoryTab('${c.id}')">${psEscape(c.label)}${c.soon ? ' (soon)' : ''}</button>`).join('')}
@@ -12963,9 +13203,13 @@ function invxToggleExpand(id) { invxExpandedItem = invxExpandedItem === id ? nul
 
 function invxFilteredItems() {
   const q = invxSearchQuery.trim().toLowerCase();
-  const items = INVX_ITEMS.filter(i => i.category === invxCategoryTab);
+  let items = INVX_ITEMS.filter(i => i.category === invxCategoryTab);
+  if (pgGroupViewMode === 'tiles') {
+    const sel = pgDrilldownGroup['invx:' + invxCategoryTab];
+    if (sel !== undefined) items = items.filter(i => (i.printGroupId || null) === sel);
+  }
   if (!q) return items;
-  return items.filter(i => [i.name, i.brand, i.color, i.size, i.theme, i.storageLocation, i.notes, i.diameter, i.length, i.overallHeight, i.width, i.approxRemaining].some(f => (f || '').toString().toLowerCase().includes(q)));
+  return items.filter(i => [i.name, i.brand, i.color, i.size, i.theme, i.storageLocation, i.notes, i.diameter, i.length, i.overallHeight, i.width, i.approxRemaining].some(f => (f || '').toString().toLowerCase().includes(q)) || psMatchesTags(i, q));
 }
 // Identity depends on the item's effective shape (see invxItemShapeFor) — a rawStock item's real
 // identity is its diameter+length, a fabricated structure's is its name+height, Vinyl's is its
@@ -13130,6 +13374,7 @@ function invxUpdateField(itemId, field, value) {
   if (field === 'quantity') item[field] = parseInt(value, 10) || 0;
   else if (field === 'costPerUnit') item[field] = value === '' ? null : (parseFloat(value) || 0);
   else if (field === 'consumableBehavior') item[field] = value === 'recoverable' ? 'recoverable' : 'consumable';
+  else if (field === 'tags') item[field] = psParseTagsInput(value);
   else item[field] = value;
   invxSaveItem(item);
   invxRenderResults();
@@ -13427,6 +13672,7 @@ function invxItemCardHtml(item) {
         <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${item.quantity || 0}" onchange="invxUpdateField('${item.id}','quantity',this.value)"></div>
         <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
       </div>`;
+      html += psTagsFieldHtml(item.tags, `invxUpdateField('${item.id}','tags',this.value)`);
     } else if (shape === 'fabricated') {
       html += `<div class="settings-field">
         <label>Behavior</label>
@@ -13440,11 +13686,13 @@ function invxItemCardHtml(item) {
         <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
       </div>
       <div class="settings-field"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="invxUpdateField('${item.id}','notes',this.value)"></div>`;
+      html += psTagsFieldHtml(item.tags, `invxUpdateField('${item.id}','tags',this.value)`);
     } else if (shape === 'vinyl') {
       html += `<div class="row">
         <div class="settings-field" style="margin-bottom:0"><label>Amount remaining</label><input type="text" value="${invAttr(item.approxRemaining)}" placeholder="approximate" onchange="invxUpdateField('${item.id}','approxRemaining',this.value)"></div>
         <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
       </div>`;
+      html += psTagsFieldHtml(item.tags, `invxUpdateField('${item.id}','tags',this.value)`);
     } else {
       html += `<div class="settings-field">
         <label>Behavior</label>
@@ -13465,6 +13713,7 @@ function invxItemCardHtml(item) {
         <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="invxUpdateField('${item.id}','storageLocation',this.value)"></div>
         <div class="settings-field" style="margin-bottom:0"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="invxUpdateField('${item.id}','notes',this.value)"></div>
       </div>`;
+      html += psTagsFieldHtml(item.tags, `invxUpdateField('${item.id}','tags',this.value)`);
     }
     html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invxOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
@@ -13476,37 +13725,55 @@ function invxItemCardHtml(item) {
   html += `</div>`;
   return html;
 }
+// Renders one group's items, theme sub-grouping and all — shared by both the List-mode accordion
+// (called only when that group isn't collapsed) and the Tiles-mode drilled-in view (called
+// unconditionally, since there's only one group's worth of items to show once you've picked a tile).
+function invxGroupBodyHtml(g) {
+  if (g.themes) {
+    return g.themes.map(t => {
+      const tCollapsed = invCollapsedGroups.has(t.key);
+      return `<div class="inv-group-header" style="padding-left:1rem; opacity:0.85;" onclick="invxToggleGroup('${psJsKeyAttr(t.key)}')">
+        <span>${psEscape(t.theme === '(Ungrouped)' ? 'Ungrouped' : t.theme)} (${t.items.length})</span>
+        <i class="fa-solid fa-chevron-${tCollapsed ? 'down' : 'up'}"></i>
+      </div>
+      ${tCollapsed ? '' : `<div class="inv-color-list" style="margin-left:1rem;">` + t.items.map(invxItemCardHtml).join('') + `</div>`}`;
+    }).join('');
+  }
+  return `<div class="inv-color-list">` + g.items.map(invxItemCardHtml).join('') + `</div>`;
+}
 function invxRenderResults() {
   const root = document.getElementById('invx-results-root');
   if (!root) return;
+  psRenderBreadcrumb('inventory-extras');
+  const ctxKey = 'invx:' + invxCategoryTab;
+  const searching = invxSearchQuery.trim() !== '';
+  const drilled = pgGroupViewMode === 'tiles' && pgDrilldownGroup[ctxKey] !== undefined;
   const items = invxFilteredItems();
+  if (pgGroupViewMode === 'tiles' && !drilled && !searching) {
+    const groups = invxGroupedItems(items);
+    root.innerHTML = groups.length === 0
+      ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No items yet.</div>`
+      : pgGroupTileGridHtml(groups, 'invx-group:', ctxKey, 'invxRenderResults');
+    return;
+  }
   if (items.length === 0) {
-    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No items yet.</div>`;
+    root.innerHTML = (drilled ? pgGroupBackLinkHtml(ctxKey, 'invxRenderResults') : '') + `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No items yet.</div>`;
     return;
   }
   const groups = invxGroupedItems(items);
+  if (drilled) {
+    // items is already scoped to one group by invxFilteredItems, so groups has exactly one entry.
+    root.innerHTML = pgGroupBackLinkHtml(ctxKey, 'invxRenderResults') + groups.map(invxGroupBodyHtml).join('');
+    return;
+  }
+  // List mode (or Tiles-mode-but-searching-with-nothing-drilled-into) — unchanged, full accordion.
   root.innerHTML = groups.map(g => {
     const collapsed = invCollapsedGroups.has(g.key);
-    let inner = '';
-    if (!collapsed) {
-      if (g.themes) {
-        inner = g.themes.map(t => {
-          const tCollapsed = invCollapsedGroups.has(t.key);
-          return `<div class="inv-group-header" style="padding-left:1rem; opacity:0.85;" onclick="invxToggleGroup('${psJsKeyAttr(t.key)}')">
-            <span>${psEscape(t.theme === '(Ungrouped)' ? 'Ungrouped' : t.theme)} (${t.items.length})</span>
-            <i class="fa-solid fa-chevron-${tCollapsed ? 'down' : 'up'}"></i>
-          </div>
-          ${tCollapsed ? '' : `<div class="inv-color-list" style="margin-left:1rem;">` + t.items.map(invxItemCardHtml).join('') + `</div>`}`;
-        }).join('');
-      } else {
-        inner = `<div class="inv-color-list">` + g.items.map(invxItemCardHtml).join('') + `</div>`;
-      }
-    }
     return `<div class="inv-group-header" onclick="invxToggleGroup('${g.key}')">
       <span>${psEscape(g.label)} (${g.items.length})</span>
       <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
     </div>
-    ${inner}`;
+    ${collapsed ? '' : invxGroupBodyHtml(g)}`;
   }).join('');
 }
 function invxRenderScreen() {
@@ -13521,6 +13788,7 @@ function invxRenderScreen() {
   </div>`;
   html += `<div id="invx-manage-root" style="margin-bottom:0.75rem;"></div>`;
   if (invxAddOpen) html += invxAddFormHtml();
+  html += pgGroupViewToggleHtml('invxRenderScreen');
   html += `<div id="invx-results-root"></div>`;
 
   const trashed = INVX_ITEMS_TRASHED.filter(i => i.category === invxCategoryTab);
@@ -13600,8 +13868,13 @@ function assetsSetSearch(q) { assetsSearchQuery = q; assetsRenderResults(); }
 function assetsToggleExpand(id) { assetsExpandedItem = assetsExpandedItem === id ? null : id; assetsRenderResults(); }
 function assetsFilteredItems() {
   const q = assetsSearchQuery.trim().toLowerCase();
-  if (!q) return ASSET_ITEMS;
-  return ASSET_ITEMS.filter(i => [i.name, i.shape, i.size, i.color, i.material, i.setInfo, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)));
+  let items = ASSET_ITEMS;
+  if (pgGroupViewMode === 'tiles') {
+    const sel = pgDrilldownGroup.assets;
+    if (sel !== undefined) items = items.filter(i => (i.printGroupId || null) === sel);
+  }
+  if (!q) return items;
+  return items.filter(i => [i.name, i.shape, i.size, i.color, i.material, i.setInfo, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)) || psMatchesTags(i, q));
 }
 // Mirrors invxGroupedItems's {key,label,items} shape (Uncategorized pinned last, sections ordered
 // by each group's manual order) against ASSET_ITEMS instead. No theme sub-grouping here — nothing
@@ -13701,7 +13974,7 @@ function assetsSubmitAdd() {
 function assetsUpdateField(itemId, field, value) {
   const item = assetsFindItem(itemId);
   if (!item) return;
-  item[field] = field === 'quantity' ? (parseInt(value, 10) || 0) : value;
+  item[field] = field === 'quantity' ? (parseInt(value, 10) || 0) : field === 'tags' ? psParseTagsInput(value) : value;
   assetsSaveItem(item);
   assetsRenderResults();
 }
@@ -13875,6 +14148,7 @@ function assetsItemCardHtml(item) {
       <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" onchange="assetsUpdateField('${item.id}','storageLocation',this.value)"></div>
     </div>`;
     html += `<div class="settings-field"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="assetsUpdateField('${item.id}','notes',this.value)"></div>`;
+    html += psTagsFieldHtml(item.tags, `assetsUpdateField('${item.id}','tags',this.value)`);
     html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="assetsOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="assetsDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
@@ -13888,12 +14162,27 @@ function assetsItemCardHtml(item) {
 function assetsRenderResults() {
   const root = document.getElementById('assets-results-root');
   if (!root) return;
+  psRenderBreadcrumb('assets');
+  const ctxKey = 'assets';
+  const searching = assetsSearchQuery.trim() !== '';
+  const drilled = pgGroupViewMode === 'tiles' && pgDrilldownGroup[ctxKey] !== undefined;
   const items = assetsFilteredItems();
+  if (pgGroupViewMode === 'tiles' && !drilled && !searching) {
+    const groups = assetsGroupedItems(items);
+    root.innerHTML = groups.length === 0
+      ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No Assets yet.</div>`
+      : pgGroupTileGridHtml(groups, 'assets-group:', ctxKey, 'assetsRenderResults');
+    return;
+  }
   if (items.length === 0) {
-    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No Assets yet.</div>`;
+    root.innerHTML = (drilled ? pgGroupBackLinkHtml(ctxKey, 'assetsRenderResults') : '') + `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No Assets yet.</div>`;
     return;
   }
   const groups = assetsGroupedItems(items);
+  if (drilled) {
+    root.innerHTML = pgGroupBackLinkHtml(ctxKey, 'assetsRenderResults') + groups.map(g => `<div class="inv-color-list">` + g.items.map(assetsItemCardHtml).join('') + `</div>`).join('');
+    return;
+  }
   root.innerHTML = groups.map(g => {
     const collapsed = invCollapsedGroups.has(g.key);
     return `<div class="inv-group-header" onclick="assetsToggleGroup('${g.key}')">
@@ -13915,6 +14204,7 @@ function assetsRenderScreen() {
   </div>`;
   html += `<div id="assets-manage-root" style="margin-bottom:0.75rem;"></div>`;
   if (assetsAddOpen) html += assetsAddFormHtml();
+  html += pgGroupViewToggleHtml('assetsRenderScreen');
   html += `<div id="assets-results-root"></div>`;
 
   const trashed = ASSET_ITEMS_TRASHED;
@@ -13994,8 +14284,12 @@ function suppliesFilteredItems() {
   const q = suppliesSearchQuery.trim().toLowerCase();
   let items = SUPPLY_ITEMS;
   if (suppliesShowOnlyNeeded) items = items.filter(i => i.needsOrdering);
+  if (pgGroupViewMode === 'tiles') {
+    const sel = pgDrilldownGroup.supplies;
+    if (sel !== undefined) items = items.filter(i => (i.printGroupId || null) === sel);
+  }
   if (!q) return items;
-  return items.filter(i => [i.name, i.notes, i.storageLocation].some(f => (f || '').toLowerCase().includes(q)));
+  return items.filter(i => [i.name, i.notes, i.storageLocation].some(f => (f || '').toLowerCase().includes(q)) || psMatchesTags(i, q));
 }
 // Mirrors invxGroupedItems's {key,label,items} shape against SUPPLY_ITEMS instead.
 function suppliesGroupedItems(items) {
@@ -14083,7 +14377,7 @@ function suppliesSubmitAdd() {
 function suppliesUpdateField(itemId, field, value) {
   const item = suppliesFindItem(itemId);
   if (!item) return;
-  item[field] = value;
+  item[field] = field === 'tags' ? psParseTagsInput(value) : value;
   suppliesSaveItem(item);
   suppliesRenderResults();
 }
@@ -14200,6 +14494,7 @@ function suppliesItemCardHtml(item) {
       <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="suppliesUpdateField('${item.id}','storageLocation',this.value)"></div>
       <div class="settings-field" style="margin-bottom:0"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="suppliesUpdateField('${item.id}','notes',this.value)"></div>
     </div>`;
+    html += psTagsFieldHtml(item.tags, `suppliesUpdateField('${item.id}','tags',this.value)`);
     html += `<div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
       <div>
         ${item.needsOrdering
@@ -14216,12 +14511,27 @@ function suppliesItemCardHtml(item) {
 function suppliesRenderResults() {
   const root = document.getElementById('supplies-results-root');
   if (!root) return;
+  psRenderBreadcrumb('supplies');
+  const ctxKey = 'supplies';
+  const searching = suppliesSearchQuery.trim() !== '';
+  const drilled = pgGroupViewMode === 'tiles' && pgDrilldownGroup[ctxKey] !== undefined;
   const items = suppliesFilteredItems();
+  if (pgGroupViewMode === 'tiles' && !drilled && !searching) {
+    const groups = suppliesGroupedItems(items);
+    root.innerHTML = groups.length === 0
+      ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">${suppliesShowOnlyNeeded ? 'Nothing currently flagged for ordering.' : 'No supplies in the catalog yet.'}</div>`
+      : pgGroupTileGridHtml(groups, 'supplies-group:', ctxKey, 'suppliesRenderResults');
+    return;
+  }
   if (items.length === 0) {
-    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">${suppliesShowOnlyNeeded ? 'Nothing currently flagged for ordering.' : 'No supplies in the catalog yet.'}</div>`;
+    root.innerHTML = (drilled ? pgGroupBackLinkHtml(ctxKey, 'suppliesRenderResults') : '') + `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">${suppliesShowOnlyNeeded ? 'Nothing currently flagged for ordering.' : 'No supplies in the catalog yet.'}</div>`;
     return;
   }
   const groups = suppliesGroupedItems(items);
+  if (drilled) {
+    root.innerHTML = pgGroupBackLinkHtml(ctxKey, 'suppliesRenderResults') + groups.map(g => `<div class="inv-color-list">` + g.items.map(suppliesItemCardHtml).join('') + `</div>`).join('');
+    return;
+  }
   root.innerHTML = groups.map(g => {
     const collapsed = invCollapsedGroups.has(g.key);
     return `<div class="inv-group-header" onclick="suppliesToggleGroup('${g.key}')">
@@ -14255,6 +14565,7 @@ function suppliesRenderScreen() {
   </div>`;
   html += `<div id="supplies-manage-root" style="margin-bottom:0.75rem;"></div>`;
   if (suppliesAddOpen) html += suppliesAddFormHtml();
+  html += pgGroupViewToggleHtml('suppliesRenderScreen');
   html += `<div id="supplies-results-root"></div>`;
 
   const trashed = SUPPLY_ITEMS_TRASHED;
@@ -16627,12 +16938,119 @@ function showView(v) {
   setTopBar(v);
 }
 
+// ═══════════════════════════════════════ BREADCRUMB NAVIGATION ═══════════════════════════════════════
+//
+// Scoped to the main tool screens (Settings keeps its own existing group/section header,
+// unrelated infrastructure, untouched by this). Two layers make up a breadcrumb trail:
+// 1. A static view-hierarchy (VIEW_PARENT) — the same parent relationships goBack() already
+//    hardcodes as an if/else chain, expressed here as plain data instead so a trail can be walked
+//    generically. Doesn't replace or touch goBack() itself — purely an additional, read-only view
+//    of the same hierarchy for display.
+// 2. Dynamic "extra" segments for views whose deeper levels are plain in-page JS state rather than
+//    a separate view-* id (Specialty Latex's kind tab, Foil's category/family, Add-Ons/Framework's
+//    category, and any screen's Tile-mode drilldown group) — reading that state directly, the same
+//    established pattern the Feedback tool's fbLightweightContext() already uses for this exact
+//    reason (those levels are real to the user but invisible to showView/goBack).
+const VIEW_PARENT = {
+  'inventory-latex-choice': 'inventory',
+  'inventory-latex': 'inventory-latex-choice',
+  'inventory-specialty': 'inventory-latex-choice',
+  'inventory-foil': 'inventory',
+  'inventory-extras': 'inventory',
+};
+function psBreadcrumbAncestors(view) {
+  const chain = [];
+  let v = view;
+  const seen = new Set([view]);
+  while (VIEW_PARENT[v] && !seen.has(VIEW_PARENT[v])) {
+    v = VIEW_PARENT[v];
+    seen.add(v);
+    chain.unshift(v);
+  }
+  return chain;
+}
+// Returns the FULL tail of the trail from "the view itself" onward — always at least one entry,
+// and the last entry is always the true current location (onClick: null). Each view branch owns
+// its own de-duplication: Add-Ons/Framework and Foil share one view whose displayed name changes
+// live with a sub-tab (see invxSetCategoryTab's own #topbar-title update), so their first tail
+// entry uses that live category label directly instead of also repeating it as a separate segment.
+function psBreadcrumbTail(view) {
+  const viewLabel = (TOOL_META[view] || {}).title || view;
+  if (view === 'inventory-specialty' && typeof spKindTab !== 'undefined') {
+    const ctxKey = 'sp:' + spKindTab;
+    const drilled = pgGroupViewMode === 'tiles' && pgDrilldownGroup[ctxKey] !== undefined;
+    const tail = [
+      { label: viewLabel, onClick: `showView('${view}')` },
+      { label: (SP_KINDS.find(k => k.id === spKindTab) || {}).label || spKindTab, onClick: drilled ? `pgBackToGroupTiles('${ctxKey}', spRenderResults)` : null },
+    ];
+    if (drilled) {
+      const g = pgFindGroup(pgDrilldownGroup[ctxKey]);
+      tail.push({ label: g ? g.name : 'Uncategorized', onClick: null });
+    }
+    return tail;
+  }
+  if (view === 'inventory-extras' && typeof invxCategoryTab !== 'undefined') {
+    const ctxKey = 'invx:' + invxCategoryTab;
+    const drilled = pgGroupViewMode === 'tiles' && pgDrilldownGroup[ctxKey] !== undefined;
+    const category = INVX_CATEGORIES.find(c => c.id === invxCategoryTab);
+    const tail = [{ label: category ? category.label : viewLabel, onClick: drilled ? `pgBackToGroupTiles('${ctxKey}', invxRenderResults)` : null }];
+    if (drilled) {
+      const g = pgFindGroup(pgDrilldownGroup[ctxKey]);
+      tail.push({ label: g ? g.name : 'Uncategorized', onClick: null });
+    }
+    return tail;
+  }
+  if (view === 'inventory-foil' && typeof foilCategoryTab !== 'undefined') {
+    const category = FOIL_CATEGORIES.find(c => c.id === foilCategoryTab);
+    const hasDeeper = (foilCategoryTab === 'lettersNumbers' && typeof foilCharTypeTab !== 'undefined')
+      || (foilCategoryTab === 'decoratorShapes' && typeof foilDecoratorSelectedFamily !== 'undefined' && foilDecoratorSelectedFamily !== undefined);
+    const tail = [{ label: category ? category.label : viewLabel, onClick: hasDeeper ? `foilSetCategoryTab('${foilCategoryTab}')` : null }];
+    if (foilCategoryTab === 'lettersNumbers' && typeof foilCharTypeTab !== 'undefined') {
+      tail.push({ label: foilCharTypeTab.charAt(0).toUpperCase() + foilCharTypeTab.slice(1), onClick: null });
+    } else if (foilCategoryTab === 'decoratorShapes' && typeof foilDecoratorSelectedFamily !== 'undefined' && foilDecoratorSelectedFamily !== undefined) {
+      const g = pgFindGroup(foilDecoratorSelectedFamily);
+      tail.push({ label: g ? g.name : 'Uncategorized', onClick: null });
+    }
+    return tail;
+  }
+  if (view === 'assets' && pgGroupViewMode === 'tiles' && pgDrilldownGroup.assets !== undefined) {
+    const g = pgFindGroup(pgDrilldownGroup.assets);
+    return [
+      { label: viewLabel, onClick: `pgBackToGroupTiles('assets', assetsRenderResults)` },
+      { label: g ? g.name : 'Uncategorized', onClick: null },
+    ];
+  }
+  if (view === 'supplies' && pgGroupViewMode === 'tiles' && pgDrilldownGroup.supplies !== undefined) {
+    const g = pgFindGroup(pgDrilldownGroup.supplies);
+    return [
+      { label: viewLabel, onClick: `pgBackToGroupTiles('supplies', suppliesRenderResults)` },
+      { label: g ? g.name : 'Uncategorized', onClick: null },
+    ];
+  }
+  return [{ label: viewLabel, onClick: null }];
+}
+function psRenderBreadcrumb(view) {
+  const el = document.getElementById('breadcrumb-row');
+  if (!el) return;
+  if (!view || view === 'home' || view === 'settings' || !TOOL_META[view]) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const ancestors = psBreadcrumbAncestors(view);
+  const segments = [{ label: 'Home', onClick: "showView('home')" }];
+  ancestors.forEach(v => segments.push({ label: (TOOL_META[v] || {}).title || v, onClick: `showView('${v}')` }));
+  segments.push(...psBreadcrumbTail(view));
+  el.style.display = 'flex';
+  el.innerHTML = segments.map((s, i) => {
+    const isLast = i === segments.length - 1;
+    return `<span class="breadcrumb-seg${isLast ? ' current' : ''}"${!isLast && s.onClick ? ` onclick="${s.onClick}"` : ''}>${psEscape(s.label)}</span>${!isLast ? '<i class="fa-solid fa-chevron-right breadcrumb-sep"></i>' : ''}`;
+  }).join('');
+}
+
 function setTopBar(v) {
   const meta = TOOL_META[v] || TOOL_META.home;
   document.getElementById('topbar-title').textContent = meta.title;
   document.getElementById('topbar-icon').className = meta.icon + ' topbar-icon';
   document.getElementById('topbar-back').style.display = meta.showBack ? 'flex' : 'none';
   document.getElementById('topbar-gear').style.display = meta.showGear ? 'flex' : 'none';
+  psRenderBreadcrumb(v);
 }
 
 function goBack() {
@@ -16770,6 +17188,7 @@ function bootApp() {
   try { mstStartListeners(); } catch (e) { console.error('BBT Master Catalog listeners failed to start:', e); }
   try { fbStartListeners(); } catch (e) { console.error('Feedback listeners failed to start:', e); }
   try { fbInboxInit(); } catch (e) { console.error('fbInboxInit failed:', e); }
+  try { apInit(); } catch (e) { console.error('Appearance init failed:', e); }
   try { invLoadAdminLock(); } catch (e) { console.error('Admin lock load failed:', e); }
   try { bsUpdateHomeBanner(); } catch (e) { console.error('bsUpdateHomeBanner failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
