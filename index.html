@@ -959,12 +959,6 @@
   window.fbLoadPrintGroups = () => window.fbLoadSettingsDoc('printGroups');
   window.fbSavePrintGroups = (data) => window.fbSaveSettingsDoc('printGroups', data);
 
-  // Foil Phrases' business-editable phrase-name list (the "character set" for that Letters &
-  // Numbers charType) — a small free-text list, unlike the fixed A-Z/0-9 sets, so it needs its own
-  // tiny persisted doc rather than a hardcoded constant.
-  window.fbLoadFoilPhrases = () => window.fbLoadSettingsDoc('foilPhrases');
-  window.fbSaveFoilPhrases = (data) => window.fbSaveSettingsDoc('foilPhrases', data);
-
   // Guided Setup's interview progress — where the conversation is, not the actual configuration
   // it produces (that's still RECIPES/customProductionTemplates, same as a hand-edit in Settings).
   // Losing this doc only costs interview progress, never real templates.
@@ -11098,24 +11092,23 @@ let foilDecoratorSearchQuery = '';
 let foilDecoratorExpandedItem = null;
 let foilDecoratorAddOpen = false;
 let foilDecoratorAddDraft = null;
-// Letters/Numbers have a fixed, universal character set (A-Z, 0-9) that never changes. Phrases is
-// a third charType whose "character set" is instead a small, business-editable, free-text list
-// (FOIL_PHRASES, its own tiny persisted doc) — e.g. "Happy Birthday", "Congrats" — since there's no
-// fixed universal alphabet of phrase wording. foilCharsFor() is the one place that resolves either
-// kind into an array; every reader (blank quantities, group totals, the item card's grid) goes
-// through it so adding, renaming, or removing a phrase name never requires touching existing items.
+// Letters/Numbers have a fixed, universal character set (A-Z, 0-9) that never changes and is
+// browsed as Brand -> Size -> Color -> Characters. Phrases is structurally different — a phrase
+// like "Happy Birthday" IS the group, holding a flat list of variants (Size/Color/Brand/Quantity/
+// Style/Storage), never a per-character quantities map — so it gets its own separate, simpler set
+// of functions below rather than being forced into the Letters/Numbers shape.
 const FOIL_CHARACTERS = { letters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''), numbers: '0123456789'.split('') };
-let FOIL_PHRASES = [];
 let foilCategoryTab = 'lettersNumbers';
+let foilLNMode = 'browse'; // 'browse' | 'checker' — Browse Inventory vs. the Phrase Checker tool
 let foilCharTypeTab = 'letters';
 let foilSearchQuery = '';
-let foilExpandedItem = null;
+let foilExpandedItem = null; // reused for the Phrases variant list's own row expand/collapse
 let foilAddOpen = false;
 let foilAddDraft = null;
 
-function foilCharsFor(charType) { return charType === 'phrases' ? FOIL_PHRASES : (FOIL_CHARACTERS[charType] || []); }
+function foilCharsFor(charType) { return FOIL_CHARACTERS[charType] || []; }
 function foilCharTypeLabel(charType) { return charType === 'letters' ? 'Letters' : charType === 'numbers' ? 'Numbers' : 'Phrases'; }
-function foilCharTypeNoun(charType) { return charType === 'letters' ? 'letter' : charType === 'numbers' ? 'number' : 'phrase'; }
+function foilCharTypeNoun(charType) { return charType === 'letters' ? 'letter' : 'number'; }
 
 function foilStartListeners() {
   foilRenderScreen(); // shell first, same pattern as invStartListeners/spStartListeners
@@ -11124,66 +11117,45 @@ function foilStartListeners() {
       const all = snapshot.docs.map(d => d.data());
       FOIL_ITEMS = all.filter(i => !i.deletedAt);
       FOIL_ITEMS_TRASHED = all.filter(i => i.deletedAt);
+      foilMigrateLegacyPhraseItems();
       foilRenderScreen();
     },
     (err) => console.error('Foil items sync error:', err)
   );
-  foilPhrasesInit();
 }
-function foilPhrasesInit() {
-  window.fbLoadFoilPhrases().then(snap => {
-    if (snap.exists()) {
-      FOIL_PHRASES = snap.data().names || [];
-      foilRenderScreen();
+// One-time, idempotent shape migration for Phrases records saved under the original (grouped,
+// per-phrase-name quantities map) model this replaces. Detected by having `quantities` but no
+// `phraseText`; an already-migrated record has `phraseText` and is skipped, so this safely no-ops
+// on every later load. Every nonzero quantity becomes its own flat variant record — the FIRST
+// surviving variant reuses the original record's id (pure in-place shape rewrite), any additional
+// ones get new ids. A legacy record with nothing but zeros held no real inventory to preserve, so
+// it's removed rather than kept as an empty placeholder — logged either way, never silent.
+function foilMigrateLegacyPhraseItems() {
+  const legacy = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === 'phrases' && i.quantities && !i.phraseText);
+  if (legacy.length === 0) return;
+  legacy.forEach(old => {
+    const entries = Object.entries(old.quantities || {}).filter(([, qty]) => (qty || 0) > 0);
+    if (entries.length === 0) {
+      console.warn('Foil Phrases migration: removing empty legacy record (no nonzero quantities to preserve):', old.id);
+      window.fbDeleteFoilItem(old.id).catch(err => console.error('Legacy phrase cleanup failed:', err));
+      FOIL_ITEMS = FOIL_ITEMS.filter(i => i.id !== old.id);
+      return;
     }
-  }).catch(err => console.error('Foil phrases load failed:', err));
-}
-function foilPhrasesSave() {
-  window.fbSaveFoilPhrases({ names: FOIL_PHRASES }).catch(err => console.error('Foil phrases save failed:', err));
-}
-// A phrase name is free text (unlike a fixed A-Z/0-9 character), so add/rename/remove need real
-// validation/dedup/cascade logic that Letters/Numbers never needed.
-function foilAddPhraseNamePrompt() {
-  const name = prompt('New phrase (e.g. "Happy Birthday"):');
-  if (name === null) return;
-  foilAddPhraseName(name);
-}
-function foilAddPhraseName(name) {
-  const trimmed = (name || '').trim();
-  if (!trimmed) return;
-  if (FOIL_PHRASES.some(p => p.toLowerCase() === trimmed.toLowerCase())) { alert(`"${trimmed}" is already in the list.`); return; }
-  FOIL_PHRASES.push(trimmed);
-  foilPhrasesSave();
-  foilRenderScreen();
-}
-// Renaming has to carry each existing item's stored quantity along with it — the quantity lives
-// under a `quantities[oldName]` key, so leaving that key behind would silently zero out real stock.
-function foilRenamePhraseName(oldName, newValue) {
-  const trimmed = (newValue || '').trim();
-  if (!trimmed || trimmed === oldName) { foilRenderScreen(); return; }
-  if (FOIL_PHRASES.some(p => p !== oldName && p.toLowerCase() === trimmed.toLowerCase())) { alert(`"${trimmed}" already exists.`); foilRenderScreen(); return; }
-  const idx = FOIL_PHRASES.indexOf(oldName);
-  if (idx === -1) return;
-  FOIL_PHRASES[idx] = trimmed;
-  foilPhrasesSave();
-  FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === 'phrases').forEach(item => {
-    if (Object.prototype.hasOwnProperty.call(item.quantities, oldName)) {
-      item.quantities[trimmed] = item.quantities[oldName];
-      delete item.quantities[oldName];
-      foilSaveItem(item);
-    }
+    entries.forEach(([phraseText, qty], idx) => {
+      const migrated = {
+        id: idx === 0 ? old.id : psNewFoilItemId(),
+        category: 'lettersNumbers', charType: 'phrases',
+        phraseText, size: old.size || '', color: old.color || '', brand: old.brand || '',
+        quantity: qty, styleNotes: '', storageLocation: old.storageLocation || '',
+        active: old.active !== false,
+      };
+      if (old.costPerFoil != null) migrated.costPerFoil = old.costPerFoil; // preserved, unused by the new UI
+      foilSaveItem(migrated);
+      if (idx === 0) Object.assign(old, migrated);
+      else FOIL_ITEMS.push(migrated);
+    });
+    console.warn(`Foil Phrases migration: converted legacy record ${old.id} into ${entries.length} variant(s):`, entries.map(e => e[0]));
   });
-  foilRenderScreen();
-}
-// Blocked while any group still carries real stock under this name — the same "reassign/zero-out
-// first" philosophy as pgDeleteGroup, rather than silently discarding a nonzero count.
-function foilRemovePhraseName(name) {
-  const usedBy = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === 'phrases' && (i.quantities[name] || 0) > 0).length;
-  if (usedBy > 0) { alert(`"${name}" has stock recorded in ${usedBy} group${usedBy === 1 ? '' : 's'} — set those quantities to 0 first.`); return; }
-  if (!confirm(`Remove "${name}" from the Phrases list? This can't be undone.`)) return;
-  FOIL_PHRASES = FOIL_PHRASES.filter(p => p !== name);
-  foilPhrasesSave();
-  foilRenderScreen();
 }
 function psNewFoilItemId() { return 'foilitem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 function foilFindItem(id) { return FOIL_ITEMS.find(i => i.id === id) || FOIL_ITEMS_TRASHED.find(i => i.id === id); }
@@ -11215,6 +11187,17 @@ function foilKnownBrands() {
 function foilBrandOptions() {
   return [...foilKnownBrands(), 'Generic/Unknown', 'Other'];
 }
+// Leading-number-aware compare so free-text sizes like 5"/16"/34"/40" sort in real physical order
+// instead of lexicographic order (which would wrongly put "16"" before "5""). Falls back to a plain
+// string compare when either side has no leading digits.
+function foilNaturalSizeCompare(a, b) {
+  const na = parseFloat(a), nb = parseFloat(b);
+  const aNum = !isNaN(na) && /^\s*\d/.test(a || '');
+  const bNum = !isNaN(nb) && /^\s*\d/.test(b || '');
+  if (aNum && bNum) return na - nb || String(a).localeCompare(String(b));
+  if (aNum !== bNum) return aNum ? -1 : 1;
+  return String(a || '').localeCompare(String(b || ''));
+}
 
 function foilSetCategoryTab(cat) {
   const c = FOIL_CATEGORIES.find(x => x.id === cat);
@@ -11232,20 +11215,64 @@ function foilSetCategoryTab(cat) {
   }
   foilRenderScreen();
 }
+function foilSetLNMode(mode) {
+  foilLNMode = mode;
+  foilAddOpen = false; foilAddDraft = null;
+  foilPhraseAddOpen = false; foilPhraseAddDraft = null;
+  foilRenderScreen();
+}
+// Seeds every Brand/Size/Color (or, for Phrases, every phrase-text) section closed on entering that
+// tab — same "seed once on tab entry, not on every render" convention used everywhere else in this
+// app so a visit's own expand/collapse choices survive re-renders during that visit.
 function foilSetCharTypeTab(charType) {
   foilCharTypeTab = charType;
   foilExpandedItem = null;
+  if (charType === 'phrases') {
+    const items = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === 'phrases');
+    foilPhraseGroupedItems(items).forEach(g => invCollapsedGroups.add(g.key));
+  } else {
+    const items = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === charType);
+    foilLNGroupedTree(items).forEach(({ brand, sizes }) => {
+      invCollapsedGroups.add(`foil-ln-brand:${charType}|${brand}`);
+      sizes.forEach(({ size, colors }) => {
+        invCollapsedGroups.add(`foil-ln-size:${charType}|${brand}|${size}`);
+        colors.forEach(({ color }) => invCollapsedGroups.add(`foil-ln-color:${charType}|${brand}|${size}|${color}`));
+      });
+    });
+  }
   foilRenderScreen();
 }
-function foilSetSearch(q) { foilSearchQuery = q; foilRenderResults(); }
-function foilToggleExpand(id) { foilExpandedItem = foilExpandedItem === id ? null : id; foilRenderResults(); }
+function foilSetSearch(q) { foilSearchQuery = q; foilRenderLNContent(); }
+function foilToggleExpand(id) { foilExpandedItem = foilExpandedItem === id ? null : id; foilRenderPhraseGroups(); }
 
 function foilFilteredGroups() {
   const q = foilSearchQuery.trim().toLowerCase();
-  const items = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === foilCharTypeTab)
-    .sort((a, b) => (a.size || '').localeCompare(b.size || '') || (a.color || '').localeCompare(b.color || ''));
+  const items = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === foilCharTypeTab);
   if (!q) return items;
   return items.filter(i => [i.size, i.color, i.brand].some(f => (f || '').toLowerCase().includes(q)));
+}
+// Groups a flat, already-filtered Letters/Numbers item list into Brand -> Size -> Color, with a
+// natural size sort and (thanks to foilFindDuplicateGroup's own dedup) exactly one item per Color
+// leaf — so the leaf never needs to merge multiple records.
+function foilLNGroupedTree(items) {
+  const byBrand = {};
+  items.forEach(i => { const b = i.brand || 'Generic/Unknown'; (byBrand[b] = byBrand[b] || []).push(i); });
+  return Object.keys(byBrand).sort((a, b) => a.localeCompare(b)).map(brand => {
+    const bySize = {};
+    byBrand[brand].forEach(i => { const s = i.size || '(no size)'; (bySize[s] = bySize[s] || []).push(i); });
+    const sizes = Object.keys(bySize).sort(foilNaturalSizeCompare).map(size => {
+      const byColor = {};
+      bySize[size].forEach(i => { const c = i.color || '(no color)'; (byColor[c] = byColor[c] || []).push(i); });
+      const colors = Object.keys(byColor).sort((a, b) => a.localeCompare(b)).map(color => ({ color, items: byColor[color] }));
+      return { size, colors };
+    });
+    return { brand, sizes };
+  });
+}
+function foilToggleLNNode(key) {
+  if (invCollapsedGroups.has(key)) invCollapsedGroups.delete(key);
+  else invCollapsedGroups.add(key);
+  foilRenderResults();
 }
 // Matched by charType+size+color+brand (case/whitespace-insensitive) — the same real-world thing
 // shouldn't get a second competing record just because someone re-typed it slightly differently.
@@ -11253,6 +11280,13 @@ function foilFindDuplicateGroup(charType, size, color, brand) {
   const norm = s => (s || '').trim().toLowerCase();
   return FOIL_ITEMS.find(i => i.category === 'lettersNumbers' && i.charType === charType &&
     norm(i.size) === norm(size) && norm(i.color) === norm(color) && norm(i.brand) === norm(brand));
+}
+// Removes the collapse keys along a Brand/Size/Color path so the tree auto-opens to reveal an item
+// that was just created or landed on (e.g. after Add, or a duplicate-found "open it instead").
+function foilExpandLNPath(charType, brand, size, color) {
+  invCollapsedGroups.delete(`foil-ln-brand:${charType}|${brand}`);
+  invCollapsedGroups.delete(`foil-ln-size:${charType}|${brand}|${size}`);
+  invCollapsedGroups.delete(`foil-ln-color:${charType}|${brand}|${size}|${color}`);
 }
 
 function foilOpenAdd() {
@@ -11264,7 +11298,7 @@ function foilCancelAdd() { foilAddOpen = false; foilAddDraft = null; foilRenderS
 function foilSetDraftField(field, value) {
   if (!foilAddDraft) return;
   foilAddDraft[field] = value;
-  if (field === 'charType') foilRenderScreen(); // form title/character count depends on this
+  if (field === 'charType') foilRenderScreen(); // form title depends on this
   else if (field === 'brand') foilRenderScreen(); // "Other" needs to reveal its free-text input
 }
 function foilSubmitAdd() {
@@ -11284,7 +11318,7 @@ function foilSubmitAdd() {
     foilAddOpen = false;
     foilAddDraft = null;
     foilCharTypeTab = d.charType;
-    foilExpandedItem = dup.id;
+    foilExpandLNPath(d.charType, brand, size, color);
     foilRenderScreen();
     return;
   }
@@ -11304,7 +11338,7 @@ function foilSubmitAdd() {
   foilAddOpen = false;
   foilAddDraft = null;
   foilCharTypeTab = d.charType;
-  foilExpandedItem = item.id;
+  foilExpandLNPath(d.charType, brand, size, color);
   foilRenderScreen();
 }
 // Plain saves for now, matching Specialty Latex Phase 1 — no ledger involved yet.
@@ -11327,6 +11361,9 @@ function foilItemLabel(item) {
   if (item.category === 'decoratorShapes') {
     const groupName = item.printGroupId ? ((pgFindGroup(item.printGroupId) || {}).name || '') : '';
     return [item.size, item.color, groupName].filter(Boolean).join(' ');
+  }
+  if (item.charType === 'phrases') {
+    return [item.phraseText, item.size, item.color, item.brand].filter(Boolean).join(' — ');
   }
   return `${item.size} ${item.color} ${foilCharTypeLabel(item.charType)}`;
 }
@@ -11395,6 +11432,7 @@ function foilSubmitEditDetails(itemId) {
   foilSaveItem(item);
   foilEditDetailsItemId = null;
   foilEditDetailsDraft = null;
+  foilExpandLNPath(item.charType, brand, size, color);
   foilRenderResults();
 }
 function foilEditDetailsFormHtml(item) {
@@ -11452,11 +11490,10 @@ function foilAddFormHtml() {
       <strong style="font-size:14px;">Add ${foilCharTypeLabel(d.charType)} group</strong>
       <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
-    <div class="settings-field"><label>Type</label>
+    <div class="settings-field"><label>Letters or Numbers</label>
       <select onchange="foilSetDraftField('charType', this.value)">
         <option value="letters" ${d.charType === 'letters' ? 'selected' : ''}>Letters (A-Z)</option>
         <option value="numbers" ${d.charType === 'numbers' ? 'selected' : ''}>Numbers (0-9)</option>
-        <option value="phrases" ${d.charType === 'phrases' ? 'selected' : ''}>Phrases</option>
       </select>
     </div>
     <div class="row">
@@ -11483,102 +11520,551 @@ function foilAddFormHtml() {
   </div>`;
 }
 
-// The dense character grid is the whole point — a physical count means typing ~26 (or 10) numbers
-// in a row, not opening 26 separate rows. auto-fill/minmax lets it reflow from a couple of wide
-// columns on mobile to many narrow ones on desktop without two separate layouts to maintain.
+// A leaf inside the Brand -> Size -> Color tree, always rendered in full — once a Color node is
+// open, that alone was the "I want to see this" signal, so no further per-item click is needed.
+// The dense auto-fill grid is the whole point of Letters/Numbers — a physical count means typing
+// ~26 (or 10) numbers in a row, not opening 26 separate rows.
 function foilItemCardHtml(item) {
-  const expanded = foilExpandedItem === item.id;
   const chars = foilCharsFor(item.charType);
   const total = foilGroupTotal(item);
   let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
-  html += `<div class="inv-color-row-header" onclick="foilToggleExpand('${item.id}')">
-    <div class="inv-color-row-text">
-      <div class="inv-color-row-name">${psEscape(item.size)} ${psEscape(item.color)}</div>
-      <div class="inv-color-row-brand">${psEscape(item.brand || 'Generic/Unknown')}</div>
-    </div>
-    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${total === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${total === 0 ? 'var(--accent)' : 'var(--info-text)'};">${total}</div>
-    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+  html += `<div class="ps-job-body" style="padding-top:0.6rem;">`;
+  html += `<div style="display:flex; justify-content:flex-end; margin-bottom:0.5rem;">
+    <div style="font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${total === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${total === 0 ? 'var(--accent)' : 'var(--info-text)'};">Total: ${total}</div>
   </div>`;
-  if (expanded) {
-    html += `<div class="ps-job-body">`;
-    // Letters/Numbers: a dense auto-fill grid (a physical count means typing ~26/10 numbers in a
-    // row). Phrases: free-text names don't fit a 52px cell, so each gets its own labeled row
-    // instead — same underlying quantities map, just a layout suited to longer strings.
-    if (chars.length === 0) {
-      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.75rem;">${item.charType === 'phrases' ? 'No phrases in the list yet — add one from the Phrases tab.' : 'No characters to count.'}</div>`;
-    } else if (item.charType === 'phrases') {
-      html += `<div style="margin-bottom:0.75rem;">
-        ${chars.map(c => `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-          <div style="flex:1; font-size:13px;">${psEscape(c)}</div>
-          <input type="number" min="0" value="${item.quantities[c] || 0}" style="width:80px; text-align:center; padding:6px 2px; font-size:14px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);" onchange="foilUpdateQuantity('${item.id}','${psJsKeyAttr(c)}', this.value)">
-        </div>`).join('')}
-      </div>`;
-    } else {
-      html += `<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(52px, 1fr)); gap:6px; margin-bottom:0.75rem;">
-        ${chars.map(c => `<div style="text-align:center;">
-          <div style="font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:2px;">${psEscape(c)}</div>
-          <input type="number" min="0" value="${item.quantities[c] || 0}" style="width:100%; text-align:center; padding:6px 2px; font-size:14px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);" onchange="foilUpdateQuantity('${item.id}','${psJsKeyAttr(c)}', this.value)">
-        </div>`).join('')}
-      </div>`;
-    }
-    html += `<div class="row">
-      <div class="settings-field" style="margin-bottom:0"><label>Cost per foil</label><input type="number" step="0.01" min="0" value="${item.costPerFoil == null ? '' : item.costPerFoil}" placeholder="optional" onchange="foilUpdateField('${item.id}','costPerFoil',this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdateField('${item.id}','storageLocation',this.value)"></div>
-    </div>`;
-    html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
-      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
-      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
-    </div>`;
-    if (foilEditDetailsItemId === item.id) html += foilEditDetailsFormHtml(item);
-    html += `</div>`; // ps-job-body
-  }
+  html += `<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(52px, 1fr)); gap:6px; margin-bottom:0.75rem;">
+    ${chars.map(c => `<div style="text-align:center;">
+      <div style="font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:2px;">${psEscape(c)}</div>
+      <input type="number" min="0" value="${item.quantities[c] || 0}" style="width:100%; text-align:center; padding:6px 2px; font-size:14px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);" onchange="foilUpdateQuantity('${item.id}','${psJsKeyAttr(c)}', this.value)">
+    </div>`).join('')}
+  </div>`;
+  html += `<div class="row">
+    <div class="settings-field" style="margin-bottom:0"><label>Cost per foil</label><input type="number" step="0.01" min="0" value="${item.costPerFoil == null ? '' : item.costPerFoil}" placeholder="optional" onchange="foilUpdateField('${item.id}','costPerFoil',this.value)"></div>
+    <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdateField('${item.id}','storageLocation',this.value)"></div>
+  </div>`;
+  html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
+    <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
+    <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+  </div>`;
+  if (foilEditDetailsItemId === item.id) html += foilEditDetailsFormHtml(item);
+  html += `</div>`; // ps-job-body
   html += `</div>`; // inv-color-row
   return html;
 }
 
+// Renders the Brand -> Size -> Color tree for the active Letters/Numbers tab into
+// #foil-ln-results-root. While a search is active, every rendered branch forces open regardless of
+// its collapsed state (reverting the moment the search is cleared) so filtering isn't defeated by
+// needing to manually drill through 3 levels to see a hit.
 function foilRenderResults() {
   const root = document.getElementById('foil-ln-results-root');
   if (!root) return;
   const items = foilFilteredGroups();
-  root.innerHTML = items.length === 0
-    ? `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${foilCharTypeNoun(foilCharTypeTab)} groups yet.</div>`
-    : `<div class="inv-color-list">` + items.map(foilItemCardHtml).join('') + `</div>`;
+  if (items.length === 0) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No ${foilCharTypeNoun(foilCharTypeTab)} groups yet.</div>`;
+    return;
+  }
+  const searching = foilSearchQuery.trim() !== '';
+  const ct = foilCharTypeTab;
+  const tree = foilLNGroupedTree(items);
+  root.innerHTML = tree.map(({ brand, sizes }) => {
+    const brandKey = `foil-ln-brand:${ct}|${brand}`;
+    const brandCollapsed = !searching && invCollapsedGroups.has(brandKey);
+    const brandTotal = sizes.reduce((s, sz) => s + sz.colors.length, 0);
+    return `<div class="inv-group-header" onclick="foilToggleLNNode('${psJsKeyAttr(brandKey)}')">
+        <span>${psEscape(brand)} (${brandTotal})</span>
+        <i class="fa-solid fa-chevron-${brandCollapsed ? 'down' : 'up'}"></i>
+      </div>
+      ${brandCollapsed ? '' : sizes.map(({ size, colors }) => {
+        const sizeKey = `foil-ln-size:${ct}|${brand}|${size}`;
+        const sizeCollapsed = !searching && invCollapsedGroups.has(sizeKey);
+        return `<div class="inv-group-header" style="padding-left:1rem; opacity:0.85;" onclick="foilToggleLNNode('${psJsKeyAttr(sizeKey)}')">
+            <span>${psEscape(size)} (${colors.length})</span>
+            <i class="fa-solid fa-chevron-${sizeCollapsed ? 'down' : 'up'}"></i>
+          </div>
+          ${sizeCollapsed ? '' : colors.map(({ color, items: colorItems }) => {
+            const colorKey = `foil-ln-color:${ct}|${brand}|${size}|${color}`;
+            const colorCollapsed = !searching && invCollapsedGroups.has(colorKey);
+            return `<div class="inv-group-header" style="padding-left:2rem; opacity:0.7;" onclick="foilToggleLNNode('${psJsKeyAttr(colorKey)}')">
+                <span>${psEscape(color)}</span>
+                <i class="fa-solid fa-chevron-${colorCollapsed ? 'down' : 'up'}"></i>
+              </div>
+              ${colorCollapsed ? '' : `<div class="inv-color-list" style="margin-left:2rem;">` + colorItems.map(foilItemCardHtml).join('') + `</div>`}`;
+          }).join('')}`;
+      }).join('')}`;
+  }).join('');
 }
 
-// Only Phrases needs a manage panel — Letters/Numbers' character set is fixed and never edited.
-function foilPhrasesManageHtml() {
-  return `<div class="card" style="margin-bottom:0.75rem;">
-    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-      <span class="section-label" style="margin:0;">Phrase names</span>
-      <button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="foilAddPhraseNamePrompt()"><i class="fa-solid fa-plus"></i> Add phrase</button>
+// ── Phrases: the phrase/text itself is the group — no separate managed category layer. Each
+// variant is a flat, single-quantity record (Size/Color/Brand/Quantity/Style-Notes/Storage), the
+// same shape family as Specialty Latex/Decorator Shapes rather than Letters/Numbers' quantities map.
+let foilPhraseAddOpen = false;
+let foilPhraseAddDraft = null;
+let foilPhraseEditDetailsItemId = null;
+let foilPhraseEditDetailsDraft = null;
+
+function foilKnownPhraseTexts() {
+  return [...new Set(FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === 'phrases').map(i => i.phraseText).filter(Boolean))].sort();
+}
+function foilPhraseFilteredItems() {
+  const q = foilSearchQuery.trim().toLowerCase();
+  const items = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && i.charType === 'phrases');
+  if (!q) return items;
+  return items.filter(i => [i.phraseText, i.size, i.color, i.brand, i.styleNotes].some(f => (f || '').toLowerCase().includes(q)));
+}
+// Groups by the exact (trimmed) phrase text — deliberately not case-folded, same conservative
+// "never silently merge what was typed differently" choice made for Brand in the Letters/Numbers
+// tree. Within a phrase, variants sort size -> color -> brand.
+function foilPhraseGroupedItems(items) {
+  const byPhrase = {};
+  items.forEach(i => { const key = (i.phraseText || '').trim() || '(untitled phrase)'; (byPhrase[key] = byPhrase[key] || []).push(i); });
+  const comparator = (a, b) => foilNaturalSizeCompare(a.size, b.size) || (a.color || '').localeCompare(b.color || '') || (a.brand || '').localeCompare(b.brand || '');
+  return Object.keys(byPhrase).sort((a, b) => a.localeCompare(b)).map(phraseText => ({
+    key: 'foil-phrase-group:' + phraseText,
+    phraseText,
+    items: [...byPhrase[phraseText]].sort(comparator),
+  }));
+}
+function foilTogglePhraseGroup(key) {
+  if (invCollapsedGroups.has(key)) invCollapsedGroups.delete(key);
+  else invCollapsedGroups.add(key);
+  foilRenderPhraseGroups();
+}
+// Identity = phrase text + size + color + brand + style/notes (case/whitespace-insensitive, blanks
+// normalized to '') — two variants differing only in Style/Notes (e.g. "Joined" vs. blank) are
+// genuinely distinct, so Style/Notes is part of identity here, same as Decorator Shapes' Condition.
+function foilFindDuplicatePhraseVariant(phraseText, size, color, brand, styleNotes, excludeId) {
+  const norm = s => (s || '').trim().toLowerCase();
+  return FOIL_ITEMS.find(i => i.id !== excludeId && i.category === 'lettersNumbers' && i.charType === 'phrases' &&
+    norm(i.phraseText) === norm(phraseText) && norm(i.size) === norm(size) && norm(i.color) === norm(color) &&
+    norm(i.brand) === norm(brand) && norm(i.styleNotes) === norm(styleNotes));
+}
+function foilOpenPhraseAdd() {
+  foilPhraseAddOpen = true;
+  foilPhraseAddDraft = { phraseText: '', size: '', color: '', brand: '', quantity: 0, styleNotes: '', storageLocation: '' };
+  foilRenderScreen();
+}
+function foilCancelPhraseAdd() { foilPhraseAddOpen = false; foilPhraseAddDraft = null; foilRenderScreen(); }
+function foilSetPhraseDraftField(field, value) {
+  if (!foilPhraseAddDraft) return;
+  foilPhraseAddDraft[field] = value;
+}
+function foilSubmitPhraseAdd() {
+  if (!foilPhraseAddDraft) return;
+  const d = foilPhraseAddDraft;
+  const phraseText = (d.phraseText || '').trim();
+  if (!phraseText) { alert('Enter the phrase or text.'); return; }
+  const size = (d.size || '').trim();
+  const color = (d.color || '').trim();
+  const brand = (d.brand || '').trim();
+  const styleNotes = (d.styleNotes || '').trim();
+
+  const dup = foilFindDuplicatePhraseVariant(phraseText, size, color, brand, styleNotes, null);
+  if (dup) {
+    alert(`A variant with this Phrase/Size/Color/Brand/Style already exists — opening it instead of creating another.`);
+    foilPhraseAddOpen = false;
+    foilPhraseAddDraft = null;
+    invCollapsedGroups.delete('foil-phrase-group:' + phraseText);
+    foilExpandedItem = dup.id;
+    foilRenderScreen();
+    return;
+  }
+
+  const item = {
+    id: psNewFoilItemId(),
+    category: 'lettersNumbers',
+    charType: 'phrases',
+    phraseText, size, color, brand,
+    quantity: parseInt(d.quantity, 10) || 0,
+    styleNotes,
+    storageLocation: (d.storageLocation || '').trim(),
+    active: true,
+  };
+  FOIL_ITEMS.push(item);
+  foilSaveItem(item);
+  foilPhraseAddOpen = false;
+  foilPhraseAddDraft = null;
+  invCollapsedGroups.delete('foil-phrase-group:' + phraseText);
+  foilExpandedItem = item.id;
+  foilRenderScreen();
+}
+// Quantity/Style-Notes/Storage Location are operational, not identity — directly editable, same
+// convention as every other category's non-identity fields.
+function foilUpdatePhraseField(itemId, field, value) {
+  const item = foilFindItem(itemId);
+  if (!item) return;
+  item[field] = field === 'quantity' ? (parseInt(value, 10) || 0) : value;
+  foilSaveItem(item);
+  foilRenderPhraseGroups();
+}
+function foilOpenPhraseEditDetails(itemId) {
+  const item = foilFindItem(itemId);
+  if (!item) return;
+  foilPhraseEditDetailsItemId = itemId;
+  foilPhraseEditDetailsDraft = { phraseText: item.phraseText || '', size: item.size || '', color: item.color || '', brand: item.brand || '', styleNotes: item.styleNotes || '' };
+  foilRenderPhraseGroups();
+}
+function foilCancelPhraseEditDetails() { foilPhraseEditDetailsItemId = null; foilPhraseEditDetailsDraft = null; foilRenderPhraseGroups(); }
+function foilSetPhraseEditDetailsField(field, value) {
+  if (!foilPhraseEditDetailsDraft) return;
+  foilPhraseEditDetailsDraft[field] = value;
+}
+function foilSubmitPhraseEditDetails(itemId) {
+  const item = foilFindItem(itemId);
+  if (!item || !foilPhraseEditDetailsDraft) return;
+  const d = foilPhraseEditDetailsDraft;
+  const phraseText = (d.phraseText || '').trim();
+  if (!phraseText) { alert('Enter the phrase or text.'); return; }
+  const size = (d.size || '').trim();
+  const color = (d.color || '').trim();
+  const brand = (d.brand || '').trim();
+  const styleNotes = (d.styleNotes || '').trim();
+  const collision = foilFindDuplicatePhraseVariant(phraseText, size, color, brand, styleNotes, item.id);
+  if (collision) { alert('This would collide with an existing variant. Edit that one instead, or change one of these fields.'); return; }
+  item.phraseText = phraseText;
+  item.size = size;
+  item.color = color;
+  item.brand = brand;
+  item.styleNotes = styleNotes;
+  foilSaveItem(item);
+  foilPhraseEditDetailsItemId = null;
+  foilPhraseEditDetailsDraft = null;
+  invCollapsedGroups.delete('foil-phrase-group:' + phraseText);
+  foilRenderPhraseGroups();
+}
+function foilPhraseEditDetailsFormHtml(item) {
+  const d = foilPhraseEditDetailsDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-top:0.5rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Edit Details</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelPhraseEditDetails()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
-    ${FOIL_PHRASES.length === 0
-      ? `<div style="font-size:12px; color:var(--text-secondary);">No phrases yet — add one to start tracking quantities for it.</div>`
-      : FOIL_PHRASES.map(name => `
-        <div style="display:flex; align-items:center; gap:6px; margin-bottom:0.4rem;">
-          <input type="text" style="flex:1;" value="${invAttr(name)}" onchange="foilRenamePhraseName('${psJsKeyAttr(name)}', this.value)">
-          <button class="icon-btn" style="padding:4px;" onclick="foilRemovePhraseName('${psJsKeyAttr(name)}')" aria-label="Remove phrase"><i class="fa-solid fa-trash"></i></button>
-        </div>`).join('')}
+    <div class="settings-field"><label>Phrase / Text</label>
+      <input type="text" list="foil-phrase-suggestions" value="${invAttr(d.phraseText)}" oninput="foilSetPhraseEditDetailsField('phraseText', this.value)">
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Size</label><input type="text" list="foil-size-suggestions" value="${invAttr(d.size)}" oninput="foilSetPhraseEditDetailsField('size', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Color/Colorway</label><input type="text" list="foil-color-suggestions" value="${invAttr(d.color)}" oninput="foilSetPhraseEditDetailsField('color', this.value)"></div>
+    </div>
+    <div class="settings-field"><label>Brand</label>
+      <input type="text" list="foil-brand-suggestions" value="${invAttr(d.brand)}" oninput="foilSetPhraseEditDetailsField('brand', this.value)">
+    </div>
+    <div class="settings-field"><label>Style/Notes</label>
+      <input type="text" value="${invAttr(d.styleNotes)}" oninput="foilSetPhraseEditDetailsField('styleNotes', this.value)">
+    </div>
+    <button class="save-btn" onclick="foilSubmitPhraseEditDetails('${item.id}')">Save Details</button>
   </div>`;
 }
+function foilPhraseAddFormHtml() {
+  const d = foilPhraseAddDraft;
+  return `<div class="card" style="border:1px solid var(--border-strong); margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.6rem;">
+      <strong style="font-size:14px;">Add Phrase Set</strong>
+      <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelPhraseAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
+    </div>
+    <div class="settings-field"><label>Phrase / Text</label>
+      <input type="text" list="foil-phrase-suggestions" placeholder="e.g. Happy Birthday" value="${invAttr(d.phraseText)}" oninput="foilSetPhraseDraftField('phraseText', this.value)">
+      <datalist id="foil-phrase-suggestions">${foilKnownPhraseTexts().map(p => `<option value="${invAttr(p)}">`).join('')}</datalist>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Size <span style="font-weight:400;">(optional)</span></label>
+        <input type="text" list="foil-size-suggestions" placeholder="e.g. 16&quot;" value="${invAttr(d.size)}" oninput="foilSetPhraseDraftField('size', this.value)">
+      </div>
+      <div class="settings-field" style="margin-bottom:0"><label>Color/Colorway <span style="font-weight:400;">(optional)</span></label>
+        <input type="text" list="foil-color-suggestions" placeholder="e.g. Rainbow" value="${invAttr(d.color)}" oninput="foilSetPhraseDraftField('color', this.value)">
+      </div>
+    </div>
+    <div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Brand <span style="font-weight:400;">(optional)</span></label>
+        <input type="text" list="foil-brand-suggestions" placeholder="e.g. Anagram" value="${invAttr(d.brand)}" oninput="foilSetPhraseDraftField('brand', this.value)">
+        <datalist id="foil-brand-suggestions">${foilKnownBrands().map(b => `<option value="${invAttr(b)}">`).join('')}</datalist>
+      </div>
+      <div class="settings-field" style="margin-bottom:0"><label>Quantity</label>
+        <input type="number" min="0" value="${d.quantity}" oninput="foilSetPhraseDraftField('quantity', this.value)">
+      </div>
+    </div>
+    <div class="settings-field"><label>Style/Notes <span style="font-weight:400;">(optional)</span></label>
+      <input type="text" placeholder="e.g. Joined letters" value="${invAttr(d.styleNotes)}" oninput="foilSetPhraseDraftField('styleNotes', this.value)">
+    </div>
+    <div class="settings-field"><label>Storage location <span style="font-weight:400;">(optional)</span></label>
+      <input type="text" placeholder="e.g. Shelf 3" value="${invAttr(d.storageLocation)}" oninput="foilSetPhraseDraftField('storageLocation', this.value)">
+    </div>
+    <button class="save-btn" onclick="foilSubmitPhraseAdd()">Save variant</button>
+  </div>`;
+}
+function foilPhraseVariantCardHtml(item) {
+  const expanded = foilExpandedItem === item.id;
+  const summary = [item.size, item.color, item.brand].filter(Boolean).join(' — ');
+  let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
+  html += `<div class="inv-color-row-header" onclick="foilToggleExpand('${item.id}')">
+    <div class="inv-color-row-text">
+      <div class="inv-color-row-name">${psEscape(summary || '(no size/color/brand yet)')}</div>
+      ${item.styleNotes ? `<div class="inv-color-row-brand">${psEscape(item.styleNotes)}</div>` : ''}
+    </div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.quantity || 0) === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${(item.quantity || 0) === 0 ? 'var(--accent)' : 'var(--info-text)'};">${item.quantity || 0}</div>
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
+  </div>`;
+  if (expanded) {
+    html += `<div class="ps-job-body">`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Quantity</label><input type="number" min="0" value="${item.quantity || 0}" onchange="foilUpdatePhraseField('${item.id}','quantity',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdatePhraseField('${item.id}','storageLocation',this.value)"></div>
+    </div>`;
+    html += `<div class="settings-field"><label>Style/Notes</label><input type="text" value="${invAttr(item.styleNotes)}" placeholder="e.g. Joined letters" onchange="foilUpdatePhraseField('${item.id}','styleNotes',this.value)"></div>`;
+    html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenPhraseEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+    </div>`;
+    if (foilPhraseEditDetailsItemId === item.id) html += foilPhraseEditDetailsFormHtml(item);
+    html += `</div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+function foilRenderPhraseGroups() {
+  const root = document.getElementById('foil-phrase-results-root');
+  if (!root) return;
+  const items = foilPhraseFilteredItems();
+  if (items.length === 0) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No phrase sets yet.</div>`;
+    return;
+  }
+  const searching = foilSearchQuery.trim() !== '';
+  const groups = foilPhraseGroupedItems(items);
+  root.innerHTML = groups.map(g => {
+    const collapsed = !searching && invCollapsedGroups.has(g.key);
+    return `<div class="inv-group-header" onclick="foilTogglePhraseGroup('${psJsKeyAttr(g.key)}')">
+      <span>${psEscape(g.phraseText)} (${g.items.length})</span>
+      <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+    </div>
+    ${collapsed ? '' : `<div class="inv-color-list">` + g.items.map(foilPhraseVariantCardHtml).join('') + `</div>`}`;
+  }).join('');
+}
+
+// ── Phrase Checker: a read-only planning tool over Letters + Numbers inventory only — never the
+// pre-made Phrases sets above, which are a separate concept (whole pre-made phrase pieces, not
+// spellable individual characters). Running it never writes to any record. ──
+let foilCheckerQuery = '';
+let foilCheckerFilterBrand = '';
+let foilCheckerFilterSize = '';
+let foilCheckerFilterColor = '';
+function foilSetCheckerQuery(v) { foilCheckerQuery = v; foilRenderPhraseChecker(); }
+function foilSetCheckerFilter(field, value) {
+  if (field === 'brand') foilCheckerFilterBrand = value;
+  else if (field === 'size') foilCheckerFilterSize = value;
+  else if (field === 'color') foilCheckerFilterColor = value;
+  foilRenderPhraseChecker();
+}
+// O and 0 are physically interchangeable on the shelf — pooled into ONE requirement "class" up
+// front so checking availability never treats them as two separate, potentially double-counted
+// demands. Every other character is its own singleton class.
+function foilEquivClass(ch) { return (ch === 'O' || ch === '0') ? 'O/0' : ch; }
+function foilParsePhraseRequirement(text) {
+  const raw = (text || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const classes = {};
+  for (const ch of raw) { const cls = foilEquivClass(ch); classes[cls] = (classes[cls] || 0) + 1; }
+  return { raw, classes };
+}
+// One combined per-character pool per distinct (brand, size, color) triple, merging that triple's
+// Letters record and Numbers record (if both exist) — this is what makes a phrase spanning both
+// letters and numbers (or needing O/0 pooling) resolve correctly regardless of the charType split.
+// Active items only; Phrases-charType records never contribute (they aren't decomposable per-char).
+function foilBuildLNPools() {
+  const items = FOIL_ITEMS.filter(i => i.category === 'lettersNumbers' && (i.charType === 'letters' || i.charType === 'numbers'));
+  const byTriple = {};
+  items.forEach(i => {
+    const key = `${i.brand || 'Generic/Unknown'} ${i.size || ''} ${i.color || ''}`;
+    if (!byTriple[key]) byTriple[key] = { brand: i.brand || 'Generic/Unknown', size: i.size || '', color: i.color || '', pool: {} };
+    Object.entries(i.quantities || {}).forEach(([ch, qty]) => { byTriple[key].pool[ch] = (byTriple[key].pool[ch] || 0) + (qty || 0); });
+  });
+  return Object.values(byTriple);
+}
+function foilClassAvailable(pool, cls) { return cls === 'O/0' ? (pool['O'] || 0) + (pool['0'] || 0) : (pool[cls] || 0); }
+function foilTripleCanFullyCover(pool, classes) { return Object.entries(classes).every(([cls, need]) => foilClassAvailable(pool, cls) >= need); }
+function foilFindCompleteMatches(classes, triples) { return triples.filter(t => foilTripleCanFullyCover(t.pool, classes)); }
+// Greedy set-cover: each round, pick whichever NOT-YET-USED candidate covers the most still-unmet
+// demand, commit its full contribution, repeat. Not provably optimal (true minimum-source coverage
+// is NP-hard) but simple, fast, and easy to reason about at this data scale — appropriate for a
+// planning tool, not worth a heavier solver.
+function foilGreedyCover(classes, triples) {
+  const remaining = { ...classes };
+  const candidates = triples.slice();
+  const used = [];
+  const unmet = () => Object.values(remaining).some(n => n > 0);
+  while (unmet() && candidates.length > 0) {
+    let bestIdx = -1, bestScore = 0, bestCovered = null;
+    candidates.forEach((t, idx) => {
+      let score = 0; const covered = {};
+      Object.entries(remaining).forEach(([cls, need]) => {
+        if (need <= 0) return;
+        const usable = Math.min(need, foilClassAvailable(t.pool, cls));
+        if (usable > 0) { covered[cls] = usable; score += usable; }
+      });
+      if (score > bestScore) { bestScore = score; bestIdx = idx; bestCovered = covered; }
+    });
+    if (bestIdx === -1) return null;
+    const chosen = candidates.splice(bestIdx, 1)[0];
+    Object.entries(bestCovered).forEach(([cls, n]) => { remaining[cls] -= n; });
+    used.push({ triple: chosen, covered: bestCovered });
+  }
+  return unmet() ? null : used;
+}
+function foilDedupeAndRankCovers(options) {
+  const seen = new Set();
+  const unique = options.filter(o => {
+    const key = o.cover.map(c => `${c.triple.brand}|${c.triple.size}|${c.triple.color}`).sort().join(',');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  unique.sort((a, b) => a.cover.length - b.cover.length);
+  return unique.slice(0, 3);
+}
+// Tier 1 (same size + same color, mixed brand) -> Tier 2 (same size, mixed brand/color) -> Tier 3
+// (mixed sizes, only if no all-same-size solution exists at all) — matches the explicit "a color or
+// brand mismatch can be fixed with spray paint; a size mismatch can't" priority.
+function foilFindMixedOptions(classes, allTriples) {
+  const bySizeColor = {};
+  allTriples.forEach(t => { const k = `${t.size} ${t.color}`; (bySizeColor[k] = bySizeColor[k] || []).push(t); });
+  const tier1 = [];
+  Object.values(bySizeColor).forEach(group => {
+    if (group.length < 2) return; // a lone triple here would already be a complete match, not "mixed"
+    const cover = foilGreedyCover(classes, group);
+    if (cover) tier1.push({ tier: 'Same size, same color, mixed brand', cover });
+  });
+  if (tier1.length > 0) return foilDedupeAndRankCovers(tier1);
+
+  const bySize = {};
+  allTriples.forEach(t => { (bySize[t.size] = bySize[t.size] || []).push(t); });
+  const tier2 = [];
+  Object.values(bySize).forEach(group => {
+    const cover = foilGreedyCover(classes, group);
+    if (cover) tier2.push({ tier: 'Same size, mixed brand & color', cover });
+  });
+  if (tier2.length > 0) return foilDedupeAndRankCovers(tier2);
+
+  const cover = foilGreedyCover(classes, allTriples);
+  return cover ? [{ tier: 'Mixed sizes', cover }] : [];
+}
+// Walks the phrase's actual characters (not the class-collapsed counts) and assigns each occurrence
+// to a source triple from the winning cover, preferring an exact-character match (a literal "O"
+// draws from letter-O stock before number-0) — purely for a readable "where this comes from"
+// display; the coverage math above only ever reasons in pooled class totals.
+function foilAssignCharacterSources(rawChars, cover) {
+  const remaining = {};
+  cover.forEach((c, idx) => { Object.entries(c.covered).forEach(([cls, n]) => { remaining[`${idx}|${cls}`] = n; }); });
+  return rawChars.map(ch => {
+    const cls = foilEquivClass(ch);
+    for (let idx = 0; idx < cover.length; idx++) {
+      const key = `${idx}|${cls}`;
+      if ((remaining[key] || 0) > 0) { remaining[key]--; return { ch, triple: cover[idx].triple }; }
+    }
+    return { ch, triple: null };
+  });
+}
+function foilPhraseCheckerShellHtml() {
+  return `<div class="card">
+    <div class="settings-field" style="margin-bottom:0;">
+      <label>Type a phrase</label>
+      <input type="text" placeholder="e.g. DSW or CLASS OF 2026" value="${invAttr(foilCheckerQuery)}" oninput="foilSetCheckerQuery(this.value)">
+    </div>
+  </div>
+  <div id="foil-checker-results-root"></div>`;
+}
+function foilRenderPhraseChecker() {
+  const root = document.getElementById('foil-checker-results-root');
+  if (!root) return;
+  const { raw, classes } = foilParsePhraseRequirement(foilCheckerQuery);
+  if (!raw) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">Type a phrase above to see what you can make from your current Letters &amp; Numbers inventory.</div>`;
+    return;
+  }
+  const allTriples = foilBuildLNPools();
+  const complete = foilFindCompleteMatches(classes, allTriples);
+
+  let html = '';
+  if (complete.length > 0) {
+    const brands = [...new Set(complete.map(t => t.brand))].sort();
+    const sizes = [...new Set(complete.map(t => t.size))].sort(foilNaturalSizeCompare);
+    const colors = [...new Set(complete.map(t => t.color))].sort();
+    let filtered = complete;
+    if (foilCheckerFilterBrand) filtered = filtered.filter(t => t.brand === foilCheckerFilterBrand);
+    if (foilCheckerFilterSize) filtered = filtered.filter(t => t.size === foilCheckerFilterSize);
+    if (foilCheckerFilterColor) filtered = filtered.filter(t => t.color === foilCheckerFilterColor);
+    html += `<div class="card">
+      <div class="section-label" style="margin-top:0;">✅ Complete matches (${filtered.length}${filtered.length !== complete.length ? ` of ${complete.length}` : ''})</div>
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Brand</label><select onchange="foilSetCheckerFilter('brand', this.value)"><option value="">All</option>${brands.map(b => `<option value="${invAttr(b)}" ${b === foilCheckerFilterBrand ? 'selected' : ''}>${psEscape(b)}</option>`).join('')}</select></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Size</label><select onchange="foilSetCheckerFilter('size', this.value)"><option value="">All</option>${sizes.map(s => `<option value="${invAttr(s)}" ${s === foilCheckerFilterSize ? 'selected' : ''}>${psEscape(s)}</option>`).join('')}</select></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Color</label><select onchange="foilSetCheckerFilter('color', this.value)"><option value="">All</option>${colors.map(c => `<option value="${invAttr(c)}" ${c === foilCheckerFilterColor ? 'selected' : ''}>${psEscape(c)}</option>`).join('')}</select></div>
+      </div>
+    </div>
+    <div class="inv-color-list">
+      ${filtered.map(t => `<div class="inv-color-row" style="padding:0.6rem 0.75rem; font-size:13px;">${psEscape(t.size)} ${psEscape(t.brand)} — ${psEscape(t.color)}</div>`).join('')}
+    </div>`;
+  } else {
+    const totalPool = {};
+    allTriples.forEach(t => Object.entries(t.pool).forEach(([ch, n]) => { totalPool[ch] = (totalPool[ch] || 0) + n; }));
+    const impossible = Object.keys(classes).filter(cls => foilClassAvailable(totalPool, cls) < classes[cls]);
+    if (impossible.length > 0) {
+      html += `<div class="card" style="text-align:center; color:var(--text-secondary);">Not currently possible with your current inventory — no stock anywhere for: ${impossible.join(', ')}.</div>`;
+    } else {
+      const options = foilFindMixedOptions(classes, allTriples);
+      if (options.length === 0) {
+        html += `<div class="card" style="text-align:center; color:var(--text-secondary);">Not currently possible — even mixing every brand/size/color, there isn't enough stock to cover this phrase.</div>`;
+      } else {
+        html += `<div class="section-label" style="margin-top:0;">⚠️ No complete match — best mixed option${options.length > 1 ? 's' : ''}</div>`;
+        html += options.map(opt => {
+          const assigned = foilAssignCharacterSources(raw.split(''), opt.cover);
+          return `<div class="card" style="margin-bottom:0.75rem;">
+            <div style="font-size:11px; font-weight:600; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:0.5rem;">${psEscape(opt.tier)}</div>
+            ${assigned.map(a => `<div style="display:flex; justify-content:space-between; padding:3px 0; font-size:13px; border-bottom:0.5px solid var(--border);"><strong>${psEscape(a.ch)}</strong><span style="color:var(--text-secondary);">${a.triple ? `${psEscape(a.triple.size)} ${psEscape(a.triple.brand)} ${psEscape(a.triple.color)}` : '— unavailable —'}</span></div>`).join('')}
+          </div>`;
+        }).join('');
+      }
+    }
+  }
+  root.innerHTML = html;
+}
+
 function foilRenderLettersNumbers() {
   let html = `<div class="card">
+    <div class="trip-toggle" style="margin:0;">
+      <button class="trip-btn ${foilLNMode === 'browse' ? 'active' : ''}" onclick="foilSetLNMode('browse')"><i class="fa-solid fa-list"></i> Browse Inventory</button>
+      <button class="trip-btn ${foilLNMode === 'checker' ? 'active' : ''}" onclick="foilSetLNMode('checker')"><i class="fa-solid fa-magnifying-glass"></i> Phrase Checker</button>
+    </div>
+  </div>`;
+
+  if (foilLNMode === 'checker') {
+    html += foilPhraseCheckerShellHtml();
+    return html;
+  }
+
+  html += `<div class="card">
     <div class="trip-toggle" style="margin:0 0 0.6rem;">
       <button class="trip-btn ${foilCharTypeTab === 'letters' ? 'active' : ''}" onclick="foilSetCharTypeTab('letters')">Letters</button>
       <button class="trip-btn ${foilCharTypeTab === 'numbers' ? 'active' : ''}" onclick="foilSetCharTypeTab('numbers')">Numbers</button>
       <button class="trip-btn ${foilCharTypeTab === 'phrases' ? 'active' : ''}" onclick="foilSetCharTypeTab('phrases')">Phrases</button>
     </div>
     <div class="settings-field" style="margin-bottom:0.6rem;">
-      ${invSearchFieldHtml({ id: 'foil-search', placeholder: 'Search size, color, brand...', value: foilSearchQuery, onInput: 'foilSetSearch(this.value)', onClear: "foilSetSearch('')" })}
+      ${invSearchFieldHtml({ id: 'foil-search', placeholder: foilCharTypeTab === 'phrases' ? 'Search phrase, size, color, brand...' : 'Search size, color, brand...', value: foilSearchQuery, onInput: 'foilSetSearch(this.value)', onClear: "foilSetSearch('')" })}
     </div>
-    <button class="save-btn" onclick="foilOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${foilCharTypeLabel(foilCharTypeTab)} group</button>
+    ${foilCharTypeTab === 'phrases'
+      ? `<button class="save-btn" onclick="foilOpenPhraseAdd()"><i class="fa-solid fa-plus"></i> Add Phrase Set</button>`
+      : `<button class="save-btn" onclick="foilOpenAdd()"><i class="fa-solid fa-plus"></i> Add ${foilCharTypeLabel(foilCharTypeTab)} group</button>`}
   </div>`;
-  if (foilCharTypeTab === 'phrases') html += foilPhrasesManageHtml();
-  if (foilAddOpen) html += foilAddFormHtml();
-  html += `<div id="foil-ln-results-root"></div>`;
+
+  if (foilCharTypeTab === 'phrases') {
+    if (foilPhraseAddOpen) html += foilPhraseAddFormHtml();
+    html += `<div id="foil-phrase-results-root"></div>`;
+  } else {
+    if (foilAddOpen) html += foilAddFormHtml();
+    html += `<div id="foil-ln-results-root"></div>`;
+  }
 
   // Same reversible-delete safety net as Standard Latex's Recently Deleted — hidden entirely
-  // when empty so it never clutters a routine count.
+  // when empty so it never clutters a routine count. Shared across all three charTypes, same as
+  // before this redesign.
   const trashed = FOIL_ITEMS_TRASHED.filter(i => i.category === 'lettersNumbers');
   if (trashed.length > 0) {
     html += `<div class="section-label">Recently deleted (${trashed.length})</div>
@@ -11586,7 +12072,7 @@ function foilRenderLettersNumbers() {
       ${trashed.map(item => `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
           <div style="min-width:0;">
-            <div style="font-size:13px; font-weight:600;">${psEscape(item.size)} ${psEscape(item.color)}</div>
+            <div style="font-size:13px; font-weight:600;">${psEscape(foilItemLabel(item))}</div>
             <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'Generic/Unknown')} · ${foilCharTypeLabel(item.charType)}</div>
           </div>
           <div style="display:flex; gap:6px; flex-shrink:0;">
@@ -11597,6 +12083,13 @@ function foilRenderLettersNumbers() {
     </div>`;
   }
   return html;
+}
+// Dispatches the second render pass (filling in whichever *-results-root the shell above just
+// mounted) to the right renderer for the current mode/tab.
+function foilRenderLNContent() {
+  if (foilLNMode === 'checker') { foilRenderPhraseChecker(); return; }
+  if (foilCharTypeTab === 'phrases') { foilRenderPhraseGroups(); return; }
+  foilRenderResults();
 }
 
 // ── Decorator Shapes: flat single-quantity records, grouped by the shared Groups system ──
@@ -12030,7 +12523,7 @@ function foilRenderScreen() {
     html += `<div class="card" style="text-align:center; color:var(--text-secondary);">${psEscape((FOIL_CATEGORIES.find(c => c.id === foilCategoryTab) || {}).label || '')} is coming in a later phase.</div>`;
   }
   root.innerHTML = html;
-  if (foilCategoryTab === 'lettersNumbers') foilRenderResults();
+  if (foilCategoryTab === 'lettersNumbers') foilRenderLNContent();
   else if (foilCategoryTab === 'decoratorShapes') { pgRenderManage('foilDecoratorShapes'); foilRenderDecoratorResults(); }
 }
 
