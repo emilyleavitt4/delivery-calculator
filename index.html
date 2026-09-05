@@ -11641,13 +11641,83 @@ function foilDecoratorIsOrphaned(item) {
 function foilDecoratorOrphanedItems() {
   return FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && foilDecoratorIsOrphaned(i));
 }
+// psNewPrintGroupId() ids are always 'printgroup_<ms-timestamp>_<random>' — this decodes the real
+// creation time back out, exact rather than inferred. Used only by the orphan-recovery admin view
+// below: the dead id a record still carries is otherwise-meaningless, but its embedded timestamp is
+// genuine, deterministic evidence of when that family was created relative to every other dead id.
+function pgDecodeIdTimestamp(id) {
+  const m = /^printgroup_(\d+)_/.exec(id || '');
+  return m ? parseInt(m[1], 10) : null;
+}
+// One bucket per distinct dead printGroupId — the actual recovery key, since every record under
+// the same dead id was, by construction, saved while that one Shape Family tile was selected, so
+// they represent the same former family. Sorted oldest-first by the id's own decoded timestamp so
+// a person (or a follow-up analysis) can see natural clusters: a run of dead ids created within
+// the same second or two is one bad reseed event creating several families at once, not several
+// unrelated historical generations of the same family. Never guesses a name — purely descriptive.
+function foilDecoratorOrphanGroupedByOldId(items) {
+  const byOldId = {};
+  items.forEach(i => { (byOldId[i.printGroupId] = byOldId[i.printGroupId] || []).push(i); });
+  return Object.keys(byOldId).map(oldId => {
+    const groupItems = byOldId[oldId];
+    return {
+      oldId,
+      createdAt: pgDecodeIdTimestamp(oldId),
+      items: groupItems,
+      sizes: [...new Set(groupItems.map(i => i.size).filter(Boolean))].sort(foilNaturalSizeCompare),
+      brands: [...new Set(groupItems.map(i => i.brand).filter(Boolean))].sort(),
+      colors: [...new Set(groupItems.map(i => i.color).filter(Boolean))].sort(),
+      conditions: [...new Set(groupItems.map(i => i.condition).filter(Boolean))],
+      totalQuantity: groupItems.reduce((sum, i) => sum + (i.quantity || 0) + (i.packagesFull || 0), 0),
+      notes: [...new Set(groupItems.map(i => i.notes).filter(Boolean))],
+      storageLocations: [...new Set(groupItems.map(i => i.storageLocation).filter(Boolean))],
+    };
+  }).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+}
+// Read-only admin diagnostic — grouped by the dead reference itself rather than by size, since size
+// was never useful for identifying which former family a record belonged to. Reuses
+// foilDecoratorItemCardHtml for the actual records so the existing per-item Shape Family dropdown
+// (already the real reassignment mechanism) is right there once a mapping is known — this view
+// itself never writes anything.
+function foilDecoratorOrphanRepairHtml(items) {
+  const groups = foilDecoratorOrphanGroupedByOldId(items);
+  const header = `<div class="card" style="background:var(--warning-bg); margin-bottom:0.75rem;">
+    <div style="font-size:12px; color:var(--warning-text);"><strong>Admin repair view</strong> — read-only, grouped by the dead Shape Family reference each record still carries (oldest first; ids embed their real creation time, decoded below). ${groups.length} distinct dead ${groups.length === 1 ? 'ID' : 'IDs'} across ${items.length} record${items.length === 1 ? '' : 's'}.</div>
+  </div>`;
+  return header + groups.map(g => {
+    const key = 'foil-orphan-old:' + g.oldId;
+    const collapsed = invCollapsedGroups.has(key);
+    const when = g.createdAt ? new Date(g.createdAt).toLocaleString() : 'unknown';
+    return `<div class="inv-group-header" onclick="foilToggleDecoratorSizeGroup('${psJsKeyAttr(key)}')">
+      <span>${psEscape(g.oldId)} (${g.items.length})</span>
+      <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+    </div>
+    ${collapsed ? '' : `<div class="card" style="margin:0 0 0.5rem;">
+      <div style="font-size:12px; line-height:1.9;">
+        <div><strong>Created:</strong> ${psEscape(when)}</div>
+        <div><strong>Sizes:</strong> ${g.sizes.length ? psEscape(g.sizes.join(', ')) : '(none set)'}</div>
+        <div><strong>Brands:</strong> ${g.brands.length ? psEscape(g.brands.join(', ')) : '(none set)'}</div>
+        <div><strong>Colors:</strong> ${g.colors.length ? psEscape(g.colors.join(', ')) : '(none set)'}</div>
+        <div><strong>Conditions:</strong> ${g.conditions.length ? psEscape(g.conditions.join(', ')) : '(none set)'}</div>
+        <div><strong>Total quantity:</strong> ${g.totalQuantity}</div>
+        ${g.storageLocations.length ? `<div><strong>Storage locations:</strong> ${psEscape(g.storageLocations.join(', '))}</div>` : ''}
+        ${g.notes.length ? `<div><strong>Notes on file:</strong> ${psEscape(g.notes.join(' · '))}</div>` : ''}
+      </div>
+    </div>
+    <div class="inv-color-list">` + g.items.map(foilDecoratorItemCardHtml).join('') + `</div>`}`;
+  }).join('');
+}
 function foilSelectDecoratorFamily(groupId) {
   foilDecoratorSelectedFamily = groupId; // groupId is null for the Uncategorized tile
   foilDecoratorSearchQuery = '';
   foilDecoratorExpandedItem = null;
-  const items = groupId === FOIL_DECORATOR_ORPHAN_SENTINEL
-    ? foilDecoratorOrphanedItems()
-    : FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && i.printGroupId === groupId);
+  if (groupId === FOIL_DECORATOR_ORPHAN_SENTINEL) {
+    // Default every dead-id section to collapsed on entry, same convention as everywhere else.
+    foilDecoratorOrphanGroupedByOldId(foilDecoratorOrphanedItems()).forEach(g => invCollapsedGroups.add('foil-orphan-old:' + g.oldId));
+    foilRenderScreen();
+    return;
+  }
+  const items = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && i.printGroupId === groupId);
   // Default every size section within this family to collapsed on entry, same convention used
   // everywhere else in this app.
   foilDecoratorSizeGroupedItems(items).forEach(g => invCollapsedGroups.add(g.key));
@@ -13139,6 +13209,14 @@ function foilRenderDecoratorFamilyItems() {
   const items = foilDecoratorFilteredItems();
   if (items.length === 0) {
     root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No items in ${psEscape(familyLabel)} yet.</div>`;
+    return;
+  }
+  // Admin-only diagnostic: group the orphan bucket by which dead family reference a record shares
+  // (the actual recovery key) instead of by size, which was never useful for identifying which
+  // former family these records belonged to. Never shown to a non-admin — they still see the
+  // plain flat-by-size view below, same as any other family.
+  if (isOrphanBucket && invAdminUnlocked) {
+    root.innerHTML = foilDecoratorOrphanRepairHtml(items);
     return;
   }
   const searching = foilDecoratorSearchQuery.trim() !== '';
