@@ -10480,6 +10480,15 @@ let spAddDraft = null; // the in-progress add/edit form's values while open
 // pgDeleteGroup. A null/missing printGroupId on an item just means Uncategorized, a real bucket,
 // not an error state.
 let PRINT_GROUPS = [];
+// True only once pgInit()'s Firestore read has actually completed. An empty PRINT_GROUPS is
+// otherwise indistinguishable between "genuinely no groups exist yet" and "the real groups just
+// haven't loaded" — every automatic seeding/consolidation function below must check this before
+// creating or saving anything, or it can pgSave() a document containing only freshly-invented seed
+// groups, silently overwriting (pgSave is a full-document write, never a merge) whatever real
+// groups + ids already existed. This was the actual cause of Decorator Shapes items losing their
+// Shape Family: Foil's own items listener and this load are two independent async reads with no
+// ordering guarantee, so on an unlucky load the items listener could fire its reseed first.
+let pgGroupsLoaded = false;
 
 function spStartListeners() {
   spRenderScreen(); // shell first, same pattern as invStartListeners — Firestore is async
@@ -10841,6 +10850,10 @@ function spKindLabel(kind) { return (SP_KINDS.find(k => k.id === kind) || {}).la
 function psNewPrintGroupId() { return 'printgroup_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 function pgInit() {
   window.fbLoadPrintGroups().then(snap => {
+    // Set BEFORE the exists()-check below, since even a missing/malformed doc is a trustworthy
+    // answer ("there really are zero groups yet") once this read has actually completed — see
+    // pgGroupsLoaded's own comment for why that distinction matters.
+    pgGroupsLoaded = true;
     if (snap.exists() && Array.isArray(snap.data().groups)) {
       const loaded = snap.data().groups;
       // Backward-compatible defaulting, computed at load time only (never rewritten until the
@@ -10894,7 +10907,13 @@ function pgFindByName(kind, name) {
   const norm = s => (s || '').trim().toLowerCase();
   return PRINT_GROUPS.find(g => g.kind === kind && norm(g.name) === norm(name));
 }
-function pgAddGroup(kind, name, quantityMode, itemShape) {
+// Create-if-missing core — never saves on its own. A single interactive "add a group" action goes
+// through pgAddGroup below (create + save immediately); a batch reseed of many groups at once
+// (foilConsolidateDecoratorFamilies, invxConsolidateGroups, the *EnsureGroupsSeeded functions) uses
+// this directly so the whole batch collects in memory first and writes to Firestore exactly once,
+// rather than once per group — both fewer round trips and a much smaller window for a save to catch
+// PRINT_GROUPS mid-batch.
+function pgAddGroupNoSave(kind, name, quantityMode, itemShape) {
   const trimmed = (name || '').trim();
   if (!trimmed) return null;
   const existing = pgFindByName(kind, trimmed);
@@ -10905,7 +10924,12 @@ function pgAddGroup(kind, name, quantityMode, itemShape) {
   if (quantityMode) group.quantityMode = quantityMode;
   if (itemShape) group.itemShape = itemShape;
   PRINT_GROUPS.push(group);
-  pgSave();
+  return group;
+}
+function pgAddGroup(kind, name, quantityMode, itemShape) {
+  const before = PRINT_GROUPS.length;
+  const group = pgAddGroupNoSave(kind, name, quantityMode, itemShape);
+  if (PRINT_GROUPS.length > before) pgSave(); // only a genuinely new group needs persisting
   return group;
 }
 // Central kind -> {items, manageRootId, listRootId, rerender} registry. Every shared Group
@@ -11494,8 +11518,11 @@ const FOIL_DECORATOR_SIZE_SEED = {
   'Magic Arches': ['16"', '30"'],
 };
 function foilEnsureDecoratorGroupsSeeded() {
+  if (!pgGroupsLoaded) return; // an empty roster here might just mean "hasn't loaded yet"
   if (pgGroupsForKind('foilDecoratorShapes', true).length > 0) return;
-  FOIL_DECORATOR_GROUP_SEED.forEach(({ name, quantityMode }) => pgAddGroup('foilDecoratorShapes', name, quantityMode));
+  const before = PRINT_GROUPS.length;
+  FOIL_DECORATOR_GROUP_SEED.forEach(({ name, quantityMode }) => pgAddGroupNoSave('foilDecoratorShapes', name, quantityMode));
+  if (PRINT_GROUPS.length > before) pgSave();
 }
 // One-time, idempotent consolidation of the original 20 false groups into the Shape Family list
 // above. Detected by name (pgFindByName), so it's safe to run on every load — once an old name has
@@ -11534,12 +11561,20 @@ const DECORATOR_FAMILY_CONSOLIDATION = [
   { oldName: 'Starpoint Jumbo', newFamily: 'Starpoints' },
 ];
 function foilConsolidateDecoratorFamilies() {
+  // Guard against the exact race that orphaned real inventory's printGroupId: this runs on every
+  // Foil items snapshot, completely independent of whether PRINT_GROUPS has actually loaded from
+  // Firestore yet. Without this check, an empty (not-yet-loaded) PRINT_GROUPS would look identical
+  // to "nothing to consolidate," and the unconditional reseed below would mint 14 brand-new Shape
+  // Family ids and pgSave() over whatever real groups already existed in Firestore.
+  if (!pgGroupsLoaded) return;
+  let groupsChanged = false;
   DECORATOR_FAMILY_CONSOLIDATION.forEach(({ oldName, newFamily, inferSizeIfBlank }) => {
     const oldGroup = pgFindByName('foilDecoratorShapes', oldName);
-    if (!oldGroup) return; // already consolidated (or PRINT_GROUPS/FOIL_ITEMS just hasn't loaded
-                            // yet this call — safe either way, this re-runs on every items/groups
-                            // load and will catch any straggler the moment both are present).
-    const newGroup = pgAddGroup('foilDecoratorShapes', newFamily);
+    if (!oldGroup) return; // already consolidated — this re-runs on every load and is a no-op
+                            // once nothing old-named is left to find.
+    const beforeCount = PRINT_GROUPS.length;
+    const newGroup = pgAddGroupNoSave('foilDecoratorShapes', newFamily);
+    if (PRINT_GROUPS.length > beforeCount) groupsChanged = true;
     const affected = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && i.printGroupId === oldGroup.id);
     affected.forEach(item => {
       item.printGroupId = newGroup.id;
@@ -11548,22 +11583,27 @@ function foilConsolidateDecoratorFamilies() {
     });
     if (oldGroup.active !== false) {
       oldGroup.active = false; // archive, never delete — see comment above on why
-      pgSave();
+      groupsChanged = true;
     }
     if (affected.length > 0) console.warn(`Decorator Shapes migration: moved ${affected.length} item(s) from "${oldName}" into "${newFamily}".`);
   });
   const cubezDiamonds = pgFindByName('foilDecoratorShapes', 'Cubez / Diamonds');
   if (cubezDiamonds && cubezDiamonds.active !== false) {
     cubezDiamonds.active = false;
-    pgSave();
+    groupsChanged = true;
     console.warn('Decorator Shapes migration: archived "Cubez / Diamonds" (ambiguous shape split, not auto-migrated) — its items are untouched; reassign each to Cubez or Diamondz manually once checked.');
   }
   // Seed every family directly (not via foilEnsureDecoratorGroupsSeeded, whose "only seed from
   // zero" guard would otherwise skip this entirely once the old 20-group set already exists) —
-  // pgAddGroup's own exact-name dedup makes this safe to call unconditionally and repeatedly, for
-  // brand-new families (Cubez, Diamondz, Magic Arches) that have no old-group equivalent to migrate
-  // from, as well as ones already created by an earlier partial run.
-  FOIL_DECORATOR_GROUP_SEED.forEach(({ name, quantityMode }) => pgAddGroup('foilDecoratorShapes', name, quantityMode));
+  // pgAddGroupNoSave's own exact-name dedup makes this safe to call unconditionally and repeatedly,
+  // for brand-new families (Cubez, Diamondz, Magic Arches) that have no old-group equivalent to
+  // migrate from, as well as ones already created by an earlier partial run.
+  const beforeSeedCount = PRINT_GROUPS.length;
+  FOIL_DECORATOR_GROUP_SEED.forEach(({ name, quantityMode }) => pgAddGroupNoSave('foilDecoratorShapes', name, quantityMode));
+  if (PRINT_GROUPS.length > beforeSeedCount) groupsChanged = true;
+  // Every PRINT_GROUPS mutation this function can make (archiving, new consolidated families, the
+  // reseed) is batched into this one save, rather than one write per change.
+  if (groupsChanged) pgSave();
 }
 // Suggestions only — a <datalist>, never an enforced list — so a custom/additional size always
 // stays possible by just typing it.
@@ -11580,16 +11620,34 @@ let foilDecoratorAddDraft = null;
 let foilDecoratorAddSaving = false; // true only while the Firestore write is actually in flight
 let foilDecoratorAddError = null; // {code, message} of the most recent failed attempt, or null
 // undefined = showing the Shape Family tile grid. null = the "Uncategorized" pseudo-family is
-// selected (matches an item's own printGroupId being null/absent). Any other value = a real
-// printGroupId, drilled into that family's Size -> records view. This is the "primary browsing
-// hierarchy" state per the approved redesign. Deliberately NOT the same sentinel for "nothing
-// selected" and "Uncategorized selected" — those are two different, both-legitimate states.
+// selected (matches an item's own printGroupId being null/absent). FOIL_DECORATOR_ORPHAN_SENTINEL
+// = the "Needs Reassignment" pseudo-family (an item whose printGroupId is set but no longer
+// resolves to any current Shape Family — see the printGroupId/settings-printGroups investigation).
+// Any other value = a real printGroupId, drilled into that family's Size -> records view. This is
+// the "primary browsing hierarchy" state per the approved redesign. Deliberately NOT the same
+// sentinel for "nothing selected" and "Uncategorized selected" — those are two different, both-
+// legitimate states, and the orphan sentinel is a third, distinct from both.
 let foilDecoratorSelectedFamily;
+// A plain string, not a real Firestore id (psNewPrintGroupId's ids are always
+// "printgroup_<timestamp>_<random>" — this can never collide with one), used only to select the
+// diagnostic "Needs Reassignment" bucket rather than any real family.
+const FOIL_DECORATOR_ORPHAN_SENTINEL = '__needs_reassignment__';
+// An item counts as orphaned only when its printGroupId is actually set but doesn't resolve to any
+// group currently in PRINT_GROUPS — a null/blank printGroupId is genuinely Uncategorized, not
+// broken, and must never be swept into this bucket.
+function foilDecoratorIsOrphaned(item) {
+  return !!item.printGroupId && !pgFindGroup(item.printGroupId);
+}
+function foilDecoratorOrphanedItems() {
+  return FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && foilDecoratorIsOrphaned(i));
+}
 function foilSelectDecoratorFamily(groupId) {
   foilDecoratorSelectedFamily = groupId; // groupId is null for the Uncategorized tile
   foilDecoratorSearchQuery = '';
   foilDecoratorExpandedItem = null;
-  const items = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && i.printGroupId === groupId);
+  const items = groupId === FOIL_DECORATOR_ORPHAN_SENTINEL
+    ? foilDecoratorOrphanedItems()
+    : FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && i.printGroupId === groupId);
   // Default every size section within this family to collapsed on entry, same convention used
   // everywhere else in this app.
   foilDecoratorSizeGroupedItems(items).forEach(g => invCollapsedGroups.add(g.key));
@@ -12725,7 +12783,9 @@ function foilToggleDecoratorExpand(id) { foilDecoratorExpandedItem = foilDecorat
 // items, since the tile grid one level up has no items of its own to search.
 function foilDecoratorFilteredItems() {
   const q = foilDecoratorSearchQuery.trim().toLowerCase();
-  const items = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && i.printGroupId === foilDecoratorSelectedFamily);
+  const items = foilDecoratorSelectedFamily === FOIL_DECORATOR_ORPHAN_SENTINEL
+    ? foilDecoratorOrphanedItems()
+    : FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && i.printGroupId === foilDecoratorSelectedFamily);
   if (!q) return items;
   return items.filter(i => [i.brand, i.color, i.size, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)) || psMatchesTags(i, q));
 }
@@ -12752,7 +12812,10 @@ function foilToggleDecoratorSizeGroup(key) {
 // Add always happens from within an already-selected family — clicking that family's tile is
 // itself "Choose Shape Family," so the form only ever needs to ask for Size then details next.
 function foilOpenDecoratorAdd() {
-  if (foilDecoratorSelectedFamily === undefined) return; // Add only happens from within a family (Uncategorized included)
+  // Add only happens from within a real family (Uncategorized included) — the "Needs
+  // Reassignment" bucket is a diagnostic view over existing broken references, never a place to
+  // create a new item against a printGroupId that isn't real.
+  if (foilDecoratorSelectedFamily === undefined || foilDecoratorSelectedFamily === FOIL_DECORATOR_ORPHAN_SENTINEL) return;
   foilDecoratorAddOpen = true;
   foilDecoratorAddDraft = {
     brand: '', brandOther: '',
@@ -13066,12 +13129,13 @@ function foilDecoratorItemCardHtml(item) {
 function foilRenderDecoratorFamilyItems() {
   const root = document.getElementById('foil-decorator-results-root');
   if (!root) return;
-  const group = pgFindGroup(foilDecoratorSelectedFamily);
-  // Uncategorized (foilDecoratorSelectedFamily === null) legitimately has no real group to find —
-  // only bounce back to the tile grid if a REAL id was selected and it's now genuinely missing
-  // (e.g. deleted while this screen was open).
-  if (foilDecoratorSelectedFamily && !group) { foilDecoratorSelectedFamily = undefined; foilRenderScreen(); return; }
-  const familyLabel = group ? group.name : 'Uncategorized';
+  const isOrphanBucket = foilDecoratorSelectedFamily === FOIL_DECORATOR_ORPHAN_SENTINEL;
+  const group = isOrphanBucket ? null : pgFindGroup(foilDecoratorSelectedFamily);
+  // Uncategorized (foilDecoratorSelectedFamily === null) legitimately has no real group to find,
+  // and the orphan bucket never has one by definition — only bounce back to the tile grid if a REAL
+  // id was selected and it's now genuinely missing (e.g. deleted while this screen was open).
+  if (!isOrphanBucket && foilDecoratorSelectedFamily && !group) { foilDecoratorSelectedFamily = undefined; foilRenderScreen(); return; }
+  const familyLabel = isOrphanBucket ? 'Needs Reassignment' : (group ? group.name : 'Uncategorized');
   const items = foilDecoratorFilteredItems();
   if (items.length === 0) {
     root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No items in ${psEscape(familyLabel)} yet.</div>`;
@@ -13104,9 +13168,11 @@ function foilRenderDecoratorShapes() {
     html += `<div class="section-label" style="margin-top:0;">Shape Families</div>`;
     const families = pgGroupsForKind('foilDecoratorShapes', false);
     const uncategorizedCount = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && !i.printGroupId).length;
+    const orphanedCount = foilDecoratorOrphanedItems().length;
     html += `<div class="tool-grid">
       ${families.map(foilDecoratorFamilyTileHtml).join('')}
       ${uncategorizedCount > 0 ? `<div class="tool-tile" onclick="foilSelectDecoratorFamily(null)"><div class="tool-tile-icon"><i class="fa-solid fa-shapes"></i></div><div class="tool-tile-title">Uncategorized (${uncategorizedCount})</div></div>` : ''}
+      ${orphanedCount > 0 ? `<div class="tool-tile" style="border-color:var(--warning-text);" onclick="foilSelectDecoratorFamily('${FOIL_DECORATOR_ORPHAN_SENTINEL}')"><div class="tool-tile-icon" style="background:var(--warning-bg); color:var(--warning-text);"><i class="fa-solid fa-triangle-exclamation"></i></div><div class="tool-tile-title">Needs Reassignment (${orphanedCount})</div></div>` : ''}
     </div>`;
 
     const trashed = FOIL_ITEMS_TRASHED.filter(i => i.category === 'decoratorShapes');
@@ -13129,17 +13195,19 @@ function foilRenderDecoratorShapes() {
     return html;
   }
 
-  const group = pgFindGroup(foilDecoratorSelectedFamily);
-  const familyName = group ? group.name : 'Uncategorized';
+  const isOrphanBucket = foilDecoratorSelectedFamily === FOIL_DECORATOR_ORPHAN_SENTINEL;
+  const group = isOrphanBucket ? null : pgFindGroup(foilDecoratorSelectedFamily);
+  const familyName = isOrphanBucket ? 'Needs Reassignment' : (group ? group.name : 'Uncategorized');
   let html = `<div class="card">
     <div style="display:flex; align-items:center; gap:10px; margin-bottom:0.6rem;">
       <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilBackToDecoratorFamilies()"><i class="fa-solid fa-arrow-left"></i> Shape Families</button>
       <strong style="font-size:15px;">${psEscape(familyName)}</strong>
     </div>
+    ${isOrphanBucket ? `<div style="font-size:12px; color:var(--warning-text); margin-bottom:0.6rem;"><i class="fa-solid fa-triangle-exclamation"></i> These items still have all their original data, but the Shape Family they were saved under no longer exists. Nothing was deleted — open each item below and choose its correct Shape Family from the dropdown.</div>` : ''}
     <div class="settings-field" style="margin-bottom:0.6rem;">
       ${invSearchFieldHtml({ id: 'foil-decorator-search', placeholder: 'Search size, brand, color, storage...', value: foilDecoratorSearchQuery, onInput: 'foilSetDecoratorSearch(this.value)', onClear: "foilSetDecoratorSearch('')" })}
     </div>
-    <button class="save-btn" onclick="foilOpenDecoratorAdd()"><i class="fa-solid fa-plus"></i> Add ${psEscape(familyName)}</button>
+    ${isOrphanBucket ? '' : `<button class="save-btn" onclick="foilOpenDecoratorAdd()"><i class="fa-solid fa-plus"></i> Add ${psEscape(familyName)}</button>`}
   </div>`;
   if (foilDecoratorAddOpen) html += foilDecoratorAddFormHtml();
   html += `<div id="foil-decorator-results-root"></div>`;
@@ -13213,9 +13281,13 @@ const INVX_GROUP_SEEDS = {
   ],
 };
 function invxEnsureGroupsSeeded(category) {
+  if (!pgGroupsLoaded) return; // see pgGroupsLoaded's own comment — an empty roster here might
+                                // just mean "hasn't loaded yet," not "genuinely zero groups"
   const seed = INVX_GROUP_SEEDS[category];
   if (!seed || pgGroupsForKind(category, true).length > 0) return;
-  seed.forEach(({ name, itemShape }) => pgAddGroup(category, name, null, itemShape));
+  const before = PRINT_GROUPS.length;
+  seed.forEach(({ name, itemShape }) => pgAddGroupNoSave(category, name, null, itemShape));
+  if (PRINT_GROUPS.length > before) pgSave();
 }
 // One-time, idempotent cleanup: a few Add-Ons/Assets starter names from an earlier pass used
 // different punctuation than the finalized names here (e.g. "Fringe / Tassels" vs. "Fringe &
@@ -13226,23 +13298,32 @@ function invxEnsureGroupsSeeded(category) {
 // name, so those are left completely untouched — new groups are added alongside them instead of
 // forcing a reclassification. Only fires if the new name isn't already separately in use (e.g. this
 // already ran, or the business already created one by hand) so it can never merge two groups.
-// Runs on every Print-Groups load (this only touches PRINT_GROUPS, not item data, so — unlike the
-// Decorator Shapes item-repointing migration — it has no load-order race to guard against).
+// Runs on every Print-Groups load. Correction to this comment's earlier claim: this DOES have the
+// same load-order race as the Decorator Shapes item-repointing migration — it never repoints an
+// ITEM's printGroupId directly, but its unconditional reseed below still mints brand-new group ids
+// via pgAddGroup(NoSave) if PRINT_GROUPS looks empty, which silently orphans any item's existing
+// printGroupId reference just as effectively. Guarded by pgGroupsLoaded below for exactly that
+// reason — see its own comment for the full mechanism.
 const INVX_GROUP_RENAMES = {
   addOns: [{ from: 'Fringe / Tassels', to: 'Fringe & Tassels' }, { from: 'Florals / Greenery', to: 'Florals & Greenery' }],
   assets: [{ from: 'Backdrops / Walls', to: 'Backdrops & Walls' }, { from: 'Props', to: 'Props / Signs' }],
 };
 function invxConsolidateGroups() {
+  if (!pgGroupsLoaded) return;
+  let groupsChanged = false;
   Object.entries(INVX_GROUP_RENAMES).forEach(([kind, renames]) => {
     renames.forEach(({ from, to }) => {
       const g = pgFindByName(kind, from);
-      if (g && !pgFindByName(kind, to)) { g.name = to; pgSave(); }
+      if (g && !pgFindByName(kind, to)) { g.name = to; groupsChanged = true; }
     });
   });
+  const before = PRINT_GROUPS.length;
   Object.keys(INVX_GROUP_SEEDS).forEach(category => {
-    INVX_GROUP_SEEDS[category].forEach(({ name, itemShape }) => pgAddGroup(category, name, null, itemShape));
+    INVX_GROUP_SEEDS[category].forEach(({ name, itemShape }) => pgAddGroupNoSave(category, name, null, itemShape));
   });
-  if (typeof ASSETS_GROUP_SEED !== 'undefined') ASSETS_GROUP_SEED.forEach(name => pgAddGroup('assets', name));
+  if (typeof ASSETS_GROUP_SEED !== 'undefined') ASSETS_GROUP_SEED.forEach(name => pgAddGroupNoSave('assets', name));
+  if (PRINT_GROUPS.length > before) groupsChanged = true;
+  if (groupsChanged) pgSave();
 }
 // Determines which fields an item's Add/Edit form and card show. A group with no itemShape (every
 // non-Add-Ons/Framework kind, and any ad-hoc group a business creates on the fly) defaults to
@@ -13952,8 +14033,11 @@ const ASSETS_GROUP_SEED = [
   'Props / Signs', 'Reusable Lighting', 'Weights / Sandbags', 'Permanent Framework', 'Other',
 ];
 function assetsEnsureGroupsSeeded() {
+  if (!pgGroupsLoaded) return;
   if (pgGroupsForKind('assets', true).length > 0) return;
-  ASSETS_GROUP_SEED.forEach(name => pgAddGroup('assets', name));
+  const before = PRINT_GROUPS.length;
+  ASSETS_GROUP_SEED.forEach(name => pgAddGroupNoSave('assets', name));
+  if (PRINT_GROUPS.length > before) pgSave();
 }
 function psNewAssetId() { return 'asset_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 let assetsSearchQuery = '';
@@ -14365,8 +14449,11 @@ const SUPPLIES_GROUP_SEED = [
   'Transport / Protection / Packaging', 'General Build / Shop Supplies', 'Balloon Delivery Supplies', 'Other',
 ];
 function suppliesEnsureGroupsSeeded() {
+  if (!pgGroupsLoaded) return;
   if (pgGroupsForKind('supplies', true).length > 0) return;
-  SUPPLIES_GROUP_SEED.forEach(name => pgAddGroup('supplies', name));
+  const before = PRINT_GROUPS.length;
+  SUPPLIES_GROUP_SEED.forEach(name => pgAddGroupNoSave('supplies', name));
+  if (PRINT_GROUPS.length > before) pgSave();
 }
 function psNewSupplyId() { return 'supply_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 let suppliesSearchQuery = '';
@@ -14760,8 +14847,12 @@ function fbLightweightContext() {
       ctx.category = foilCategoryTab;
       if (foilCategoryTab === 'lettersNumbers' && typeof foilCharTypeTab !== 'undefined') ctx.subTab = foilCharTypeTab;
       if (foilCategoryTab === 'decoratorShapes' && typeof foilDecoratorSelectedFamily !== 'undefined' && foilDecoratorSelectedFamily !== undefined) {
-        const g = pgFindGroup(foilDecoratorSelectedFamily);
-        ctx.family = g ? g.name : 'Uncategorized';
+        if (foilDecoratorSelectedFamily === FOIL_DECORATOR_ORPHAN_SENTINEL) {
+          ctx.family = 'Needs Reassignment';
+        } else {
+          const g = pgFindGroup(foilDecoratorSelectedFamily);
+          ctx.family = g ? g.name : 'Uncategorized';
+        }
       }
     } else if (view === 'inventory-specialty' && typeof spKindTab !== 'undefined') {
       ctx.kind = spKindTab;
@@ -17125,8 +17216,8 @@ function psBreadcrumbTail(view) {
     if (foilCategoryTab === 'lettersNumbers' && typeof foilCharTypeTab !== 'undefined') {
       tail.push({ label: foilCharTypeTab.charAt(0).toUpperCase() + foilCharTypeTab.slice(1), onClick: null });
     } else if (foilCategoryTab === 'decoratorShapes' && typeof foilDecoratorSelectedFamily !== 'undefined' && foilDecoratorSelectedFamily !== undefined) {
-      const g = pgFindGroup(foilDecoratorSelectedFamily);
-      tail.push({ label: g ? g.name : 'Uncategorized', onClick: null });
+      const g = foilDecoratorSelectedFamily === FOIL_DECORATOR_ORPHAN_SENTINEL ? null : pgFindGroup(foilDecoratorSelectedFamily);
+      tail.push({ label: foilDecoratorSelectedFamily === FOIL_DECORATOR_ORPHAN_SENTINEL ? 'Needs Reassignment' : (g ? g.name : 'Uncategorized'), onClick: null });
     }
     return tail;
   }
