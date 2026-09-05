@@ -11679,10 +11679,47 @@ function foilDecoratorOrphanGroupedByOldId(items) {
 // foilDecoratorItemCardHtml for the actual records so the existing per-item Shape Family dropdown
 // (already the real reassignment mechanism) is right there once a mapping is known — this view
 // itself never writes anything.
+// Plain-text dump of the same data the repair view shows, one block per dead id — meant to be
+// copied and handed over whole for offline recovery analysis (timestamp-cluster + seed-order
+// mapping) rather than transcribed by hand from the UI. Read-only, no different from just looking
+// at the screen; this only formats what's already there.
+function foilDecoratorOrphanSummaryText(items) {
+  const groups = foilDecoratorOrphanGroupedByOldId(items);
+  const lines = [
+    'DECORATOR SHAPES ORPHAN RECOVERY SUMMARY',
+    `Generated: ${new Date().toLocaleString()}`,
+    `${groups.length} distinct dead ID(s) across ${items.length} record(s)`,
+    '',
+  ];
+  groups.forEach((g, idx) => {
+    lines.push(`[${idx + 1}] ${g.oldId}`);
+    lines.push(`    Created: ${g.createdAt ? new Date(g.createdAt).toISOString() : 'unknown'} (raw ms: ${g.createdAt})`);
+    lines.push(`    Records: ${g.items.length}`);
+    lines.push(`    Sizes: ${g.sizes.length ? g.sizes.join(', ') : '(none set)'}`);
+    lines.push(`    Brands: ${g.brands.length ? g.brands.join(', ') : '(none set)'}`);
+    lines.push(`    Colors: ${g.colors.length ? g.colors.join(', ') : '(none set)'}`);
+    lines.push(`    Conditions: ${g.conditions.length ? g.conditions.join(', ') : '(none set)'}`);
+    lines.push(`    Total quantity: ${g.totalQuantity}`);
+    if (g.storageLocations.length) lines.push(`    Storage locations: ${g.storageLocations.join(', ')}`);
+    if (g.notes.length) lines.push(`    Notes on file: ${g.notes.join(' | ')}`);
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+function foilCopyOrphanSummary() {
+  const text = foilDecoratorOrphanSummaryText(foilDecoratorOrphanedItems());
+  const fallback = () => { window.prompt('Copy failed automatically — select all and copy manually:', text); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => alert('Copied — paste this into your message.'), fallback);
+  } else {
+    fallback();
+  }
+}
 function foilDecoratorOrphanRepairHtml(items) {
   const groups = foilDecoratorOrphanGroupedByOldId(items);
   const header = `<div class="card" style="background:var(--warning-bg); margin-bottom:0.75rem;">
-    <div style="font-size:12px; color:var(--warning-text);"><strong>Admin repair view</strong> — read-only, grouped by the dead Shape Family reference each record still carries (oldest first; ids embed their real creation time, decoded below). ${groups.length} distinct dead ${groups.length === 1 ? 'ID' : 'IDs'} across ${items.length} record${items.length === 1 ? '' : 's'}.</div>
+    <div style="font-size:12px; color:var(--warning-text); margin-bottom:0.5rem;"><strong>Admin repair view</strong> — read-only, grouped by the dead Shape Family reference each record still carries (oldest first; ids embed their real creation time, decoded below). ${groups.length} distinct dead ${groups.length === 1 ? 'ID' : 'IDs'} across ${items.length} record${items.length === 1 ? '' : 's'}.</div>
+    <button class="icon-btn" style="width:auto; padding:5px 12px; font-size:12px; border:0.5px solid var(--warning-text); border-radius:var(--radius-sm); color:var(--warning-text);" onclick="foilCopyOrphanSummary()"><i class="fa-solid fa-copy"></i> Copy Summary for Recovery Analysis</button>
   </div>`;
   return header + groups.map(g => {
     const key = 'foil-orphan-old:' + g.oldId;
