@@ -1058,6 +1058,10 @@
   window.fbOnSnapshotFoilItems = (onNext, onError) => onSnapshot(foilItemsRef, onNext, onError);
   window.fbSaveFoilItem = (item) => setDoc(doc(foilItemsRef, item.id), item);
   window.fbDeleteFoilItem = (id) => deleteDoc(doc(foilItemsRef, id));
+  // BUSINESS_ID is only in scope inside this module script — exposed once here so the classic
+  // script's save-diagnostic logging can print the real path without hardcoding the business id
+  // a second time.
+  window.fbFoilItemsPath = (id) => `businesses/${BUSINESS_ID}/foilItems/${id}`;
 
   // Inventory "extras" (Add-Ons live now; Job Materials/Job Components-Hardware/Raw Framing
   // reserved for later) — one flat collection with a `category` discriminator, same proven shape
@@ -11573,6 +11577,8 @@ let foilDecoratorSearchQuery = '';
 let foilDecoratorExpandedItem = null;
 let foilDecoratorAddOpen = false;
 let foilDecoratorAddDraft = null;
+let foilDecoratorAddSaving = false; // true only while the Firestore write is actually in flight
+let foilDecoratorAddError = null; // {code, message} of the most recent failed attempt, or null
 // undefined = showing the Shape Family tile grid. null = the "Uncategorized" pseudo-family is
 // selected (matches an item's own printGroupId being null/absent). Any other value = a real
 // printGroupId, drilled into that family's Size -> records view. This is the "primary browsing
@@ -11607,6 +11613,8 @@ let foilSearchQuery = '';
 let foilExpandedItem = null; // reused for the Phrases variant list's own row expand/collapse
 let foilAddOpen = false;
 let foilAddDraft = null;
+let foilAddSaving = false;
+let foilAddError = null;
 
 function foilCharsFor(charType) { return FOIL_CHARACTERS[charType] || []; }
 function foilCharTypeLabel(charType) { return charType === 'letters' ? 'Letters' : charType === 'numbers' ? 'Numbers' : 'Phrases'; }
@@ -11662,11 +11670,58 @@ function foilMigrateLegacyPhraseItems() {
 }
 function psNewFoilItemId() { return 'foilitem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 function foilFindItem(id) { return FOIL_ITEMS.find(i => i.id === id) || FOIL_ITEMS_TRASHED.find(i => i.id === id); }
+// Shared diagnostic logger for every Foil save path (plain inline-field saves and the awaited Add
+// flows alike) — always prints who's acting, the exact document id/path, and the item's own
+// category/printGroupId, so a real Firestore failure (permission-denied or otherwise) is traceable
+// from the console even when the caller doesn't surface it as a persistent on-screen error.
+function foilLogSaveOutcome(action, item, err) {
+  const who = (window.fbAuth && window.fbAuth.currentUser && window.fbAuth.currentUser.email) || '(not signed in)';
+  const context = {
+    who,
+    id: item.id,
+    path: window.fbFoilItemsPath(item.id),
+    category: item.category,
+    printGroupId: item.printGroupId,
+  };
+  if (err) console.error(`[Foil save FAILED] ${action}`, { ...context, code: err.code, message: err.message });
+  else console.log(`[Foil save OK] ${action}`, context);
+}
+// Plain fire-and-forget save, used by every inline field edit (quantity/notes/storage/tags/etc.)
+// across all Foil item types — unchanged in shape from before (still alerts and logs on failure,
+// still never blocks the caller), just with richer diagnostics. Deliberately does NOT reject/throw
+// back to its caller: none of those callers await it or reflect a "saved" state that would need
+// correcting, so there's nothing unsafe about its existing optimistic behavior. The three Add
+// flows (Decorator Shapes/Letters & Numbers/Phrases) do NOT use this — they call
+// window.fbSaveFoilItem directly so they can await the real outcome before ever showing success.
 function foilSaveItem(item) {
-  window.fbSaveFoilItem(item).catch(err => {
-    console.error(err);
-    alert("Couldn't save that change — check your connection and try again.");
-  });
+  return window.fbSaveFoilItem(item).then(
+    () => foilLogSaveOutcome('foilSaveItem', item),
+    err => {
+      foilLogSaveOutcome('foilSaveItem', item, err);
+      alert(`Couldn't save that change — check your connection and try again.${err.code ? ` (${err.code})` : ''}`);
+    }
+  );
+}
+// A persistent (not auto-dismissing) inline error banner for a failed Add — shown until the next
+// attempt succeeds or the form is closed, so a real failure can never be missed the way a native
+// alert() can be if someone navigates or refreshes before reading it.
+function foilSaveErrorBannerHtml(error) {
+  if (!error) return '';
+  return `<div style="background:var(--warning-bg); border:0.5px solid var(--warning-text); border-radius:var(--radius-sm); padding:0.6rem 0.75rem; margin-bottom:0.6rem; font-size:12px; color:var(--warning-text);">
+    <strong><i class="fa-solid fa-triangle-exclamation"></i> Couldn't save — nothing was recorded.</strong><br>
+    ${psEscape(error.code || 'unknown')}: ${psEscape(error.message || 'No further detail available.')}
+  </div>`;
+}
+// Brief, self-removing "Saved" confirmation inserted directly into the given results root right
+// after a successful Add — no render-cycle state to track, it just deletes itself.
+function foilShowSavedToast(rootId) {
+  const root = document.getElementById(rootId);
+  if (!root) return;
+  const toast = document.createElement('div');
+  toast.className = 'saved-msg';
+  toast.textContent = '✓ Saved';
+  root.prepend(toast);
+  setTimeout(() => { if (toast.isConnected) toast.remove(); }, 1800);
 }
 function foilBlankQuantities(charType) {
   const q = {};
@@ -11795,15 +11850,17 @@ function foilOpenAdd() {
   foilAddDraft = { charType: foilCharTypeTab, size: '', color: '', brand: '', brandOther: '', costPerFoil: '', storageLocation: '' };
   foilRenderScreen();
 }
-function foilCancelAdd() { foilAddOpen = false; foilAddDraft = null; foilRenderScreen(); }
+function foilCancelAdd() { foilAddOpen = false; foilAddDraft = null; foilAddError = null; foilRenderScreen(); }
 function foilSetDraftField(field, value) {
   if (!foilAddDraft) return;
   foilAddDraft[field] = value;
   if (field === 'charType') foilRenderScreen(); // form title depends on this
   else if (field === 'brand') foilRenderScreen(); // "Other" needs to reveal its free-text input
 }
-function foilSubmitAdd() {
-  if (!foilAddDraft) return;
+// Awaits the real Firestore write before treating this as saved — see foilSubmitDecoratorAdd's
+// comment for the full rationale (same shared save infrastructure, same fix).
+async function foilSubmitAdd() {
+  if (!foilAddDraft || foilAddSaving) return;
   const d = foilAddDraft;
   const size = (d.size || '').trim();
   const color = (d.color || '').trim();
@@ -11834,13 +11891,29 @@ function foilSubmitAdd() {
     quantities: foilBlankQuantities(d.charType),
     active: true,
   };
-  FOIL_ITEMS.push(item);
-  foilSaveItem(item);
-  foilAddOpen = false;
-  foilAddDraft = null;
-  foilCharTypeTab = d.charType;
-  foilExpandLNPath(d.charType, brand, size, color);
+
+  foilAddSaving = true;
+  foilAddError = null;
   foilRenderScreen();
+
+  try {
+    await window.fbSaveFoilItem(item);
+    foilLogSaveOutcome('foilSubmitAdd', item);
+    FOIL_ITEMS.push(item);
+    foilAddOpen = false;
+    foilAddDraft = null;
+    foilAddSaving = false;
+    foilAddError = null;
+    foilCharTypeTab = d.charType;
+    foilExpandLNPath(d.charType, brand, size, color);
+    foilRenderScreen();
+    foilShowSavedToast('foil-ln-results-root');
+  } catch (err) {
+    foilLogSaveOutcome('foilSubmitAdd', item, err);
+    foilAddSaving = false;
+    foilAddError = { code: err.code, message: err.message };
+    foilRenderScreen();
+  }
 }
 // Plain saves for now, matching Specialty Latex Phase 1 — no ledger involved yet.
 function foilUpdateField(itemId, field, value) {
@@ -11992,6 +12065,7 @@ function foilAddFormHtml() {
       <strong style="font-size:14px;">Add ${foilCharTypeLabel(d.charType)} group</strong>
       <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
+    ${foilSaveErrorBannerHtml(foilAddError)}
     <div class="settings-field"><label>Letters or Numbers</label>
       <select onchange="foilSetDraftField('charType', this.value)">
         <option value="letters" ${d.charType === 'letters' ? 'selected' : ''}>Letters (A-Z)</option>
@@ -12018,7 +12092,7 @@ function foilAddFormHtml() {
       <div class="settings-field" style="margin-bottom:0"><label>Cost per foil <span style="font-weight:400;">(optional)</span></label><input type="number" step="0.01" min="0" placeholder="e.g. 2.50" value="${invAttr(d.costPerFoil)}" oninput="foilSetDraftField('costPerFoil', this.value)"></div>
       <div class="settings-field" style="margin-bottom:0"><label>Storage location <span style="font-weight:400;">(optional)</span></label><input type="text" placeholder="e.g. Shelf 3" value="${invAttr(d.storageLocation)}" oninput="foilSetDraftField('storageLocation', this.value)"></div>
     </div>
-    <button class="save-btn" onclick="foilSubmitAdd()">Create group</button>
+    <button class="save-btn" ${foilAddSaving ? 'disabled' : ''} onclick="foilSubmitAdd()">${foilAddSaving ? 'Saving…' : 'Create group'}</button>
   </div>`;
 }
 
@@ -12103,6 +12177,8 @@ function foilRenderResults() {
 // same shape family as Specialty Latex/Decorator Shapes rather than Letters/Numbers' quantities map.
 let foilPhraseAddOpen = false;
 let foilPhraseAddDraft = null;
+let foilPhraseAddSaving = false;
+let foilPhraseAddError = null;
 let foilPhraseEditDetailsItemId = null;
 let foilPhraseEditDetailsDraft = null;
 
@@ -12147,13 +12223,15 @@ function foilOpenPhraseAdd() {
   foilPhraseAddDraft = { phraseText: '', size: '', color: '', brand: '', quantity: 0, styleNotes: '', storageLocation: '' };
   foilRenderScreen();
 }
-function foilCancelPhraseAdd() { foilPhraseAddOpen = false; foilPhraseAddDraft = null; foilRenderScreen(); }
+function foilCancelPhraseAdd() { foilPhraseAddOpen = false; foilPhraseAddDraft = null; foilPhraseAddError = null; foilRenderScreen(); }
 function foilSetPhraseDraftField(field, value) {
   if (!foilPhraseAddDraft) return;
   foilPhraseAddDraft[field] = value;
 }
-function foilSubmitPhraseAdd() {
-  if (!foilPhraseAddDraft) return;
+// Awaits the real Firestore write before treating this as saved — see foilSubmitDecoratorAdd's
+// comment for the full rationale (same shared save infrastructure, same fix).
+async function foilSubmitPhraseAdd() {
+  if (!foilPhraseAddDraft || foilPhraseAddSaving) return;
   const d = foilPhraseAddDraft;
   const phraseText = (d.phraseText || '').trim();
   if (!phraseText) { alert('Enter the phrase or text.'); return; }
@@ -12183,13 +12261,29 @@ function foilSubmitPhraseAdd() {
     storageLocation: (d.storageLocation || '').trim(),
     active: true,
   };
-  FOIL_ITEMS.push(item);
-  foilSaveItem(item);
-  foilPhraseAddOpen = false;
-  foilPhraseAddDraft = null;
-  invCollapsedGroups.delete('foil-phrase-group:' + phraseText);
-  foilExpandedItem = item.id;
+
+  foilPhraseAddSaving = true;
+  foilPhraseAddError = null;
   foilRenderScreen();
+
+  try {
+    await window.fbSaveFoilItem(item);
+    foilLogSaveOutcome('foilSubmitPhraseAdd', item);
+    FOIL_ITEMS.push(item);
+    foilPhraseAddOpen = false;
+    foilPhraseAddDraft = null;
+    foilPhraseAddSaving = false;
+    foilPhraseAddError = null;
+    invCollapsedGroups.delete('foil-phrase-group:' + phraseText);
+    foilExpandedItem = item.id;
+    foilRenderScreen();
+    foilShowSavedToast('foil-phrase-results-root');
+  } catch (err) {
+    foilLogSaveOutcome('foilSubmitPhraseAdd', item, err);
+    foilPhraseAddSaving = false;
+    foilPhraseAddError = { code: err.code, message: err.message };
+    foilRenderScreen();
+  }
 }
 // Quantity/Style-Notes/Storage Location are operational, not identity — directly editable, same
 // convention as every other category's non-identity fields.
@@ -12265,6 +12359,7 @@ function foilPhraseAddFormHtml() {
       <strong style="font-size:14px;">Add Phrase Set</strong>
       <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelPhraseAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
+    ${foilSaveErrorBannerHtml(foilPhraseAddError)}
     <div class="settings-field"><label>Phrase / Text</label>
       <input type="text" list="foil-phrase-suggestions" placeholder="e.g. Happy Birthday" value="${invAttr(d.phraseText)}" oninput="foilSetPhraseDraftField('phraseText', this.value)">
       <datalist id="foil-phrase-suggestions">${foilKnownPhraseTexts().map(p => `<option value="${invAttr(p)}">`).join('')}</datalist>
@@ -12292,7 +12387,7 @@ function foilPhraseAddFormHtml() {
     <div class="settings-field"><label>Storage location <span style="font-weight:400;">(optional)</span></label>
       <input type="text" placeholder="e.g. Shelf 3" value="${invAttr(d.storageLocation)}" oninput="foilSetPhraseDraftField('storageLocation', this.value)">
     </div>
-    <button class="save-btn" onclick="foilSubmitPhraseAdd()">Save variant</button>
+    <button class="save-btn" ${foilPhraseAddSaving ? 'disabled' : ''} onclick="foilSubmitPhraseAdd()">${foilPhraseAddSaving ? 'Saving…' : 'Save variant'}</button>
   </div>`;
 }
 function foilPhraseVariantCardHtml(item) {
@@ -12668,7 +12763,7 @@ function foilOpenDecoratorAdd() {
   };
   foilRenderScreen();
 }
-function foilCancelDecoratorAdd() { foilDecoratorAddOpen = false; foilDecoratorAddDraft = null; foilRenderScreen(); }
+function foilCancelDecoratorAdd() { foilDecoratorAddOpen = false; foilDecoratorAddDraft = null; foilDecoratorAddError = null; foilRenderScreen(); }
 function foilSetDecoratorDraftField(field, value) {
   if (!foilDecoratorAddDraft) return;
   foilDecoratorAddDraft[field] = value;
@@ -12676,8 +12771,13 @@ function foilSetDecoratorDraftField(field, value) {
   // freshly-rendered form needs to show.
   if (field === 'brand' || field === 'condition') foilRenderScreen();
 }
-function foilSubmitDecoratorAdd() {
-  if (!foilDecoratorAddDraft || foilDecoratorSelectedFamily === undefined) return;
+// Awaits the real Firestore write before ever treating this as saved — the record is not pushed
+// into FOIL_ITEMS, the form is not closed, and nothing is cleared until fbSaveFoilItem's promise
+// actually resolves. On failure, the draft/form stay exactly as entered and a persistent error
+// banner (foilSaveErrorBannerHtml) shows the real Firestore error code/message, rather than the
+// native alert() a person can lose by navigating or refreshing before it's read.
+async function foilSubmitDecoratorAdd() {
+  if (!foilDecoratorAddDraft || foilDecoratorSelectedFamily === undefined || foilDecoratorAddSaving) return;
   const d = foilDecoratorAddDraft;
   if (d.brand === '') { alert('Pick a brand, or choose Generic/Unknown.'); return; }
   const brand = resolveBrandValue(d.brand, d.brandOther);
@@ -12715,13 +12815,29 @@ function foilSubmitDecoratorAdd() {
     hasPartialPackage: effectiveMode === 'packages' ? !!d.hasPartialPackage : false,
     active: true,
   };
-  FOIL_ITEMS.push(item);
-  foilSaveItem(item);
-  foilDecoratorAddOpen = false;
-  foilDecoratorAddDraft = null;
-  invCollapsedGroups.delete('foil-decorator-size:' + printGroupId + '|' + size);
-  foilDecoratorExpandedItem = item.id;
+
+  foilDecoratorAddSaving = true;
+  foilDecoratorAddError = null;
   foilRenderScreen();
+
+  try {
+    await window.fbSaveFoilItem(item);
+    foilLogSaveOutcome('foilSubmitDecoratorAdd', item);
+    FOIL_ITEMS.push(item); // only reflected locally once Firestore has actually confirmed it
+    foilDecoratorAddOpen = false;
+    foilDecoratorAddDraft = null;
+    foilDecoratorAddSaving = false;
+    foilDecoratorAddError = null;
+    invCollapsedGroups.delete('foil-decorator-size:' + printGroupId + '|' + size);
+    foilDecoratorExpandedItem = item.id;
+    foilRenderScreen();
+    foilShowSavedToast('foil-decorator-results-root');
+  } catch (err) {
+    foilLogSaveOutcome('foilSubmitDecoratorAdd', item, err);
+    foilDecoratorAddSaving = false;
+    foilDecoratorAddError = { code: err.code, message: err.message };
+    foilRenderScreen(); // draft/form still open and filled exactly as the user left it
+  }
 }
 // Plain saves, matching Specialty Latex/Letters & Numbers — no ledger for Decorator Shapes either.
 function foilUpdateDecoratorField(itemId, field, value) {
@@ -12854,6 +12970,7 @@ function foilDecoratorAddFormHtml() {
       <strong style="font-size:14px;">Add ${psEscape(familyName)}</strong>
       <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelDecoratorAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
+    ${foilSaveErrorBannerHtml(foilDecoratorAddError)}
     <div class="row">
       <div class="settings-field" style="margin-bottom:0">
         <label>Size</label>
@@ -12890,7 +13007,7 @@ function foilDecoratorAddFormHtml() {
       </div>
     </div>` : `
     <div class="settings-field"><label>Quantity</label><input type="number" min="0" value="${d.quantity}" oninput="foilSetDecoratorDraftField('quantity', this.value)"></div>`}
-    <button class="save-btn" onclick="foilSubmitDecoratorAdd()">Save item</button>
+    <button class="save-btn" ${foilDecoratorAddSaving ? 'disabled' : ''} onclick="foilSubmitDecoratorAdd()">${foilDecoratorAddSaving ? 'Saving…' : 'Save item'}</button>
   </div>`;
 }
 
