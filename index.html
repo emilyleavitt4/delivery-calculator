@@ -12027,7 +12027,9 @@ async function foilSubmitAdd() {
   try {
     await window.fbSaveFoilItem(item);
     foilLogSaveOutcome('foilSubmitAdd', item);
-    FOIL_ITEMS.push(item);
+    // Do NOT push into FOIL_ITEMS — see foilSubmitDecoratorAdd's comment; the live onSnapshot
+    // listener already reassigns it wholesale from the server by the time this line runs, so
+    // pushing again here would duplicate this same document locally.
     foilAddOpen = false;
     foilAddDraft = null;
     foilAddSaving = false;
@@ -12397,7 +12399,9 @@ async function foilSubmitPhraseAdd() {
   try {
     await window.fbSaveFoilItem(item);
     foilLogSaveOutcome('foilSubmitPhraseAdd', item);
-    FOIL_ITEMS.push(item);
+    // Do NOT push into FOIL_ITEMS — see foilSubmitDecoratorAdd's comment; the live onSnapshot
+    // listener already reassigns it wholesale from the server by the time this line runs, so
+    // pushing again here would duplicate this same document locally.
     foilPhraseAddOpen = false;
     foilPhraseAddDraft = null;
     foilPhraseAddSaving = false;
@@ -12956,7 +12960,12 @@ async function foilSubmitDecoratorAdd() {
   try {
     await window.fbSaveFoilItem(item);
     foilLogSaveOutcome('foilSubmitDecoratorAdd', item);
-    FOIL_ITEMS.push(item); // only reflected locally once Firestore has actually confirmed it
+    // Do NOT push item into FOIL_ITEMS here — Foil's live onSnapshot listener (foilStartListeners)
+    // is the single source of truth for that array and reassigns it wholesale from the server's
+    // own data. Awaiting the write above gives that listener time to fire first (it sees this same
+    // write and already includes the new item by the time this line runs), so pushing again here
+    // would append a second, duplicate copy of the exact same document. Everything below only
+    // needs the item's id, which exists regardless of whether the listener has caught up yet.
     foilDecoratorAddOpen = false;
     foilDecoratorAddDraft = null;
     foilDecoratorAddSaving = false;
