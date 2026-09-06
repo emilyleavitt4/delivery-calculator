@@ -1097,6 +1097,9 @@
   const feedbackItemsRef = collection(db, 'businesses', BUSINESS_ID, 'feedbackItems');
   window.fbOnSnapshotFeedbackItems = (onNext, onError) => onSnapshot(feedbackItemsRef, onNext, onError);
   window.fbSaveFeedbackItem = (item) => setDoc(doc(feedbackItemsRef, item.id), item);
+  // Diagnostic path helper, same rationale as window.fbFoilItemsPath — BUSINESS_ID isn't reachable
+  // outside this module script.
+  window.fbFeedbackItemsPath = (id) => `businesses/${BUSINESS_ID}/feedbackItems/${id}`;
 
   // ═══ BBT Master Catalog — the first genuinely global (non-business-scoped) data in this app ═══
   // Deliberately NOT under businesses/{BUSINESS_ID} — this is BBT-maintained reference data meant
@@ -11872,10 +11875,11 @@ function foilSaveItem(item) {
     }
   );
 }
-// A persistent (not auto-dismissing) inline error banner for a failed Add — shown until the next
+// A persistent (not auto-dismissing) inline error banner for a failed save — shown until the next
 // attempt succeeds or the form is closed, so a real failure can never be missed the way a native
-// alert() can be if someone navigates or refreshes before reading it.
-function foilSaveErrorBannerHtml(error) {
+// alert() can be if someone navigates or refreshes before reading it. Shared across every
+// await-first save flow (Foil's three Add forms, the Feedback widget) rather than one per feature.
+function psSaveErrorBannerHtml(error) {
   if (!error) return '';
   return `<div style="background:var(--warning-bg); border:0.5px solid var(--warning-text); border-radius:var(--radius-sm); padding:0.6rem 0.75rem; margin-bottom:0.6rem; font-size:12px; color:var(--warning-text);">
     <strong><i class="fa-solid fa-triangle-exclamation"></i> Couldn't save — nothing was recorded.</strong><br>
@@ -12237,7 +12241,7 @@ function foilAddFormHtml() {
       <strong style="font-size:14px;">Add ${foilCharTypeLabel(d.charType)} group</strong>
       <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
-    ${foilSaveErrorBannerHtml(foilAddError)}
+    ${psSaveErrorBannerHtml(foilAddError)}
     <div class="settings-field"><label>Letters or Numbers</label>
       <select onchange="foilSetDraftField('charType', this.value)">
         <option value="letters" ${d.charType === 'letters' ? 'selected' : ''}>Letters (A-Z)</option>
@@ -12533,7 +12537,7 @@ function foilPhraseAddFormHtml() {
       <strong style="font-size:14px;">Add Phrase Set</strong>
       <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelPhraseAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
-    ${foilSaveErrorBannerHtml(foilPhraseAddError)}
+    ${psSaveErrorBannerHtml(foilPhraseAddError)}
     <div class="settings-field"><label>Phrase / Text</label>
       <input type="text" list="foil-phrase-suggestions" placeholder="e.g. Happy Birthday" value="${invAttr(d.phraseText)}" oninput="foilSetPhraseDraftField('phraseText', this.value)">
       <datalist id="foil-phrase-suggestions">${foilKnownPhraseTexts().map(p => `<option value="${invAttr(p)}">`).join('')}</datalist>
@@ -12953,7 +12957,7 @@ function foilSetDecoratorDraftField(field, value) {
 // Awaits the real Firestore write before ever treating this as saved — the record is not pushed
 // into FOIL_ITEMS, the form is not closed, and nothing is cleared until fbSaveFoilItem's promise
 // actually resolves. On failure, the draft/form stay exactly as entered and a persistent error
-// banner (foilSaveErrorBannerHtml) shows the real Firestore error code/message, rather than the
+// banner (psSaveErrorBannerHtml) shows the real Firestore error code/message, rather than the
 // native alert() a person can lose by navigating or refreshing before it's read.
 async function foilSubmitDecoratorAdd() {
   if (!foilDecoratorAddDraft || foilDecoratorSelectedFamily === undefined || foilDecoratorAddSaving) return;
@@ -13154,7 +13158,7 @@ function foilDecoratorAddFormHtml() {
       <strong style="font-size:14px;">Add ${psEscape(familyName)}</strong>
       <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="foilCancelDecoratorAdd()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
-    ${foilSaveErrorBannerHtml(foilDecoratorAddError)}
+    ${psSaveErrorBannerHtml(foilDecoratorAddError)}
     <div class="row">
       <div class="settings-field" style="margin-bottom:0">
         <label>Size</label>
@@ -14995,9 +14999,22 @@ function fbLightweightContext() {
 let fbWidgetOpen = false;
 let fbDraft = null;
 let fbShowingSuccess = false;
+let fbSaving = false; // true only while the Firestore write is actually in flight
+let fbSubmitError = null; // {code, message} of the most recent failed attempt, or null
+// Diagnostic logger for Feedback saves, mirroring foilLogSaveOutcome's exact shape/rationale — an
+// employee's report is exactly the kind of thing that must never silently fail, so every attempt
+// (success or failure) is traceable from the console regardless of whether the UI also surfaces it.
+function fbLogSaveOutcome(action, item, err) {
+  const who = (window.fbAuth && window.fbAuth.currentUser && window.fbAuth.currentUser.email) || '(not signed in)';
+  const context = { who, id: item.id, path: window.fbFeedbackItemsPath(item.id) };
+  if (err) console.error(`[Feedback save FAILED] ${action}`, { ...context, code: err.code, message: err.message });
+  else console.log(`[Feedback save OK] ${action}`, context);
+}
 function fbOpenWidget() {
   fbWidgetOpen = true;
   fbShowingSuccess = false;
+  fbSaving = false;
+  fbSubmitError = null;
   fbDraft = { type: 'bug', text: '' };
   fbRenderWidget();
 }
@@ -15005,14 +15022,22 @@ function fbCloseWidget() {
   fbWidgetOpen = false;
   fbShowingSuccess = false;
   fbDraft = null;
+  fbSaving = false;
+  fbSubmitError = null;
   fbRenderWidget();
 }
 function fbSetDraftField(field, value) {
   if (!fbDraft) return;
   fbDraft[field] = value;
 }
-function fbSubmit() {
-  if (!fbDraft) return;
+// Awaits the real Firestore write before treating this as sent — nothing is pushed into
+// FEEDBACK_ITEMS, the widget doesn't show success, and the draft isn't cleared until
+// fbSaveFeedbackItem's promise actually resolves. This is exactly the same fix already applied to
+// Foil's Add flows, for the same reason: an optimistic "sent" state before the write is confirmed
+// is indistinguishable from a real success right up until a refresh silently drops it — which is
+// exactly what happened to a real submission before feedbackItems had a Firestore rule at all.
+async function fbSubmit() {
+  if (!fbDraft || fbSaving) return;
   const text = (fbDraft.text || '').trim();
   if (!text) { alert('Please describe the problem, confusing step, or idea before sending.'); return; }
   const actor = invResolveActor();
@@ -15029,12 +15054,29 @@ function fbSubmit() {
     context: fbLightweightContext(),
     createdAt: Date.now(),
   };
-  FEEDBACK_ITEMS.push(item);
-  window.fbSaveFeedbackItem(item).catch(err => console.error('Feedback save failed:', err));
-  fbDraft = null;
-  fbShowingSuccess = true;
+
+  fbSaving = true;
+  fbSubmitError = null;
   fbRenderWidget();
-  setTimeout(() => { fbShowingSuccess = false; fbWidgetOpen = false; fbRenderWidget(); }, 1400);
+
+  try {
+    await window.fbSaveFeedbackItem(item);
+    fbLogSaveOutcome('fbSubmit', item);
+    // Do NOT push into FEEDBACK_ITEMS — fbStartListeners' live onSnapshot listener is the single
+    // source of truth for that array and already reassigns it wholesale from the server; pushing
+    // here too would duplicate this same document locally, the exact bug already found and fixed
+    // in Foil's equivalent flow.
+    fbDraft = null;
+    fbSaving = false;
+    fbShowingSuccess = true;
+    fbRenderWidget();
+    setTimeout(() => { fbShowingSuccess = false; fbWidgetOpen = false; fbRenderWidget(); }, 1400);
+  } catch (err) {
+    fbLogSaveOutcome('fbSubmit', item, err);
+    fbSaving = false;
+    fbSubmitError = { code: err.code, message: err.message };
+    fbRenderWidget(); // draft stays open, exactly as typed — nothing looks sent
+  }
 }
 function fbRenderWidget() {
   const backdrop = document.getElementById('fb-modal-backdrop');
@@ -15057,6 +15099,7 @@ function fbRenderWidget() {
       <strong style="font-size:15px;">Send Feedback</strong>
       <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="fbCloseWidget()"><i class="fa-solid fa-xmark"></i> Close</button>
     </div>
+    ${psSaveErrorBannerHtml(fbSubmitError)}
     <div class="settings-field"><label>Type</label>
       <select onchange="fbSetDraftField('type', this.value)">
         ${FEEDBACK_TYPES.map(t => `<option value="${t.value}" ${t.value === d.type ? 'selected' : ''}>${psEscape(t.label)}</option>`).join('')}
@@ -15066,7 +15109,7 @@ function fbRenderWidget() {
       <textarea rows="4" style="width:100%; resize:vertical; font-family:inherit; font-size:14px; padding:8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--surface); color:var(--text);" placeholder="Describe the problem, confusing step, or idea..." oninput="fbSetDraftField('text', this.value)">${psEscape(d.text)}</textarea>
     </div>
     <div style="font-size:11px; color:var(--text-secondary); margin-bottom:0.75rem;">We'll automatically include the screen you're on and your name — no need to add that yourself.</div>
-    <button class="save-btn" onclick="fbSubmit()">Send Feedback</button>
+    <button class="save-btn" ${fbSaving ? 'disabled' : ''} onclick="fbSubmit()">${fbSaving ? 'Sending…' : 'Send Feedback'}</button>
   </div>`;
 }
 
