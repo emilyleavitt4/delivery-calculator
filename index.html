@@ -6155,6 +6155,11 @@ function settingsRefreshAdminSections() {
   invRenderColorsList();
   renderAdminPasscodeBlock();
   fbInboxRenderShell();
+  // Decorator Shapes' "Needs Reassignment" repair view is admin-gated (see
+  // foilRenderDecoratorFamilyItems) but nothing here previously re-rendered it — unlocking admin
+  // while already sitting on that screen left it showing the plain non-admin view until navigating
+  // away and back. Harmless no-op if Foil isn't the current screen (checks its own root element).
+  if (typeof foilRenderScreen === 'function') foilRenderScreen();
   bsUpdateHomeBanner();
 }
 
