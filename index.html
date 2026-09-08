@@ -4193,7 +4193,19 @@ function irItemCardHtml(item) {
     html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Classification</label><select onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select></div>`;
 
     if (item.classification === 'production') {
-      html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Production template</label><select onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">— choose one —</option>${psItemOptionsHtml(item.recipeId)}</select></div>`;
+      html += `<div class="settings-field" style="margin-bottom:0.6rem;">
+        <label>Production template</label>
+        <div style="display:flex; gap:6px;">
+          <select style="flex:1;" onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">— choose one —</option>${psItemOptionsHtml(item.recipeId)}</select>
+          <button class="icon-btn" style="width:auto; padding:6px 10px; font-size:12px; white-space:nowrap;" onclick="irCreateNewTemplateForItem('${item.id}')"><i class="fa-solid fa-plus"></i> Create new template</button>
+        </div>
+      </div>`;
+      if (recipe && recipe.needsSetup) {
+        html += `<div style="margin:0 0 0.6rem; padding:8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);">
+          ${ptTemplateFieldsEditorHtml(recipe)}
+          <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="irCompleteTemplateSetup('${item.id}','${recipe.id}')"><i class="fa-solid fa-check"></i> Complete Template Setup</button>
+        </div>`;
+      }
       if (recipe && recipe.customLinear) {
         html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Actual footage</label><input type="number" step="0.5" min="0" value="${item.customLinear || ''}" placeholder="e.g. 30" onchange="irUpdateItemField('${item.id}','customLinear', this.value)"></div>`;
       }
@@ -4219,7 +4231,6 @@ function irItemCardHtml(item) {
 
     html += `<div style="display:flex; gap:8px; flex-wrap:wrap;">
       <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irSplitItem('${item.id}')"><i class="fa-solid fa-scissors"></i> Split into multiple</button>
-      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irCreateTemplateFromItem('${item.id}')"><i class="fa-solid fa-wand-magic-sparkles"></i> Create new template</button>
       <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irMarkIgnored('${item.id}')"><i class="fa-solid fa-ban"></i> Ignore</button>
     </div>`;
     html += `</div>`;
@@ -4239,6 +4250,29 @@ function irUpdateItemField(id, field, value) {
   else item[field] = value;
   irRecomputeItemStatus(item);
   irRenderShell();
+}
+// Creates a real needsSetup template pre-named from this item's own raw invoice text — "Classic
+// Arch" stays "Classic Arch" instead of the generic "New template" — selects it for this item,
+// and defaults "remember this mapping" on, since building a template for an unmapped decor type
+// almost certainly means you want the next invoice using this same name to find it automatically.
+// The inline field/task editor (ptTemplateFieldsEditorHtml, same body Settings uses) then renders
+// right here because irItemCardHtml already shows it whenever the selected recipe needsSetup.
+function irCreateNewTemplateForItem(itemId) {
+  const item = IMPORT_REVIEW_DRAFT && IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  const newTemplate = ptAddTemplate(item.rawName);
+  item.recipeId = newTemplate.id;
+  item.rememberMapping = true;
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
+// Wraps the existing ptCompleteSetup (same name/confirm gate, unchanged) so the Import Review
+// item's own status recomputes and the card re-renders immediately once setup actually clears —
+// otherwise the card would keep showing "Needs Review" until some unrelated field was touched.
+function irCompleteTemplateSetup(itemId, templateId) {
+  const item = IMPORT_REVIEW_DRAFT && IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  ptCompleteSetup(templateId);
+  if (item) { irRecomputeItemStatus(item); irRenderShell(); }
 }
 // ─── Color picker: one row per color, each resolved against the Color Library. Typing reuses
 // the same shared autocomplete as Production/Quantity Calculator (invShowColorSuggestions); an
@@ -4385,34 +4419,6 @@ function irSplitItem(id) {
 // that category's existing per-foot rates so the balloon math is sensible by default (refining
 // the exact rates afterward is Formulas & Recipes' job, not this screen's). Persists so it
 // survives a reload, and appends live to RECIPES so it's selectable right away in this review.
-function irCreateTemplateFromItem(id) {
-  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === id);
-  if (!item) return;
-  const name = prompt('Name for this new production template:', item.name);
-  if (!name || !name.trim()) return;
-  const categoryInput = prompt('Category — Column, Garland, or Arch:', 'Garland');
-  if (categoryInput === null) return;
-  const category = ['Column', 'Garland', 'Arch'].find(c => c.toLowerCase() === categoryInput.trim().toLowerCase()) || 'Garland';
-
-  const newRecipe = psNormalizeTemplateFields({
-    id: 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-    display: name.trim(),
-    category,
-    style: 'Freeform',
-    label: name.trim() + ' (custom)',
-    formula: 'freeform',
-    customLinear: true,
-    rates: FORMULAS.freeformRates[category] || FORMULAS.freeformRates.Garland,
-  });
-  RECIPES = RECIPES.concat([newRecipe]);
-  ptSaveLibrary();
-
-  item.classification = 'production';
-  item.recipeId = newRecipe.id;
-  irRecomputeItemStatus(item);
-  irRenderShell();
-}
-
 // ─── SHARED JOB CARD HEADER (used by both Production and Staffing) ───
 function psStatusBtnHtml(job, view) {
   if (view === 'staffing') {
@@ -5463,6 +5469,41 @@ function ptTaskPhaseEditorHtml(t, phase) {
   </div>`;
 }
 
+// The shared "configure a template" body — fields + Prep/Build/Finish task rows, nothing else
+// (no Complete Setup/Delete buttons; callers render their own action row, since what's
+// appropriate differs — Settings offers Delete, the inline Import Review flow deliberately
+// doesn't). Used both by the Production Templates settings screen and inline from Import Review
+// when creating a new template for an unmapped invoice item, so there is exactly one place that
+// defines what "configuring a template" looks like.
+function ptTemplateFieldsEditorHtml(t) {
+  let html = '';
+  if (t.needsSetup) {
+    html += `<div style="font-size:12px; color:var(--warning-text); background:var(--warning-bg); padding:8px; border-radius:var(--radius-sm); margin-bottom:0.6rem;"><i class="fa-solid fa-triangle-exclamation"></i> Not selectable in Production, Import Review, or the Quantity Calculator until setup is completed below — configure whatever's real for this decor type, then click Complete Template Setup.</div>`;
+  }
+  html += `<div class="row">
+    <div class="settings-field" style="margin-bottom:0.6rem;"><label>Name</label><input type="text" value="${invAttr(t.display)}" onchange="ptUpdateField('${t.id}','display', this.value)"></div>
+    <div class="settings-field" style="margin-bottom:0.6rem;"><label>Category</label>
+      <select onchange="ptUpdateField('${t.id}','category', this.value)">
+        ${['Column', 'Garland', 'Arch'].map(c => `<option value="${c}"${c === t.category ? ' selected' : ''}>${c}</option>`).join('')}
+      </select>
+    </div>
+  </div>
+  <div style="font-size:11px; color:var(--text-secondary); margin:-0.2rem 0 0.6rem;">If a style genuinely needs different build directions, give it its own template (e.g. "Classic Column" and "Freeform Column" as two separate Names) rather than expressing it as a size/label variant of this one.</div>
+  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Linear feet</label><input type="number" step="0.5" min="0" value="${t.linearFt || ''}" ${t.customLinear ? 'disabled placeholder="entered per job"' : ''} onchange="ptUpdateField('${t.id}','linearFt', this.value)"></div>
+  <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">
+    <input type="checkbox" ${t.customLinear ? 'checked' : ''} onchange="ptUpdateField('${t.id}','customLinear', this.checked)">
+    Footage is entered per job (not a fixed size)
+  </label>
+  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Build instructions</label><textarea rows="3" onchange="ptUpdateField('${t.id}','buildInstructions', this.value)">${psEscape(t.buildInstructions)}</textarea></div>
+  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Equipment list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','equipmentList', this.value)">${psEscape(t.equipmentList.join('\n'))}</textarea></div>
+  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pack list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','packList', this.value)">${psEscape(t.packList.join('\n'))}</textarea></div>
+  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pull list notes <span style="font-weight:400;">(optional, alongside the calculated balloon counts)</span></label><input type="text" value="${invAttr(t.pullListNotes)}" onchange="ptUpdateField('${t.id}','pullListNotes', this.value)"></div>
+  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Install notes</label><textarea rows="2" onchange="ptUpdateField('${t.id}','installNotes', this.value)">${psEscape(t.installNotes)}</textarea></div>
+  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Staffing recommendation</label><input type="text" value="${invAttr(t.staffingRecommendation)}" placeholder="e.g. 2 people, 30 min" onchange="ptUpdateField('${t.id}','staffingRecommendation', this.value)"></div>
+  ${TASK_PHASES.map(phase => ptTaskPhaseEditorHtml(t, phase)).join('')}`;
+  return html;
+}
+
 function ptTemplateHtml(t) {
   const expanded = ptExpandedTemplates.has(t.id);
   let html = `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
@@ -5477,31 +5518,8 @@ function ptTemplateHtml(t) {
   if (expanded) {
     html += `<div style="margin-top:8px;">`;
     if (invAdminUnlocked) {
-      if (t.needsSetup) {
-        html += `<div style="font-size:12px; color:var(--warning-text); background:var(--warning-bg); padding:8px; border-radius:var(--radius-sm); margin-bottom:0.6rem;"><i class="fa-solid fa-triangle-exclamation"></i> Not selectable in Production, Import Review, or the Quantity Calculator until setup is completed below — configure whatever's real for this decor type, then click Complete Template Setup.</div>`;
-      }
-      html += `<div class="row">
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Name</label><input type="text" value="${invAttr(t.display)}" onchange="ptUpdateField('${t.id}','display', this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Category</label>
-          <select onchange="ptUpdateField('${t.id}','category', this.value)">
-            ${['Column', 'Garland', 'Arch'].map(c => `<option value="${c}"${c === t.category ? ' selected' : ''}>${c}</option>`).join('')}
-          </select>
-        </div>
-      </div>
-      <div style="font-size:11px; color:var(--text-secondary); margin:-0.2rem 0 0.6rem;">If a style genuinely needs different build directions, give it its own template (e.g. "Classic Column" and "Freeform Column" as two separate Names) rather than expressing it as a size/label variant of this one.</div>
-      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Linear feet</label><input type="number" step="0.5" min="0" value="${t.linearFt || ''}" ${t.customLinear ? 'disabled placeholder="entered per job"' : ''} onchange="ptUpdateField('${t.id}','linearFt', this.value)"></div>
-      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">
-        <input type="checkbox" ${t.customLinear ? 'checked' : ''} onchange="ptUpdateField('${t.id}','customLinear', this.checked)">
-        Footage is entered per job (not a fixed size)
-      </label>
-      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Build instructions</label><textarea rows="3" onchange="ptUpdateField('${t.id}','buildInstructions', this.value)">${psEscape(t.buildInstructions)}</textarea></div>
-      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Equipment list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','equipmentList', this.value)">${psEscape(t.equipmentList.join('\n'))}</textarea></div>
-      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pack list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','packList', this.value)">${psEscape(t.packList.join('\n'))}</textarea></div>
-      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pull list notes <span style="font-weight:400;">(optional, alongside the calculated balloon counts)</span></label><input type="text" value="${invAttr(t.pullListNotes)}" onchange="ptUpdateField('${t.id}','pullListNotes', this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Install notes</label><textarea rows="2" onchange="ptUpdateField('${t.id}','installNotes', this.value)">${psEscape(t.installNotes)}</textarea></div>
-      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Staffing recommendation</label><input type="text" value="${invAttr(t.staffingRecommendation)}" placeholder="e.g. 2 people, 30 min" onchange="ptUpdateField('${t.id}','staffingRecommendation', this.value)"></div>
-      ${TASK_PHASES.map(phase => ptTaskPhaseEditorHtml(t, phase)).join('')}
-      <div style="display:flex; gap:8px;">
+      html += ptTemplateFieldsEditorHtml(t);
+      html += `<div style="display:flex; gap:8px;">
         ${t.needsSetup ? `<button class="save-btn" style="width:auto; padding:6px 14px;" onclick="ptCompleteSetup('${t.id}')"><i class="fa-solid fa-check"></i> Complete Template Setup</button>` : ''}
         <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="ptRemoveTemplate('${t.id}')"><i class="fa-solid fa-trash"></i> Delete template</button>
       </div>`;
@@ -5596,14 +5614,18 @@ function ptCompleteSetup(id) {
   ptRenderList();
   ptSaveLibrary();
 }
-function ptAddTemplate() {
+// prefillName lets a caller (e.g. Import Review, creating a template for an unmapped invoice
+// item) seed a real starting Display Name instead of the literal "New template" placeholder —
+// purely a convenience default, still fully editable, and still gated behind the same
+// ptCanCompleteSetup/Complete Template Setup requirement regardless of what name it starts with.
+function ptAddTemplate(prefillName) {
   // needsSetup: true — these starting values (Garland/Freeform/freeform/Garland rates) are not a
   // meaningful default for whatever real decor type this ends up being; they only exist so the
   // record has something to render while it's being configured. See psReadyRecipes/ptReadyRecipe
   // for where this keeps the template out of every real selector until setup is explicitly done.
   const newTemplate = psNormalizeTemplateFields({
     id: 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-    display: 'New template', category: 'Garland', style: 'Freeform',
+    display: (prefillName && prefillName.trim()) || 'New template', category: 'Garland', style: 'Freeform',
     formula: 'freeform', customLinear: true, rates: FORMULAS.freeformRates.Garland,
     needsSetup: true,
   });
@@ -5611,6 +5633,7 @@ function ptAddTemplate() {
   ptExpandedTemplates.add(newTemplate.id);
   ptRenderList();
   ptSaveLibrary();
+  return newTemplate;
 }
 function ptRemoveTemplate(id) {
   if (!confirm('Delete this template? Jobs that already used it keep working — they carry their own frozen copy — but you won\'t be able to pick it for new items.')) return;
