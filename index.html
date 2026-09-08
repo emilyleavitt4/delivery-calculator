@@ -2862,6 +2862,7 @@ function psNormalizeTemplateFields(t) {
   if (typeof t.installNotes !== 'string') t.installNotes = '';
   if (typeof t.pullListNotes !== 'string') t.pullListNotes = '';
   if (typeof t.staffingRecommendation !== 'string') t.staffingRecommendation = '';
+  if (!Array.isArray(t.tasks)) t.tasks = [];
   return t;
 }
 RECIPES.forEach(psNormalizeTemplateFields);
@@ -3103,6 +3104,93 @@ function psSnapshotTemplate(recipe) {
   return snapshot;
 }
 
+// ═══════════════════════════════════════ PRODUCTION TASKS (Prep / Inflate & Build / Finish & Pack) ═══════════════════════════════════════
+//
+// A RECIPES entry's optional `tasks[]` holds task DEFINITIONS — { id, phase, text, dueOffsetDays }
+// — phase is 'prep' | 'build' | 'finish'; dueOffsetDays is a nullable default (days relative to
+// the event date, negative = before it), never an absolute date, so it stays meaningful across
+// any future event-date reschedule. Priority is deliberately never a template field — it's
+// always a situational, per-occurrence decision (see psSnapshotTasksForItem below), never a fact
+// about a decor type. A template's task id is stable across ordinary text edits (see
+// ptUpdateTemplateTaskText) — only adding or removing a row changes the set of ids.
+//
+// A Job's optional `tasks[]` holds the live, independently-mutable task INSTANCES actually
+// worked from — flat on the job (not nested under productionItems[]) so a future "what should I
+// work on" queue can scan every job's tasks in one pass, each carrying a productionItemId back-
+// reference to the line it belongs to. Snapshotted once, at production-item creation, from
+// whatever the template's tasks looked like at that moment — exactly the same "job keeps its own
+// copy, template edits never retroactively change it" guarantee psSnapshotTemplate already gives
+// recipe/formula fields, applied at task grain instead of whole-recipe grain.
+const TASK_PHASES = ['prep', 'build', 'finish'];
+const TASK_PHASE_LABELS = { prep: 'Prep', build: 'Inflate & Build', finish: 'Finish & Pack' };
+
+function psNewTaskId() {
+  return 'task_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+// Ready by default — a job entering Production is, by your own stated workflow, already ready
+// for the team to start; only exceptions get put on Hold afterward, never the other way around.
+function psSnapshotTasksForItem(recipe, productionItemId) {
+  return (recipe.tasks || []).map(t => ({
+    id: psNewTaskId(),
+    productionItemId,
+    phase: t.phase,
+    text: t.text,
+    dueOffsetDays: typeof t.dueOffsetDays === 'number' ? t.dueOffsetDays : null,
+    status: 'ready',
+    priority: false,
+  }));
+}
+
+function psFindTask(job, taskId) {
+  return (job.tasks || []).find(t => t.id === taskId);
+}
+
+// The one and only way status/priority/phase/text change on an already-snapshotted task —
+// mutates just that task instance, never the template it came from. Phase/text/dueOffsetDays are
+// deliberately editable here too (an owner/admin capability, per your own framing — a future
+// employee Work Queue view can simply not expose those inputs without needing a second code
+// path or a different data shape).
+function psUpdateTaskField(jobId, taskId, field, value) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const task = psFindTask(job, taskId);
+  if (!task) return;
+  if (field === 'priority') task.priority = !!value;
+  else if (field === 'dueOffsetDays') task.dueOffsetDays = (value === '' || value === null || value === undefined) ? null : (parseInt(value, 10) || 0);
+  else task[field] = value; // 'phase' | 'text' | 'status'
+  psSaveJob(job);
+}
+function psSetTaskStatus(jobId, taskId, status) { psUpdateTaskField(jobId, taskId, 'status', status); }
+function psSetTaskPriority(jobId, taskId, priority) { psUpdateTaskField(jobId, taskId, 'priority', priority); }
+
+// The ONLY mechanism behind any "Hold this phase" / "Ready this job" / "Do Next this phase"
+// action — there is no stored group-level status or priority anywhere to ever disagree with an
+// individual task's own value, by construction. filter: { phase?, productionItemId? } — omitting
+// a key means "don't filter on it" (no phase = every phase, i.e. a whole-job bulk action).
+function psBulkUpdateTasks(jobId, filter, field, value) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  (job.tasks || []).forEach(t => {
+    if (filter.phase && t.phase !== filter.phase) return;
+    if (filter.productionItemId && t.productionItemId !== filter.productionItemId) return;
+    if (field === 'priority') t.priority = !!value; else t.status = value;
+  });
+  psSaveJob(job);
+}
+function psBulkSetTaskStatus(jobId, filter, status) { psBulkUpdateTasks(jobId, filter, 'status', status); }
+function psBulkSetTaskPriority(jobId, filter, priority) { psBulkUpdateTasks(jobId, filter, 'priority', priority); }
+
+// Resolves a task's due date live from the job's CURRENT event date — never stored as an
+// absolute date, so rescheduling a job automatically moves every task's timing with it, with
+// nothing to manually update. Returns null when there's no usable event date or no offset set.
+function psTaskDueDate(job, task) {
+  if (typeof task.dueOffsetDays !== 'number') return null;
+  const eventMs = psJobDateValue(job);
+  if (eventMs === null) return null;
+  return eventMs + task.dueOffsetDays * 86400000;
+}
+
 // ═══════════════════════════════════════ INTERNAL EVENT MODEL (shared by Production & Staffing) ═══════════════════════════════════════
 //
 // A "Job" is this app's standardized event object — the single source of truth every import
@@ -3191,7 +3279,13 @@ function psBlankJob(overrides) {
     // psComputeJobRequirements). Deliberately per-job, not global: the ambiguity is inherent to
     // this job's own plain-text color, not something a Library-wide alias could resolve without
     // guessing for every OTHER job using that same name. Sparse, same convention as pullChecklist.
-    colorResolutions: {}
+    colorResolutions: {},
+    // Flat array of task INSTANCES across every productionItems line on this job — see
+    // psSnapshotTasksForItem/psUpdateTaskField/psBulkUpdateTasks above. Flat (not nested under
+    // productionItems) so a future work-queue-style view can scan every job's tasks in one pass;
+    // each entry's own productionItemId says which line it belongs to. Old jobs without this
+    // just read as `[]`, matching every other additive field this session.
+    tasks: []
   }, overrides || {});
 }
 
@@ -3941,8 +4035,9 @@ function psApplyReviewDraftToEvent(draft) {
       // ledger's negative-balance guard doesn't rely solely on the UI never offering a bad amount.
       const recipe = ptReadyRecipe(item.recipeId);
       if (!recipe) return;
+      const newItemId = psNewLineItemId();
       event.productionItems.push({
-        id: psNewLineItemId(),
+        id: newItemId,
         recipeId: item.recipeId,
         customRecipe: psSnapshotTemplate(recipe), // frozen at approval time — editing the template later won't change this job
         qty: item.qty,
@@ -3964,6 +4059,7 @@ function psApplyReviewDraftToEvent(draft) {
         topperNote: '',
         notes: item.description || '',
       });
+      event.tasks = (event.tasks || []).concat(psSnapshotTasksForItem(recipe, newItemId));
     } else if (item.classification === 'rental') {
       event.rentalItems.push({ id: psNewLineItemId(), name: item.name, qty: item.qty, pulled: false, packed: false, returned: false });
     } else if (item.classification === 'service') {
@@ -4722,7 +4818,9 @@ function psAddItemToJob(jobId) {
     if (!customLinear || customLinear <= 0) { alert('Enter the actual footage for this garland.'); return; }
   }
 
-  job.productionItems.push({ id: psNewLineItemId(), recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, indoorOutdoor: psDetectIndoorOutdoor(location), topperNote, notes: '' });
+  const newItemId = psNewLineItemId();
+  job.productionItems.push({ id: newItemId, recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, indoorOutdoor: psDetectIndoorOutdoor(location), topperNote, notes: '' });
+  job.tasks = (job.tasks || []).concat(psSnapshotTasksForItem(recipe, newItemId));
   delete psColorDraftStore[draftKey]; // reset the color picker to a single blank row for next time
   psSaveJob(job);
 }
@@ -4730,7 +4828,12 @@ function psAddItemToJob(jobId) {
 function psRemoveItemFromJob(jobId, idx) {
   const job = psFindJob(jobId);
   if (!job) return;
+  const removed = job.productionItems[idx];
   job.productionItems.splice(idx, 1);
+  // New code, so no reason to reproduce pullChecklist's existing (accepted, untouched)
+  // staleness-on-edit gap — an orphaned task instance for a line that no longer exists would be
+  // pure clutter with no possible owner to act on it.
+  if (removed) job.tasks = (job.tasks || []).filter(t => t.productionItemId !== removed.id);
   psSaveJob(job);
   psRenderProductionJobs();
 }
@@ -4791,7 +4894,8 @@ function qcEffectiveRecipe() {
       label: qcState.customFootage ? qcState.customFootage + ' ft (custom)' : 'Custom length',
       category: qcState.category, style: qcState.style,
       formula: template.formula, rates: template.rates,
-      linearFt: qcState.customFootage || 0
+      linearFt: qcState.customFootage || 0,
+      tasks: template.tasks || [], // carries the real underlying template's tasks through to a custom-length add too
     };
   }
   return psReadyRecipes().find(r => r.id === qcState.recipeId) || null;
@@ -5186,8 +5290,9 @@ function qcAddToJob() {
     if (!job) { statusEl.textContent = "Couldn't find that job."; return; }
   }
 
+  const newItemId = psNewLineItemId();
   job.productionItems.push({
-    id: psNewLineItemId(),
+    id: newItemId,
     recipeId: qcState.sizeMode === 'preset' ? recipe.id : null,
     customRecipe: psSnapshotTemplate(recipe), // frozen at add-time — editing the template later won't change this job, for either size mode
     qty: qcState.qty,
@@ -5196,6 +5301,7 @@ function qcAddToJob() {
     customLinear: null,
     design: '', location: '', indoorOutdoor: null, topperNote: '', notes: ''
   });
+  job.tasks = (job.tasks || []).concat(psSnapshotTasksForItem(recipe, newItemId));
   psExpandedProduction = job.id;
   psSaveJob(job);
 
@@ -5340,6 +5446,23 @@ function ptRenderList() {
   container.innerHTML = RECIPES.map(t => ptTemplateHtml(t)).join('');
 }
 
+// One phase's row-editor: a plain text input per task (mutated in place by id, never rebuilt
+// wholesale — see ptUpdateTemplateTaskText) plus an Add button. Deliberately plain/unstyled,
+// same admin-only settings-field look as every other field on this screen — this is foundation
+// plumbing to make Prep/Inflate & Build/Finish & Pack tasks real and testable, not a designed UI.
+function ptTaskPhaseEditorHtml(t, phase) {
+  const label = TASK_PHASE_LABELS[phase];
+  const tasks = (t.tasks || []).filter(task => task.phase === phase);
+  return `<div class="settings-field" style="margin-bottom:0.6rem;">
+    <label>${psEscape(label)} tasks</label>
+    ${tasks.map(task => `<div style="display:flex; gap:6px; margin-bottom:4px;">
+      <input type="text" value="${invAttr(task.text)}" placeholder="e.g. ..." style="flex:1;" onchange="ptUpdateTemplateTaskText('${t.id}','${task.id}', this.value)">
+      <button class="icon-btn" style="padding:4px;" onclick="ptRemoveTemplateTask('${t.id}','${task.id}')" aria-label="Remove task"><i class="fa-solid fa-trash"></i></button>
+    </div>`).join('')}
+    <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="ptAddTemplateTask('${t.id}','${phase}')"><i class="fa-solid fa-plus"></i> Add ${psEscape(label)} task</button>
+  </div>`;
+}
+
 function ptTemplateHtml(t) {
   const expanded = ptExpandedTemplates.has(t.id);
   let html = `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
@@ -5377,6 +5500,7 @@ function ptTemplateHtml(t) {
       <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pull list notes <span style="font-weight:400;">(optional, alongside the calculated balloon counts)</span></label><input type="text" value="${invAttr(t.pullListNotes)}" onchange="ptUpdateField('${t.id}','pullListNotes', this.value)"></div>
       <div class="settings-field" style="margin-bottom:0.6rem;"><label>Install notes</label><textarea rows="2" onchange="ptUpdateField('${t.id}','installNotes', this.value)">${psEscape(t.installNotes)}</textarea></div>
       <div class="settings-field" style="margin-bottom:0.6rem;"><label>Staffing recommendation</label><input type="text" value="${invAttr(t.staffingRecommendation)}" placeholder="e.g. 2 people, 30 min" onchange="ptUpdateField('${t.id}','staffingRecommendation', this.value)"></div>
+      ${TASK_PHASES.map(phase => ptTaskPhaseEditorHtml(t, phase)).join('')}
       <div style="display:flex; gap:8px;">
         ${t.needsSetup ? `<button class="save-btn" style="width:auto; padding:6px 14px;" onclick="ptCompleteSetup('${t.id}')"><i class="fa-solid fa-check"></i> Complete Template Setup</button>` : ''}
         <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="ptRemoveTemplate('${t.id}')"><i class="fa-solid fa-trash"></i> Delete template</button>
@@ -5390,7 +5514,11 @@ function ptTemplateHtml(t) {
         ${t.packList.length ? `<div style="margin-bottom:6px;"><b>Pack list:</b> ${t.packList.map(psEscape).join(', ')}</div>` : ''}
         ${t.installNotes ? `<div style="margin-bottom:6px;"><b>Install notes:</b> ${psEscape(t.installNotes)}</div>` : ''}
         ${t.staffingRecommendation ? `<div style="margin-bottom:6px;"><b>Staffing:</b> ${psEscape(t.staffingRecommendation)}</div>` : ''}
-        ${!t.buildInstructions && !t.equipmentList.length && !t.packList.length && !t.installNotes && !t.staffingRecommendation ? 'No build details added yet.' : ''}
+        ${TASK_PHASES.map(phase => {
+          const tasks = (t.tasks || []).filter(task => task.phase === phase);
+          return tasks.length ? `<div style="margin-bottom:6px;"><b>${psEscape(TASK_PHASE_LABELS[phase])}:</b> ${tasks.map(task => psEscape(task.text)).join(', ')}</div>` : '';
+        }).join('')}
+        ${!t.buildInstructions && !t.equipmentList.length && !t.packList.length && !t.installNotes && !t.staffingRecommendation && !(t.tasks || []).length ? 'No build details added yet.' : ''}
       </div>`;
     }
     html += `</div>`;
@@ -5416,6 +5544,37 @@ function ptUpdateListField(id, field, value) {
   const t = RECIPES.find(r => r.id === id);
   if (!t) return;
   t[field] = value.split('\n').map(s => s.trim()).filter(Boolean);
+  ptSaveLibrary();
+}
+
+// A template task's own row editor (see ptTaskPhaseEditorHtml) — one row per task, each mutated
+// in place by its own stable id. Deliberately NOT a "one big textarea, rebuild the whole list on
+// every save" approach like equipmentList/packList above: rebuilding from scratch would mint a
+// fresh id for every task on every edit, and any job that already snapshotted one of those tasks
+// would have no way to tell "same task, text changed" from "task removed, new one added" the next
+// time this template's tasks are inspected. Editing a task's text here only ever mutates that one
+// object's `text` field — its id, and therefore its identity, never changes.
+function ptUpdateTemplateTaskText(templateId, taskId, value) {
+  const t = RECIPES.find(r => r.id === templateId);
+  if (!t) return;
+  const task = (t.tasks || []).find(x => x.id === taskId);
+  if (!task) return;
+  task.text = value;
+  ptSaveLibrary();
+}
+function ptAddTemplateTask(templateId, phase) {
+  const t = RECIPES.find(r => r.id === templateId);
+  if (!t) return;
+  if (!Array.isArray(t.tasks)) t.tasks = [];
+  t.tasks.push({ id: psNewTaskId(), phase, text: '', dueOffsetDays: null });
+  ptRenderList();
+  ptSaveLibrary();
+}
+function ptRemoveTemplateTask(templateId, taskId) {
+  const t = RECIPES.find(r => r.id === templateId);
+  if (!t) return;
+  t.tasks = (t.tasks || []).filter(x => x.id !== taskId);
+  ptRenderList();
   ptSaveLibrary();
 }
 // A real name is the one bare-minimum, checkable fact about "someone actually looked at this" —
