@@ -2938,12 +2938,19 @@ const FORMULAS_DEFAULTS = {
 // without touching FORMULAS_DEFAULTS, which stays around as the "Reset to defaults" fallback.
 const FORMULAS = JSON.parse(JSON.stringify(FORMULAS_DEFAULTS));
 
-// Only Column items get a topper deducted — Garlands and Arches don't. Catalog RECIPES
-// entries always use the CURRENT formula (live) — but a saved custom recipe embedded in a
-// job (customRecipe) carries its own frozen topperFt number captured at the moment it was
-// added, so editing formulas later doesn't retroactively change a job someone already built.
+// Whether a template has a topper — and how much height it takes off — is explicit template
+// configuration (hasTopper/topperFt, set in the template editor's Topper section), never inferred
+// from the category name. `topperFt` alone (no hasTopper) means an explicit numeric override —
+// this is also how a saved custom recipe embedded in a job (customRecipe) carries its own frozen
+// value, captured once at psSnapshotTemplate time, so editing a template's topper later never
+// retroactively changes a job someone already built. `category === 'Column'` is kept ONLY as a
+// last-resort fallback for a template that predates this feature and has never set hasTopper at
+// all — preserves exactly today's behavior for the 22 built-ins and any already-configured
+// business templates, with zero migration needed.
 function psTopperFt(recipe) {
+  if (recipe.hasTopper === false) return 0;
   if (typeof recipe.topperFt === 'number') return recipe.topperFt;
+  if (recipe.hasTopper === true) return FORMULAS.columnTopperFt;
   return recipe.category === 'Column' ? FORMULAS.columnTopperFt : 0;
 }
 
@@ -3272,14 +3279,25 @@ function psLineBalloonColors(line) {
   return (line.colors || []).filter(c => !notes.has(c.trim().toLowerCase()));
 }
 
-// How much height a topper takes off the balloon-spiral body — via psTopperFt (0 for
-// anything without a topper, i.e. everything except columns).
-//
+// The known calculation families. Deliberately a small, code-level registry rather than a
+// free-text or user-authored formula — each kind corresponds to a real branch in psComputeTotals
+// below, so a value here without matching calculation logic would just be a fake-looking option
+// that computes nothing. This is NOT meant to be the only two calculation models forever, though
+// — a genuinely different shape (e.g. a flat per-unit count instead of a linear-footage rate) is
+// meant to be addable later as one more entry here plus one more branch below, without touching
+// how existing 'classic'/'freeform' templates already work. Never hardcode an assumption anywhere
+// else in the app that these two are exhaustive — always gate through this list.
+const PS_FORMULA_KINDS = [
+  { value: 'classic', label: 'Classic — one blended rate' },
+  { value: 'freeform', label: 'Freeform — a rate per balloon size' },
+];
+
 // Returns { sizes: {[prodSize]: count}, valid: boolean, reason?: string }. `valid` is false
-// whenever the underlying footage or rate isn't a real, usable number. `reason` is a short,
+// whenever the underlying formula, footage, or rate isn't real and usable. `reason` is a short,
 // caller-facing code — never a raw NaN or developer term — naming WHICH input is missing, so the
 // UI can say "Missing footage" vs "Formula incomplete" instead of one generic message:
-//   'missing-footage' — a customLinear item whose per-job footage was never entered, or a fixed
+//   'missing-formula'  — no recognized calculation kind has been chosen for this template yet.
+//   'missing-footage'  — a customLinear item whose per-job footage was never entered, or a fixed
 //                        template with no linearFt configured at all.
 //   'missing-rate'     — a freeform template with no rates table (or a non-numeric entry in it),
 //                        or a classic template/global rate that isn't a real number.
@@ -3288,6 +3306,7 @@ function psLineBalloonColors(line) {
 // previously produced NaN counts that then silently passed every downstream `<= 0` guard (NaN
 // comparisons are always false) and reached Review & Pull as an actionable "Ready — Pull NaN" row.
 function psComputeTotals(recipe, qty, customLinear) {
+  if (!PS_FORMULA_KINDS.some(k => k.value === recipe.formula)) return { sizes: {}, valid: false, reason: 'missing-formula' };
   let linear = recipe.customLinear ? customLinear : recipe.linearFt;
   if (!Number.isFinite(linear) || !Number.isFinite(qty)) return { sizes: {}, valid: false, reason: 'missing-footage' };
   const topperFt = psTopperFt(recipe);
@@ -3298,12 +3317,14 @@ function psComputeTotals(recipe, qty, customLinear) {
     // Same freeze pattern as topperFt above: a snapshotted template carries its own
     // classicPerFt captured at creation time, so editing Formulas later doesn't retroactively
     // change a job someone already built. Catalog RECIPES entries (no snapshot yet) still use
-    // the live rate, unchanged from before.
+    // the live rate, unchanged from before. A per-template override (set in the template editor's
+    // Formula section) takes priority over the shared global rate — blank means "use the shared
+    // rate," never "zero."
     const rate = typeof recipe.classicPerFt === 'number' ? recipe.classicPerFt : FORMULAS.classicPerFt;
     if (!Number.isFinite(rate)) return { sizes: {}, valid: false, reason: 'missing-rate' };
     totals['11"'] = Math.ceil(totalLinear * rate);
-  } else {
-    if (!recipe.rates || typeof recipe.rates !== 'object') return { sizes: {}, valid: false, reason: 'missing-rate' };
+  } else if (recipe.formula === 'freeform') {
+    if (!recipe.rates || typeof recipe.rates !== 'object' || Object.keys(recipe.rates).length === 0) return { sizes: {}, valid: false, reason: 'missing-rate' };
     let allRatesValid = true;
     Object.keys(recipe.rates).forEach(size => {
       const rate = recipe.rates[size];
@@ -3319,6 +3340,7 @@ function psComputeTotals(recipe, qty, customLinear) {
 // Human-language explanation for a psComputeTotals reason code — never shown to a user as a raw
 // code or a NaN. Deliberately short; the caller supplies its own next-step sentence/link.
 function psInvalidFormulaMessage(reason) {
+  if (reason === 'missing-formula') return "Needs configuration — this template doesn't have a calculation method chosen yet.";
   if (reason === 'missing-footage') return 'Missing footage — this template needs a fixed length, or the actual footage entered for this job.';
   if (reason === 'missing-rate') return 'Formula incomplete — no balloon-count rate is configured for this template yet.';
   return 'Quantity unavailable — this template needs configuration before it can be calculated.';
@@ -5807,11 +5829,13 @@ function ptInit() {
         psNormalizeTemplateFields(t);
         // Firestore round-trips a plain copy of `rates`, not the live FORMULAS.freeformRates
         // object — re-point it so editing Balloon math above still updates these templates, but
-        // only when this category actually has a shared rate table. Category is free text now
-        // (see ptCategorySuggestions) — a custom category with no shared table keeps computing
-        // with its own already-saved `rates` rather than being silently substituted with
-        // Garland's numbers, which would have been a real, invisible wrong-answer bug.
-        if (t.formula === 'freeform' && FORMULAS.freeformRates[t.category]) t.rates = FORMULAS.freeformRates[t.category];
+        // only when this category actually has a shared rate table AND this template hasn't been
+        // given its own per-template override (t.ratesCustomized, set by ptUpdateRateField). A
+        // custom category with no shared table, or a template someone has deliberately hand-tuned
+        // in the Formula editor, keeps computing with its own already-saved `rates` rather than
+        // being silently substituted with the shared/Garland's numbers — either would be a real,
+        // invisible wrong-answer bug.
+        if (t.formula === 'freeform' && FORMULAS.freeformRates[t.category] && !t.ratesCustomized) t.rates = FORMULAS.freeformRates[t.category];
       });
       RECIPES = saved; // this business's saved library entirely replaces the starter defaults
       ptRenderShell();
@@ -5919,6 +5943,60 @@ function ptCategorySuggestions() {
   return [...cats].sort();
 }
 
+function ptPatternSuggestions() {
+  const patterns = new Set(['Even mix', 'Custom %', 'Color block', 'Ombré / gradient']);
+  RECIPES.forEach(r => { if (r.pattern) patterns.add(r.pattern); });
+  return [...patterns].sort();
+}
+
+// Formula configuration — deliberately an explicit, gated section rather than something inferred
+// from Category/Name (see batch item #5): the kind select starts blank on a new template
+// (ptAddTemplate no longer defaults to 'classic'), forcing a real choice before this template can
+// leave setup. Kind-specific fields only render once a kind is actually chosen — no field for an
+// unselected calculation family, since showing e.g. a rate table before "freeform" is picked would
+// imply a choice that hasn't been made yet.
+function ptFormulaEditorHtml(t) {
+  let html = `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Formula</label>
+    <select onchange="ptUpdateField('${t.id}','formula', this.value)">
+      <option value="" ${!t.formula ? 'selected' : ''}>Choose a calculation method…</option>
+      ${PS_FORMULA_KINDS.map(k => `<option value="${k.value}" ${t.formula === k.value ? 'selected' : ''}>${psEscape(k.label)}</option>`).join('')}
+    </select>
+  </div>`;
+  if (!t.formula) {
+    html += `<div style="font-size:11px; color:var(--warning-text); background:var(--warning-bg); padding:6px 8px; border-radius:var(--radius-sm); margin:-0.3rem 0 0.6rem;"><i class="fa-solid fa-triangle-exclamation"></i> No calculation method chosen yet — this template can't compute a balloon count until one is picked.</div>`;
+  } else if (t.formula === 'classic') {
+    html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Balloons per ft <span style="font-weight:400;">(optional override — blank uses the shared rate from Balloon math, currently ${FORMULAS.classicPerFt})</span></label>
+      <input type="number" step="0.1" min="0" value="${typeof t.classicPerFt === 'number' ? t.classicPerFt : ''}" placeholder="${FORMULAS.classicPerFt}" onchange="ptUpdateField('${t.id}','classicPerFt', this.value)">
+    </div>`;
+  } else if (t.formula === 'freeform') {
+    const rates = t.rates || {};
+    const hasAnyRate = SIZE_ORDER.some(size => Number.isFinite(rates[size]));
+    html += `<div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Balloons per ft, per size <span style="font-weight:400;">(blank = this template doesn't use that size)</span></div>
+    <div class="row" style="flex-wrap:wrap; gap:8px; margin-bottom:0.6rem;">
+      ${SIZE_ORDER.map(size => `<div class="settings-field" style="margin-bottom:0; min-width:70px;"><label>${psEscape(size)}</label><input type="number" step="0.1" min="0" value="${Number.isFinite(rates[size]) ? rates[size] : ''}" onchange="ptUpdateRateField('${t.id}','${size}', this.value)"></div>`).join('')}
+    </div>
+    ${!hasAnyRate ? `<div style="font-size:11px; color:var(--warning-text); background:var(--warning-bg); padding:6px 8px; border-radius:var(--radius-sm); margin:-0.3rem 0 0.6rem;"><i class="fa-solid fa-triangle-exclamation"></i> No rate entered for any size yet — this template can't compute a balloon count until at least one is set.</div>` : ''}`;
+  }
+  return html;
+}
+
+// Topper configuration — explicit per-template state (hasTopper/topperFt) rather than inferred
+// from Category (see batch item #4). The legacy category==='Column' fallback in psTopperFt keeps
+// old/un-migrated templates working exactly as before; this editor just makes the choice visible
+// and overridable going forward, without forcing every existing template through a migration.
+function ptTopperEditorHtml(t) {
+  const legacyDefault = t.category === 'Column';
+  const checked = typeof t.hasTopper === 'boolean' ? t.hasTopper : legacyDefault;
+  let html = `<label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">
+    <input type="checkbox" ${checked ? 'checked' : ''} onchange="ptUpdateField('${t.id}','hasTopper', this.checked)">
+    Has a topper (its length is deducted before the formula runs)
+  </label>`;
+  if (checked) {
+    html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Feet to deduct for the topper</label><input type="number" step="0.1" min="0" value="${typeof t.topperFt === 'number' ? t.topperFt : FORMULAS.columnTopperFt}" onchange="ptUpdateField('${t.id}','topperFt', this.value)"></div>`;
+  }
+  return html;
+}
+
 // The shared "configure a template" body — fields + Prep/Build/Finish task rows, nothing else
 // (no Complete Setup/Delete buttons; callers render their own action row, since what's
 // appropriate differs — Settings offers Delete, the inline Import Review flow deliberately
@@ -5943,6 +6021,12 @@ function ptTemplateFieldsEditorHtml(t) {
     <input type="checkbox" ${t.customLinear ? 'checked' : ''} onchange="ptUpdateField('${t.id}','customLinear', this.checked)">
     Footage is entered per job (not a fixed size)
   </label>
+  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pattern / design <span style="font-weight:400;">(optional — production info only, doesn't affect the math)</span></label>
+    <input type="text" list="pt-pattern-suggestions" value="${invAttr(t.pattern || '')}" placeholder="e.g. 3-color spiral, ombré" onchange="ptUpdateField('${t.id}','pattern', this.value)">
+    <datalist id="pt-pattern-suggestions">${ptPatternSuggestions().map(p => `<option value="${invAttr(p)}">`).join('')}</datalist>
+  </div>
+  ${ptFormulaEditorHtml(t)}
+  ${ptTopperEditorHtml(t)}
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Build instructions</label><textarea rows="3" onchange="ptUpdateField('${t.id}','buildInstructions', this.value)">${psEscape(t.buildInstructions)}</textarea></div>
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Equipment list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','equipmentList', this.value)">${psEscape(t.equipmentList.join('\n'))}</textarea></div>
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pack list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','packList', this.value)">${psEscape(t.packList.join('\n'))}</textarea></div>
@@ -5995,11 +6079,34 @@ function ptTemplateHtml(t) {
   return html;
 }
 
+// Freeform's per-size rate table has a real shared source for the categories a business already
+// has one configured for (Column/Garland/Arch's own sections in Balloon math, or any other
+// category a business later configures a shared table for) — adopted here ONLY when this
+// template doesn't already have its own rates, so a category/formula change never silently
+// clobbers rates someone already entered by hand. Never invents rates for a category with no
+// shared table (see the ptUpdateField category-change comment this generalizes) — a genuinely new
+// decor type just starts blank, requiring explicit entry, exactly the "don't guess" behavior
+// already fixed for the plain category-change case.
+function ptMaybeAdoptSharedRates(t) {
+  if (t.formula === 'freeform' && FORMULAS.freeformRates[t.category] && (!t.rates || Object.keys(t.rates).length === 0)) {
+    t.rates = Object.assign({}, FORMULAS.freeformRates[t.category]);
+  }
+}
 function ptUpdateField(id, field, value) {
   const t = RECIPES.find(r => r.id === id);
   if (!t) return;
-  if (field === 'linearFt') t[field] = parseFloat(value) || 0;
-  else t[field] = value;
+  if (field === 'linearFt' || field === 'topperFt') {
+    t[field] = parseFloat(value) || 0;
+  } else if (field === 'classicPerFt') {
+    // Blank must mean "use the shared global rate," never "override to zero" — zero would
+    // silently compute zero balloons for every job using this template.
+    t[field] = value === '' ? null : (parseFloat(value) || null);
+  } else if (field === 'hasTopper') {
+    t.hasTopper = !!value;
+    if (t.hasTopper && typeof t.topperFt !== 'number') t.topperFt = FORMULAS.columnTopperFt;
+  } else {
+    t[field] = value;
+  }
   // A freeform template's balloon-count math comes from FORMULAS.freeformRates[category] (see
   // Balloon math above) when that category has a shared rate table — Column/Garland/Arch, or any
   // other category a business has configured one for. Category is free text (see
@@ -6007,7 +6114,7 @@ function ptUpdateField(id, field, value) {
   // substitute Garland's rates — it leaves `rates` exactly as it already was, since guessing a
   // wrong-but-plausible rate table would be a real, invisible calculation error, not just a
   // cosmetic default.
-  if (field === 'category' && t.formula === 'freeform' && FORMULAS.freeformRates[value]) t.rates = FORMULAS.freeformRates[value];
+  if (field === 'category' || field === 'formula') ptMaybeAdoptSharedRates(t);
   ptRenderList();
   ptSaveLibrary();
 }
@@ -6015,6 +6122,21 @@ function ptUpdateListField(id, field, value) {
   const t = RECIPES.find(r => r.id === id);
   if (!t) return;
   t[field] = value.split('\n').map(s => s.trim()).filter(Boolean);
+  ptSaveLibrary();
+}
+// One balloon size's rate in a freeform template's per-size table — blank deletes that size's
+// entry entirely (meaning "this template doesn't use this size," same as how the built-in Column/
+// Garland/Arch tables already omit sizes they don't use) rather than storing a false zero.
+// Setting ratesCustomized marks this template as deliberately hand-tuned, so ptInit's load-time
+// re-point (see its own comment) stops silently overwriting it with the shared category table.
+function ptUpdateRateField(templateId, size, value) {
+  const t = RECIPES.find(r => r.id === templateId);
+  if (!t) return;
+  if (!t.rates || typeof t.rates !== 'object') t.rates = {};
+  if (value === '') delete t.rates[size];
+  else t.rates[size] = parseFloat(value) || 0;
+  t.ratesCustomized = true;
+  ptRenderList();
   ptSaveLibrary();
 }
 
@@ -6051,8 +6173,16 @@ function ptRemoveTemplateTask(templateId, taskId) {
 // A real name is the one bare-minimum, checkable fact about "someone actually looked at this" —
 // not proof the formula/rates are right (only a person can judge that), just enough to block the
 // most degenerate case: clicking Complete Setup immediately after creation with nothing touched.
+// Named reasons, not just a boolean, so ptCompleteSetup's alert can say specifically what's
+// missing instead of a generic "not ready" — mirrors psInvalidFormulaMessage's reason-code shape.
+function ptSetupMissingReason(t) {
+  if (!t.display || !t.display.trim() || t.display.trim() === 'New template') return 'name';
+  if (!PS_FORMULA_KINDS.some(k => k.value === t.formula)) return 'formula';
+  if (t.formula === 'freeform' && !SIZE_ORDER.some(size => Number.isFinite((t.rates || {})[size]))) return 'rate';
+  return null;
+}
 function ptCanCompleteSetup(t) {
-  return !!(t.display && t.display.trim() && t.display.trim() !== 'New template');
+  return ptSetupMissingReason(t) === null;
 }
 // The one and only place needsSetup is ever cleared — deliberately never inferred from editing
 // any field (including Name — see ptCanCompleteSetup's own comment on why a real-looking name
@@ -6061,7 +6191,10 @@ function ptCanCompleteSetup(t) {
 function ptCompleteSetup(id) {
   const t = RECIPES.find(r => r.id === id);
   if (!t) return;
-  if (!ptCanCompleteSetup(t)) { alert('Give this template a real name before completing setup.'); return; }
+  const reason = ptSetupMissingReason(t);
+  if (reason === 'name') { alert('Give this template a real name before completing setup.'); return; }
+  if (reason === 'formula') { alert('Choose a calculation method (Formula) before completing setup.'); return; }
+  if (reason === 'rate') { alert('Enter at least one balloon-per-ft rate before completing setup.'); return; }
   if (!confirm(`Mark "${t.display}" as ready to use? It will become selectable for new production items and imports.`)) return;
   delete t.needsSetup;
   ptRenderList();
@@ -6076,15 +6209,14 @@ function ptAddTemplate(prefillName) {
   // type this ends up being; they only exist so the record has something to render while it's
   // being configured. See psReadyRecipes/ptReadyRecipe for where this keeps the template out of
   // every real selector until setup is explicitly done.
-  // formula: 'classic' (not 'freeform') — classic uses one blended rate (FORMULAS.classicPerFt),
-  // category-agnostic, so it's always a safe starting point regardless of what category this
-  // template ends up with. Freeform's per-size rates only exist for categories with a shared
-  // table (see ptCategorySuggestions/ptUpdateField) — defaulting a brand-new, not-yet-categorized
-  // template to freeform would mean it starts silently pointed at Garland's rates.
+  // formula: null (not defaulted to 'classic' or any other kind) — a calculation method is a real
+  // decision, not a safe guess (Photo Frame and other custom builds prove Classic/Freeform aren't
+  // the only two families that will ever exist here). Leaving it unset forces an explicit choice
+  // in the Formula editor before Complete Template Setup can ever succeed (ptCanCompleteSetup).
   const newTemplate = psNormalizeTemplateFields({
     id: 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
     display: (prefillName && prefillName.trim()) || 'New template', category: 'Garland', style: 'Classic',
-    formula: 'classic', customLinear: true,
+    formula: null, customLinear: true,
     needsSetup: true,
   });
   RECIPES = RECIPES.concat([newTemplate]);
