@@ -32,6 +32,19 @@
     --radius: 10px;
     --radius-sm: 7px;
     --font: 'Urbanist', -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+
+    /* Balloon Code brand tokens — Migration Step 1: defined, not yet wired into any selector. */
+    --brand-ink: #0B2740;
+    --brand-blue: #146C7D;
+    --brand-seafoam: #7CC6A7;
+    --brand-surface: #ECF7F4;
+    --brand-neutral: #CFD9DE;
+    --success: #1F7A46;
+    --success-text: #1F7A46;
+    --success-bg: #E6F4EA;
+    --danger: #C0392B;
+    --danger-text: #C0392B;
+    --danger-bg: #FBEAE8;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -51,6 +64,21 @@
       --warning-text: #f0a500;
       --info-bg: #10202e;
       --info-text: #6fa8d8;
+
+      /* Balloon Code brand tokens — dark-mode counterparts, same light/dark pairing convention as
+         --accent/--accent-border and --warning-bg/--warning-text above (bg roles go to a deep tint
+         of the same hue; foreground/solid roles brighten for contrast). Not yet wired in. */
+      --brand-ink: #9FC2D6;
+      --brand-blue: #4FB8CE;
+      --brand-seafoam: #8ED4B7;
+      --brand-surface: #132D28;
+      --brand-neutral: #3A4A52;
+      --success: #4FCB86;
+      --success-text: #4FCB86;
+      --success-bg: #123322;
+      --danger: #E8695A;
+      --danger-text: #E8695A;
+      --danger-bg: #3A1512;
     }
   }
 
