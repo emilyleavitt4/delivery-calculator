@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Balloon Calc">
-<title>Balloon Delivery Calculator</title>
+<meta name="apple-mobile-web-app-title" content="Balloon Code">
+<title>Balloon Code</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -259,6 +259,19 @@
   .tool-tile-title { font-size: 11.5px; font-weight: 600; line-height: 1.25; letter-spacing: -0.1px; }
   .tool-tile.soon { opacity: 0.45; cursor: default; }
   .tool-tile.soon:hover, .tool-tile.soon:active { background: var(--surface); border-color: var(--border); }
+
+  /* HOME PILOT — scoped to #view-home only, deliberately not a change to the shared .tool-tile
+     component (Settings/Inventory/Job Cost category pickers keep today's colored-icon-box look
+     until they're each redesigned in their own pass). Every tile on Home used the same colored
+     icon badge regardless of destination — the generic icon-grid-dashboard look the audit flagged.
+     Icons default to a quiet ink tone here; color is reserved for the moment you're actually
+     interacting with a tile, not a permanent decoration on every one at rest. */
+  #view-home .tool-tile-icon { background: none; color: var(--brand-ink); font-size: 17px; width: auto; height: auto; }
+  #view-home .tool-tile:hover .tool-tile-icon, #view-home .tool-tile:active .tool-tile-icon { color: var(--brand-blue); }
+  #view-home .tool-tile.soon .tool-tile-icon { color: var(--text-tertiary); }
+  @media (min-width: 900px) {
+    #view-home .tool-tile-icon { font-size: 22px; }
+  }
   @media (min-width: 900px) {
     /* Any .tool-grid (Home's own tool tiles included, not just Settings') is a fixed 3-column
        grid with a square aspect-ratio and fixed-size icon/text — fine at 430px, but stretched
@@ -1233,7 +1246,7 @@
   <div id="auth-gate" style="position:fixed; inset:0; z-index:9999; background:var(--bg); display:flex; align-items:center; justify-content:center; flex-direction:column; padding:2rem; text-align:center;">
     <div id="auth-gate-signin">
       <i class="fa-solid fa-toolbox" style="font-size:32px; color:var(--brand-blue); margin-bottom:1rem; display:block;"></i>
-      <div style="font-size:19px; font-weight:700; margin-bottom:0.4rem;">Balloon Business Toolkit</div>
+      <div style="font-size:19px; font-weight:700; margin-bottom:0.4rem;">Balloon Code</div>
       <div style="font-size:14px; color:var(--text-secondary); margin-bottom:1.5rem;">Sign in to continue</div>
       <button class="save-btn" style="width:auto; padding:12px 28px;" onclick="handleSignInClick()">
         <i class="fa-brands fa-google"></i> Sign in with Google
@@ -1256,7 +1269,7 @@
         <i class="fa-solid fa-arrow-left"></i>
       </button>
       <i class="fa-solid fa-toolbox topbar-icon" id="topbar-icon"></i>
-      <h1 id="topbar-title">Balloon Business Toolkit</h1>
+      <h1 id="topbar-title">Balloon Code</h1>
       <span class="app-mode-badge">Admin</span>
     </div>
     <button class="icon-btn" id="topbar-gear" onclick="gateAdminNav(() => { settingsShowHome(); showView('settings'); })" aria-label="Settings" style="display:none">
@@ -1279,11 +1292,13 @@
     </div>
 
     <div style="display:flex; align-items:center; justify-content:space-between; margin-top:0;">
-      <div class="section-label" style="margin:0;">Your tools</div>
+      <div class="section-label" style="margin:0;">Job tools</div>
       <button class="icon-btn" id="home-edit-toggle" style="width:auto; padding:3px 10px; font-size:11px;" onclick="homeToggleEditMode()">Rearrange</button>
     </div>
+    <div class="tool-grid" id="home-tool-grid-job"></div>
 
-    <div class="tool-grid" id="home-tool-grid"></div>
+    <div class="section-label">Business tools</div>
+    <div class="tool-grid" id="home-tool-grid-business"></div>
 
     <div class="home-footer-note">More tools coming soon</div>
     <!-- Settings (where sign-out used to live) is now admin-gated — this stays reachable by
@@ -2183,7 +2198,7 @@ document.querySelectorAll('[id$="-onsite-staff"]').forEach(el => {
 // showGear: true on every screen except Settings itself (already there) and Review Import (a
 // transient mid-flow step, not a place to jump out of into configuration).
 const TOOL_META = {
-  home:       { title: 'Balloon Business Toolkit',    icon: 'fa-solid fa-toolbox',            showBack: false, showGear: true  },
+  home:       { title: 'Balloon Code',    icon: 'fa-solid fa-toolbox',            showBack: false, showGear: true  },
   calc:       { title: 'Delivery Calculator',          icon: 'fa-solid fa-location-dot',       showBack: true,  showGear: true  },
   import:     { title: 'Import Job',                   icon: 'fa-solid fa-file-arrow-up',      showBack: true,  showGear: true  },
   production: { title: 'Production Sheets',            icon: 'fa-solid fa-clipboard-list',     showBack: true,  showGear: true  },
@@ -2213,21 +2228,26 @@ const TOOL_META = {
 // The Home screen's tiles used to be static HTML in a fixed order; this registry drives them
 // instead so the order can be personalized. One entry per tile — view/onclick target, icon,
 // title, and `soon` for the one disabled placeholder tile that has no real destination yet.
+// `group` is a presentation-only split (not synced/configurable data) separating what a job
+// actually needs — import through pricing, production, staffing — from ongoing business
+// reference/setup that stays the same between jobs. Rearranging is scoped within a group; moving
+// a tile between groups isn't offered, since group membership describes what the tool IS, not a
+// personal preference.
 const HOME_TOOLS = [
-  { id: 'import', view: 'import', icon: 'fa-solid fa-file-arrow-up', title: 'Import Job' },
-  { id: 'calc', view: 'calc', icon: 'fa-solid fa-location-dot', title: 'Delivery Calculator' },
-  { id: 'production', view: 'production', icon: 'fa-solid fa-clipboard-list', title: 'Production Sheets' },
-  { id: 'staffing', view: 'staffing', icon: 'fa-solid fa-calendar-days', title: 'Event Schedule &amp; Staffing' },
-  { id: 'quantity', view: 'quantity', icon: 'fa-solid fa-ruler', title: 'Quantity Calculator' },
-  { id: 'jobcost', view: 'jobcost', icon: 'fa-solid fa-tags', title: 'Job Cost Calculator' },
-  { id: 'helium', view: 'helium', icon: 'fa-solid fa-wind', title: 'Helium Cost Calculator' },
-  { id: 'letters', view: 'letters', icon: 'fa-solid fa-font', title: 'Letter Styling Calculator' },
-  { id: 'formulas', view: 'formulas', icon: 'fa-solid fa-flask', title: 'Custom Recipes' },
-  { id: 'inventory', view: 'inventory', icon: 'fa-solid fa-boxes-stacked', title: 'Inventory' },
-  { id: 'assets', view: 'assets', icon: 'fa-solid fa-warehouse', title: 'Assets' },
-  { id: 'supplies', view: 'supplies', icon: 'fa-solid fa-cart-shopping', title: 'Supply Order' },
-  { id: 'timetracker', view: 'timetracker', icon: 'fa-solid fa-clock', title: 'Time Tracker' },
-  { id: 'vehiclemaintenance', view: null, icon: 'fa-solid fa-car', title: 'Vehicle Maintenance Log', soon: true },
+  { id: 'import', view: 'import', icon: 'fa-solid fa-file-arrow-up', title: 'Import Job', group: 'job' },
+  { id: 'calc', view: 'calc', icon: 'fa-solid fa-location-dot', title: 'Delivery Calculator', group: 'job' },
+  { id: 'production', view: 'production', icon: 'fa-solid fa-clipboard-list', title: 'Production Sheets', group: 'job' },
+  { id: 'staffing', view: 'staffing', icon: 'fa-solid fa-calendar-days', title: 'Event Schedule &amp; Staffing', group: 'job' },
+  { id: 'quantity', view: 'quantity', icon: 'fa-solid fa-ruler', title: 'Quantity Calculator', group: 'job' },
+  { id: 'jobcost', view: 'jobcost', icon: 'fa-solid fa-tags', title: 'Job Cost Calculator', group: 'job' },
+  { id: 'helium', view: 'helium', icon: 'fa-solid fa-wind', title: 'Helium Cost Calculator', group: 'job' },
+  { id: 'letters', view: 'letters', icon: 'fa-solid fa-font', title: 'Letter Styling Calculator', group: 'job' },
+  { id: 'formulas', view: 'formulas', icon: 'fa-solid fa-flask', title: 'Custom Recipes', group: 'business' },
+  { id: 'inventory', view: 'inventory', icon: 'fa-solid fa-boxes-stacked', title: 'Inventory', group: 'business' },
+  { id: 'assets', view: 'assets', icon: 'fa-solid fa-warehouse', title: 'Assets', group: 'business' },
+  { id: 'supplies', view: 'supplies', icon: 'fa-solid fa-cart-shopping', title: 'Supply Order', group: 'business' },
+  { id: 'timetracker', view: 'timetracker', icon: 'fa-solid fa-clock', title: 'Time Tracker', group: 'business' },
+  { id: 'vehiclemaintenance', view: null, icon: 'fa-solid fa-car', title: 'Vehicle Maintenance Log', soon: true, group: 'business' },
 ];
 // Personal per device — deliberately localStorage, not synced business data, so everyone on the
 // team can arrange their own most-used tools up top without affecting anyone else's phone/laptop.
@@ -2253,20 +2273,23 @@ function homeToggleEditMode() {
   homeRenderTiles();
 }
 function homeRenderTiles() {
-  const grid = document.getElementById('home-tool-grid');
-  if (!grid) return;
-  grid.innerHTML = homeTileOrder.map(id => {
-    const t = HOME_TOOLS.find(x => x.id === id);
-    if (!t) return '';
-    const clickAttr = (!homeEditMode && !t.soon) ? ` onclick="showView('${t.view}')"` : '';
-    return `<div class="tool-tile${t.soon ? ' soon' : ''}${homeEditMode ? ' editing' : ''}" data-tool-id="${t.id}"${clickAttr}>
-      <div class="tool-tile-icon"><i class="${t.icon}"></i></div>
-      <div class="tool-tile-title">${t.title}</div>
-    </div>`;
-  }).join('');
-  if (homeEditMode) {
-    grid.querySelectorAll('.tool-tile').forEach(tile => tile.addEventListener('pointerdown', homeDragStart));
-  }
+  ['job', 'business'].forEach(group => {
+    const grid = document.getElementById('home-tool-grid-' + group);
+    if (!grid) return;
+    grid.innerHTML = homeTileOrder
+      .map(id => HOME_TOOLS.find(x => x.id === id))
+      .filter(t => t && t.group === group)
+      .map(t => {
+        const clickAttr = (!homeEditMode && !t.soon) ? ` onclick="showView('${t.view}')"` : '';
+        return `<div class="tool-tile${t.soon ? ' soon' : ''}${homeEditMode ? ' editing' : ''}" data-tool-id="${t.id}"${clickAttr}>
+          <div class="tool-tile-icon"><i class="${t.icon}"></i></div>
+          <div class="tool-tile-title">${t.title}</div>
+        </div>`;
+      }).join('');
+    if (homeEditMode) {
+      grid.querySelectorAll('.tool-tile').forEach(tile => tile.addEventListener('pointerdown', homeDragStart));
+    }
+  });
 }
 
 // Drag-and-drop via Pointer Events (unifies mouse + touch, no separate mobile implementation
@@ -2289,7 +2312,9 @@ function homeDragMove(e) {
   const dx = e.clientX - homeDragState.startX;
   const dy = e.clientY - homeDragState.startY;
   homeDragState.tile.style.transform = `translate(${dx}px, ${dy}px)`;
-  const grid = document.getElementById('home-tool-grid');
+  // Scoped to the tile's own grid — a tile only ever reorders within its own group (Job/Business),
+  // never across, since group membership describes what the tool is, not a personal preference.
+  const grid = homeDragState.tile.closest('.tool-grid');
   const tiles = [...grid.querySelectorAll('.tool-tile')];
   tiles.forEach(t => t.classList.remove('drop-target'));
   const target = tiles.find(t => {
@@ -2305,7 +2330,7 @@ function homeDragEnd(e) {
   const { id, tile, targetId } = homeDragState;
   tile.style.transform = '';
   tile.classList.remove('dragging');
-  document.querySelectorAll('#home-tool-grid .tool-tile.drop-target').forEach(t => t.classList.remove('drop-target'));
+  document.querySelectorAll('#home-tool-grid-job .tool-tile.drop-target, #home-tool-grid-business .tool-tile.drop-target').forEach(t => t.classList.remove('drop-target'));
   tile.removeEventListener('pointermove', homeDragMove);
   tile.removeEventListener('pointerup', homeDragEnd);
   tile.removeEventListener('pointercancel', homeDragEnd);
