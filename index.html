@@ -4648,7 +4648,10 @@ function irColorRowHtml(item, idx, value) {
     const suggestions = clSearch(text).slice(0, 4);
     hintHtml = `<div class="ir-decision-hint">${suggestions.length ? 'Did you mean one of these?' : "Not in your Color Library yet — add it, or mark it a general note."}</div>`;
     chipsHtml = `<div class="ir-color-suggestions">
-      ${suggestions.map(s => `<button class="ir-chip-btn" onclick="irResolveColorRow('${item.id}',${idx},'${s.colorName.replace(/'/g, "\\'")}')">${psEscape(s.colorName)}</button>`).join('')}
+      ${suggestions.map(s => `<span style="display:inline-flex; align-items:center; gap:1px;">
+        <button class="ir-chip-btn" onclick="irResolveColorRow('${item.id}',${idx},'${s.colorName.replace(/'/g, "\\'")}')">${psEscape(s.colorName)}</button>
+        <button class="ir-chip-btn" onclick="irAlwaysMatchColor('${item.id}',${idx},'${s.id}')" title="Always treat &quot;${invAttr(text)}&quot; as ${invAttr(s.colorName)} — future imports with this exact text resolve automatically">⭐</button>
+      </span>`).join('')}
       <button class="ir-chip-btn" onclick="irAddColorAsNew('${item.id}',${idx})">+ Add "${psEscape(text)}" as new</button>
       <button class="ir-chip-btn" onclick="irMarkColorGeneralNote('${item.id}',${idx})">General note</button>
     </div>`;
@@ -4702,6 +4705,24 @@ function irResolveColorRow(itemId, idx, colorName) {
   const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
   if (!item) return;
   item.colors[idx] = colorName;
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
+// The "these are always the same" answer to a suggested match — same mechanism Review & Pull's
+// own Always Match already uses (clAddAlias, already audited there): adds this exact raw text as
+// a permanent alias on the Library entry, so it resolves on its own for every future import too,
+// not just this one. Deliberately does NOT rewrite item.colors[idx] to the canonical name — the
+// item keeps whatever the invoice actually said (e.g. "Black"), and clResolveName/
+// clColorsNeedReview already check aliases, so that exact text now resolves correctly as-is.
+// If some other brand's color independently claims the same alias later, clResolveName correctly
+// reverts to an ambiguous, review-needed match rather than silently guessing — same as every
+// other exact-match path in this app.
+function irAlwaysMatchColor(itemId, idx, colorId) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  const text = (item.colors[idx] || '').trim();
+  if (!text) return;
+  clAddAlias(colorId, text);
   irRecomputeItemStatus(item);
   irRenderShell();
 }
@@ -5802,8 +5823,13 @@ function ptLockAdmin() {
 
 function ptRenderList() {
   const container = document.getElementById('pt-list');
-  if (!container) return;
-  container.innerHTML = RECIPES.map(t => ptTemplateHtml(t)).join('');
+  if (container) container.innerHTML = RECIPES.map(t => ptTemplateHtml(t)).join('');
+  // The same shared editor (ptTemplateFieldsEditorHtml/ptTaskPhaseEditorHtml) also renders inline
+  // inside Import Review's "+ New template" flow, via a completely separate DOM root (ir-root).
+  // Without this, a field edited there (e.g. unchecking "entered per job") updates RECIPES
+  // correctly but the visible card stays stuck on its old HTML, since only #pt-list was ever
+  // refreshed. irRenderShell() already no-ops safely if Import Review isn't the active screen.
+  if (typeof irRenderShell === 'function') irRenderShell();
 }
 
 // One phase's row-editor: a plain text input per task (mutated in place by id, never rebuilt
