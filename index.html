@@ -3275,18 +3275,21 @@ function psLineBalloonColors(line) {
 // How much height a topper takes off the balloon-spiral body — via psTopperFt (0 for
 // anything without a topper, i.e. everything except columns).
 //
-// Returns { sizes: {[prodSize]: count}, valid: boolean }. `valid` is false whenever the
-// underlying footage or rate isn't a real, usable number — a customLinear item whose per-job
-// footage was never entered, a template snapshot missing linearFt, a freeform template with no
-// (or non-numeric) rates table, etc. This is the same "don't guess, say so" convention already
-// used for missing Standard Package Qty (see invNeedBreakdown's configMissing) — every caller
-// must treat valid:false as "needs configuration," never render or act on `sizes` (always {} in
-// that case) as if it were a real answer. Fixes a real bug: an undefined linear/rate previously
-// produced NaN counts that then silently passed every downstream `<= 0` guard (NaN comparisons
-// are always false) and reached Review & Pull as an actionable "Ready — Pull NaN" row.
+// Returns { sizes: {[prodSize]: count}, valid: boolean, reason?: string }. `valid` is false
+// whenever the underlying footage or rate isn't a real, usable number. `reason` is a short,
+// caller-facing code — never a raw NaN or developer term — naming WHICH input is missing, so the
+// UI can say "Missing footage" vs "Formula incomplete" instead of one generic message:
+//   'missing-footage' — a customLinear item whose per-job footage was never entered, or a fixed
+//                        template with no linearFt configured at all.
+//   'missing-rate'     — a freeform template with no rates table (or a non-numeric entry in it),
+//                        or a classic template/global rate that isn't a real number.
+// Every caller must treat valid:false as "needs configuration," never render or act on `sizes`
+// (always {} in that case) as if it were a real answer. Fixes a real bug: an undefined linear/rate
+// previously produced NaN counts that then silently passed every downstream `<= 0` guard (NaN
+// comparisons are always false) and reached Review & Pull as an actionable "Ready — Pull NaN" row.
 function psComputeTotals(recipe, qty, customLinear) {
   let linear = recipe.customLinear ? customLinear : recipe.linearFt;
-  if (!Number.isFinite(linear) || !Number.isFinite(qty)) return { sizes: {}, valid: false };
+  if (!Number.isFinite(linear) || !Number.isFinite(qty)) return { sizes: {}, valid: false, reason: 'missing-footage' };
   const topperFt = psTopperFt(recipe);
   if (Number.isFinite(topperFt) && topperFt) linear = Math.max(0, linear - topperFt);
   const totalLinear = linear * qty;
@@ -3297,10 +3300,10 @@ function psComputeTotals(recipe, qty, customLinear) {
     // change a job someone already built. Catalog RECIPES entries (no snapshot yet) still use
     // the live rate, unchanged from before.
     const rate = typeof recipe.classicPerFt === 'number' ? recipe.classicPerFt : FORMULAS.classicPerFt;
-    if (!Number.isFinite(rate)) return { sizes: {}, valid: false };
+    if (!Number.isFinite(rate)) return { sizes: {}, valid: false, reason: 'missing-rate' };
     totals['11"'] = Math.ceil(totalLinear * rate);
   } else {
-    if (!recipe.rates || typeof recipe.rates !== 'object') return { sizes: {}, valid: false };
+    if (!recipe.rates || typeof recipe.rates !== 'object') return { sizes: {}, valid: false, reason: 'missing-rate' };
     let allRatesValid = true;
     Object.keys(recipe.rates).forEach(size => {
       const rate = recipe.rates[size];
@@ -3308,9 +3311,33 @@ function psComputeTotals(recipe, qty, customLinear) {
       const v = rate * totalLinear;
       if (v > 0.001) totals[size] = Math.ceil(v);
     });
-    if (!allRatesValid) return { sizes: {}, valid: false };
+    if (!allRatesValid) return { sizes: {}, valid: false, reason: 'missing-rate' };
   }
   return { sizes: totals, valid: true };
+}
+
+// Human-language explanation for a psComputeTotals reason code — never shown to a user as a raw
+// code or a NaN. Deliberately short; the caller supplies its own next-step sentence/link.
+function psInvalidFormulaMessage(reason) {
+  if (reason === 'missing-footage') return 'Missing footage — this template needs a fixed length, or the actual footage entered for this job.';
+  if (reason === 'missing-rate') return 'Formula incomplete — no balloon-count rate is configured for this template yet.';
+  return 'Quantity unavailable — this template needs configuration before it can be calculated.';
+}
+
+// Jumps to this template's own row in Settings → Templates & Formulas → Production Templates,
+// expanded and ready to edit — the concrete "path to fix" for a Needs Configuration message,
+// not just a description of the problem. Doesn't bypass the admin passcode gate that section
+// already has; it only navigates and expands, same as any other admin-gated settings screen.
+// settingsShowGroupSection only toggles display on already-rendered DOM — it never re-renders a
+// section's own content — so ptRenderShell() is called explicitly here to guarantee the panel
+// actually reflects ptCollapsed/ptExpandedTemplates just set above, regardless of whatever state
+// it was left in the last time Settings happened to be open.
+function psGoToProductionTemplate(templateId) {
+  ptExpandedTemplates.add(templateId);
+  ptCollapsed = false;
+  showView('settings');
+  settingsShowGroupSection('templatesFormulas', 'productionTemplates');
+  ptRenderShell();
 }
 
 // Deep-copies a production template (RECIPES entry) into a self-contained snapshot suitable
@@ -5024,7 +5051,10 @@ function psProductionBodyHtml(job) {
       html += `<div style="font-size:14px; font-weight:700; margin-bottom:2px;">${psEscape(r.display)} <span style="font-weight:400; color:var(--text-secondary);">× ${line.qty}</span></div>`;
       html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.3rem;">Colors: ${psEscape(line.colors.join(' / '))}</div>`;
       if (!totalsResult.valid) {
-        html += `<div style="font-size:12px; color:var(--warning-text); margin:4px 0;"><i class="fa-solid fa-triangle-exclamation"></i> Can't calculate a pull count for this item — its template is missing footage or a rate configuration. Fix it in Production Templates before pulling.</div>`;
+        html += `<div style="font-size:12px; color:var(--warning-text); margin:4px 0;">
+          <i class="fa-solid fa-triangle-exclamation"></i> ${psEscape(psInvalidFormulaMessage(totalsResult.reason))}
+          ${r.id ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; margin-left:4px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psGoToProductionTemplate('${r.id}')">Fix template</button>` : ''}
+        </div>`;
       }
       SIZE_ORDER.forEach(size => {
         if (!totals[size]) return;
@@ -5605,7 +5635,10 @@ function qcRenderResults() {
   let html = `<div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">${psEscape(recipe.display)} <span style="font-weight:400; color:var(--text-secondary);">× ${qcState.qty}</span></div>`;
 
   if (!totalsResult.valid) {
-    html += `<div style="font-size:13px; color:var(--warning-text);"><i class="fa-solid fa-triangle-exclamation"></i> Can't calculate this template — it's missing footage or a rate configuration. Fix it in Production Templates.</div>`;
+    html += `<div style="font-size:13px; color:var(--warning-text);">
+      <i class="fa-solid fa-triangle-exclamation"></i> ${psEscape(psInvalidFormulaMessage(totalsResult.reason))}
+      ${recipe.id ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; margin-left:4px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psGoToProductionTemplate('${recipe.id}')">Fix template</button>` : ''}
+    </div>`;
   } else if (sizes.length === 0) {
     html += `<div style="font-size:13px; color:var(--text-secondary);">No balloons needed for this combination.</div>`;
   } else if (colors.length <= 1) {
@@ -8512,7 +8545,7 @@ function psComputeJobRequirements(job) {
         jobId: job.id, productionItemId, colorId: null, inventoryItemId: null, brand: '',
         color: '', size: '', qty: 0, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
         source: { jobId: job.id, jobName: job.jobName || '', itemLabel: recipe.display || '' },
-        unresolved: false, formulaInvalid: true,
+        unresolved: false, formulaInvalid: true, formulaInvalidReason: totalsResult.reason, templateId: recipe.id || null,
       });
       return;
     }
@@ -8684,7 +8717,7 @@ function psReviewPullRows(job) {
       // One row per broken-config production item — never merged with anything else, since
       // there's no real color/size to group by. Never Ready, never actionable, by construction.
       key = 'formulaInvalid:' + req.productionItemId;
-      groupInfo = { kind: 'formulaInvalid', itemLabel: req.source && req.source.itemLabel };
+      groupInfo = { kind: 'formulaInvalid', itemLabel: req.source && req.source.itemLabel, reason: req.formulaInvalidReason, templateId: req.templateId };
     } else if (req.unresolved) {
       key = 'unresolved:' + req.color.trim().toLowerCase() + ':' + req.size;
       groupInfo = { kind: 'unresolved', color: req.color, size: req.size, candidates: req.candidates || [] };
@@ -8851,7 +8884,8 @@ function psReviewPullRowHtml(job, row, readOnly) {
         <div style="font-size:13px; font-weight:700;">${psEscape(row.itemLabel || 'Production item')}</div>
         ${rpBadge('Needs Configuration')}
       </div>
-      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">Can't calculate what this item needs — its production template is missing footage or a rate configuration. Fix it in Production Templates, then this will recompute automatically.</div>
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">${psEscape(psInvalidFormulaMessage(row.reason))} This will recompute automatically once fixed.</div>
+      ${row.templateId ? `<div class="rp-actions"><button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psGoToProductionTemplate('${row.templateId}')">Fix template</button></div>` : ''}
     </div>`;
   }
 
@@ -8927,7 +8961,7 @@ function psReviewPullRowHtml(job, row, readOnly) {
         <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)}</div>
         ${rpBadge('Needs Configuration')}
       </div>
-      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">This requirement's quantity couldn't be calculated. Check this item's production template and color/size configuration.</div>
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">${psEscape(psInvalidFormulaMessage())} Check this item's production template and color/size configuration.</div>
     </div>`;
   }
 
