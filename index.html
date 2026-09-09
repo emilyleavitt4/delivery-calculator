@@ -5723,8 +5723,12 @@ function ptInit() {
       saved.forEach(t => {
         psNormalizeTemplateFields(t);
         // Firestore round-trips a plain copy of `rates`, not the live FORMULAS.freeformRates
-        // object — re-point it so editing Balloon math above still updates these templates.
-        if (t.formula === 'freeform') t.rates = FORMULAS.freeformRates[t.category] || FORMULAS.freeformRates.Garland;
+        // object — re-point it so editing Balloon math above still updates these templates, but
+        // only when this category actually has a shared rate table. Category is free text now
+        // (see ptCategorySuggestions) — a custom category with no shared table keeps computing
+        // with its own already-saved `rates` rather than being silently substituted with
+        // Garland's numbers, which would have been a real, invisible wrong-answer bug.
+        if (t.formula === 'freeform' && FORMULAS.freeformRates[t.category]) t.rates = FORMULAS.freeformRates[t.category];
       });
       RECIPES = saved; // this business's saved library entirely replaces the starter defaults
       ptRenderShell();
@@ -5814,6 +5818,19 @@ function ptTaskPhaseEditorHtml(t, phase) {
   </div>`;
 }
 
+// Category is a free-text field, not a closed set — balloon businesses build far more than
+// Column/Garland/Arch (walls, bouquets, centerpieces, topiaries, sculptures, ceiling installs...)
+// and different businesses name their own decor types differently. These three plus whatever
+// categories already exist across this business's own saved templates are offered as a <datalist>
+// (suggestions, not a constraint) so common cases stay one click while a genuinely new decor type
+// is just typed. Nothing downstream requires category to be one of these three — see the freeform
+// rate-lookup fix in ptUpdateField/ptInit below for the one place that used to assume it was.
+function ptCategorySuggestions() {
+  const cats = new Set(['Column', 'Garland', 'Arch']);
+  RECIPES.forEach(r => { if (r.category) cats.add(r.category); });
+  return [...cats].sort();
+}
+
 // The shared "configure a template" body — fields + Prep/Build/Finish task rows, nothing else
 // (no Complete Setup/Delete buttons; callers render their own action row, since what's
 // appropriate differs — Settings offers Delete, the inline Import Review flow deliberately
@@ -5828,9 +5845,8 @@ function ptTemplateFieldsEditorHtml(t) {
   html += `<div class="row">
     <div class="settings-field" style="margin-bottom:0.6rem;"><label>Name</label><input type="text" value="${invAttr(t.display)}" onchange="ptUpdateField('${t.id}','display', this.value)"></div>
     <div class="settings-field" style="margin-bottom:0.6rem;"><label>Category</label>
-      <select onchange="ptUpdateField('${t.id}','category', this.value)">
-        ${['Column', 'Garland', 'Arch'].map(c => `<option value="${c}"${c === t.category ? ' selected' : ''}>${c}</option>`).join('')}
-      </select>
+      <input type="text" list="pt-category-suggestions" value="${invAttr(t.category)}" placeholder="e.g. Column, Sculpture, Bouquet" onchange="ptUpdateField('${t.id}','category', this.value)">
+      <datalist id="pt-category-suggestions">${ptCategorySuggestions().map(c => `<option value="${invAttr(c)}">`).join('')}</datalist>
     </div>
   </div>
   <div style="font-size:11px; color:var(--text-secondary); margin:-0.2rem 0 0.6rem;">If a style genuinely needs different build directions, give it its own template (e.g. "Classic Column" and "Freeform Column" as two separate Names) rather than expressing it as a size/label variant of this one.</div>
@@ -5896,10 +5912,14 @@ function ptUpdateField(id, field, value) {
   if (!t) return;
   if (field === 'linearFt') t[field] = parseFloat(value) || 0;
   else t[field] = value;
-  // Every template's balloon-count math comes from FORMULAS.freeformRates[category] (see
-  // Balloon math above) — changing Category has to re-point "rates" at the new category's
-  // table, or the template keeps computing with whatever category it was created under.
-  if (field === 'category') t.rates = FORMULAS.freeformRates[value] || FORMULAS.freeformRates.Garland;
+  // A freeform template's balloon-count math comes from FORMULAS.freeformRates[category] (see
+  // Balloon math above) when that category has a shared rate table — Column/Garland/Arch, or any
+  // other category a business has configured one for. Category is free text (see
+  // ptCategorySuggestions): typing a brand-new one that has no shared table must NOT silently
+  // substitute Garland's rates — it leaves `rates` exactly as it already was, since guessing a
+  // wrong-but-plausible rate table would be a real, invisible calculation error, not just a
+  // cosmetic default.
+  if (field === 'category' && t.formula === 'freeform' && FORMULAS.freeformRates[value]) t.rates = FORMULAS.freeformRates[value];
   ptRenderList();
   ptSaveLibrary();
 }
@@ -5964,14 +5984,19 @@ function ptCompleteSetup(id) {
 // purely a convenience default, still fully editable, and still gated behind the same
 // ptCanCompleteSetup/Complete Template Setup requirement regardless of what name it starts with.
 function ptAddTemplate(prefillName) {
-  // needsSetup: true — these starting values (Garland/Freeform/freeform/Garland rates) are not a
-  // meaningful default for whatever real decor type this ends up being; they only exist so the
-  // record has something to render while it's being configured. See psReadyRecipes/ptReadyRecipe
-  // for where this keeps the template out of every real selector until setup is explicitly done.
+  // needsSetup: true — these starting values are not a meaningful default for whatever real decor
+  // type this ends up being; they only exist so the record has something to render while it's
+  // being configured. See psReadyRecipes/ptReadyRecipe for where this keeps the template out of
+  // every real selector until setup is explicitly done.
+  // formula: 'classic' (not 'freeform') — classic uses one blended rate (FORMULAS.classicPerFt),
+  // category-agnostic, so it's always a safe starting point regardless of what category this
+  // template ends up with. Freeform's per-size rates only exist for categories with a shared
+  // table (see ptCategorySuggestions/ptUpdateField) — defaulting a brand-new, not-yet-categorized
+  // template to freeform would mean it starts silently pointed at Garland's rates.
   const newTemplate = psNormalizeTemplateFields({
     id: 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-    display: (prefillName && prefillName.trim()) || 'New template', category: 'Garland', style: 'Freeform',
-    formula: 'freeform', customLinear: true, rates: FORMULAS.freeformRates.Garland,
+    display: (prefillName && prefillName.trim()) || 'New template', category: 'Garland', style: 'Classic',
+    formula: 'classic', customLinear: true,
     needsSetup: true,
   });
   RECIPES = RECIPES.concat([newTemplate]);
