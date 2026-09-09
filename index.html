@@ -1628,25 +1628,29 @@
 
   <!-- ═══════════════════════════════════════ PRODUCTION VIEW -->
   <div class="view" id="view-production">
-    <div class="section-label" style="margin-top:0">New job</div>
-    <div class="card no-print">
-      <div class="row">
-        <div class="settings-field" style="margin-bottom:0">
-          <label>Client / Event name</label>
-          <input type="text" id="pj-new-name-production" placeholder="e.g. Smith Baby Shower">
-        </div>
-        <div class="settings-field" style="margin-bottom:0">
-          <label>Event date</label>
-          <input type="text" id="pj-new-date-production" placeholder="e.g. July 20, 2026">
-        </div>
-      </div>
-      <button class="save-btn" onclick="psCreateManualJob('production')">Create job</button>
-    </div>
-
-    <div class="section-label">Jobs</div>
+    <div class="section-label" style="margin-top:0">Jobs</div>
     <div id="ps-production-job-list"></div>
     <div id="ps-production-empty" class="card" style="text-align:center; color:var(--text-secondary); display:none;">
-      No jobs yet. Import an invoice or start one above.
+      No jobs yet. Import an invoice, or create one manually below.
+    </div>
+
+    <!-- Manual entry is the exception, not how jobs normally arrive (that's Import) — tucked
+         behind an explicit disclosure instead of sitting open above every job in the list. -->
+    <div class="no-print" style="margin-top:1rem;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="psToggleManualJobForm('production')"><i class="fa-solid fa-plus"></i> Create job manually</button>
+      <div class="card" id="pj-manual-form-production" style="display:none; margin-top:0.5rem;">
+        <div class="row">
+          <div class="settings-field" style="margin-bottom:0">
+            <label>Client / Event name</label>
+            <input type="text" id="pj-new-name-production" placeholder="e.g. Smith Baby Shower">
+          </div>
+          <div class="settings-field" style="margin-bottom:0">
+            <label>Event date</label>
+            <input type="text" id="pj-new-date-production" placeholder="e.g. July 20, 2026">
+          </div>
+        </div>
+        <button class="save-btn" onclick="psCreateManualJob('production')">Create job</button>
+      </div>
     </div>
   </div><!-- end view-production -->
 
@@ -3978,6 +3982,14 @@ function psDeleteJob(jobId) {
   psDeleteJobRemote(jobId);
 }
 
+// Production's own manual-entry form is tucked behind this disclosure (see view-production) since
+// jobs normally arrive via Import — Staffing's form (view === 'staffing') has no such toggle to
+// operate on and this is simply a no-op for it.
+function psToggleManualJobForm(view) {
+  const form = document.getElementById('pj-manual-form-' + view);
+  if (!form) return;
+  form.style.display = (form.style.display === 'block') ? 'none' : 'block';
+}
 // Manual entry is itself a valid "import method" with no raw source to run through the Import
 // or Mapping Layers — it constructs an Event Model directly with just name/date, and items get
 // added one at a time afterward via psAddItemToJob instead of a bulk mapping pass.
@@ -3986,6 +3998,8 @@ function psCreateManualJob(view) {
   const dateEl = document.getElementById('pj-new-date-' + view);
   const job = psBlankJob({ jobName: nameEl.value.trim(), eventDate: dateEl.value.trim() });
   nameEl.value = ''; dateEl.value = '';
+  const form = document.getElementById('pj-manual-form-' + view);
+  if (form) form.style.display = 'none'; // tuck the disclosure back away now that it's done its job
   psExpandedProduction = job.id;
   psExpandedStaffing = job.id;
   psSaveJob(job);
@@ -4964,12 +4978,37 @@ function psStatusBtnHtml(job, view) {
   }
   return `<button class="ps-status-btn ps-status-${job.status}" onclick="event.stopPropagation(); psCycleStatus('${job.id}')">${STATUS_LABELS[job.status]}</button>`;
 }
+// eventTitle (the event/job's own name) is only ever populated by a structured import source
+// (currently 17hats) — jobName has always been the CLIENT's name (see psBlankJob's own comment).
+// Most jobs today only ever have jobName, so this is identical to the plain client-name heading
+// that's always been shown in that (common) case — nothing regresses for existing jobs, this only
+// adds the event name back in front of it when a source actually provided one.
+function psJobHeading(job) {
+  const title = (job.eventTitle || '').trim();
+  const client = (job.jobName || '').trim();
+  if (title && client) return `${title} — ${client}`;
+  return title || client || '(untitled job)';
+}
+// A quick, derived-only read on a job's Production state for the collapsed header — never a
+// stored fact, so it can't drift from job.productionItems/job.tasks. Deliberately just item count
+// + overall task completion (not a live Review & Pull recompute, which is real per-color/brand
+// resolution work that shouldn't run for every job in a list just to render a summary line).
+function psJobProductionSummary(job) {
+  const itemCount = (job.productionItems || []).length;
+  if (itemCount === 0) return 'No items yet';
+  const itemText = itemCount === 1 ? '1 item' : `${itemCount} items`;
+  const tasks = job.tasks || [];
+  if (tasks.length === 0) return itemText;
+  const done = tasks.filter(t => t.status === 'done').length;
+  return `${itemText} · ${done}/${tasks.length} tasks complete`;
+}
 function psJobHeaderHtml(job, view, expanded) {
   const deleteBtn = `<button class="icon-btn" onclick="event.stopPropagation(); psDeleteJob('${job.id}')" aria-label="Delete job"><i class="fa-solid fa-trash"></i></button>`;
   return `<div class="ps-job-header" onclick="psToggleExpand('${view}','${job.id}')">
     <div class="ps-job-header-text">
-      <div class="ps-job-name">${psEscape(job.jobName) || '(untitled job)'}</div>
+      <div class="ps-job-name">${psEscape(psJobHeading(job))}</div>
       <div class="ps-job-date">${psEscape(job.eventDate) || 'No date set'}</div>
+      ${view === 'production' ? `<div style="font-size:11px; color:var(--text-secondary);">${psEscape(psJobProductionSummary(job))}</div>` : ''}
     </div>
     ${psStatusBtnHtml(job, view)}
     ${deleteBtn}
@@ -5046,6 +5085,16 @@ function psLineFootageText(line, r) {
 // location/topper — see psStartEditItem below).
 let psColorDraftStore = {};
 let psEditingItemKey = null;
+// Which job (if any) currently has its "Add an item" form open — collapsed by default (see
+// psProductionBodyHtml), only one job is ever expanded at a time in Production anyway, so a
+// single jobId (not a per-job map) is enough. Left open after a successful add, since adding
+// several items to one job in a row is the common case — only an explicit "Done" click, or
+// switching to a different job, closes it.
+let psAddItemOpenFor = null;
+function psToggleAddItemForm(jobId) {
+  psAddItemOpenFor = (psAddItemOpenFor === jobId) ? null : jobId;
+  psRenderProductionJobs();
+}
 // Parallel to psColorDraftStore, aligned 1:1 by index with the SAME key's color draft array
 // (never keyed by name — a color can be mid-rename while its percentage is being dragged, so
 // position is the only stable link during an edit). Each entry is {pct} — the color's own name
@@ -5540,28 +5589,37 @@ function psProductionBodyHtml(job) {
   }
 
   html += `<div class="no-print">`;
-  html += `<div class="section-label">Add an item</div>`;
-  html += `<div class="settings-field">
-    <label>Item</label>
-    <select id="pi-item-${job.id}" onchange="psItemFieldsChanged('${job.id}')">${psItemOptionsHtml()}</select>
-  </div>`;
-  html += `<div class="settings-field" id="pi-linear-field-${job.id}" style="display:none">
-    <label>Actual footage</label>
-    <input type="number" id="pi-linear-${job.id}" inputmode="decimal" placeholder="e.g. 30">
-  </div>`;
-  html += `<div class="settings-field"><label>Quantity</label><input type="number" id="pi-qty-${job.id}" value="1" min="1" inputmode="numeric"></div>`;
-  html += `<div class="settings-field">
-    <label>Colors</label>
-    ${psColorPickerHtml(psColorDraftKey(job.id), psGetColorDraft(psColorDraftKey(job.id)))}
-  </div>`;
-  html += `<div class="row">
-    <div class="settings-field" style="margin-bottom:0"><label>Design (optional)</label><input type="text" id="pi-design-${job.id}" placeholder="e.g. Small Color Block"></div>
-    <div class="settings-field" style="margin-bottom:0"><label>Location (optional)</label><input type="text" id="pi-location-${job.id}" placeholder="e.g. Indoor"></div>
-  </div>`;
-  html += `<div id="pi-topper-field-${job.id}" style="display:none">
-    <div class="settings-field" style="margin-bottom:0"><label>Topper balloons (optional note)</label><input type="text" id="pi-topper-${job.id}" placeholder="e.g. 2 – 36in jumbo"></div>
-  </div>`;
-  html += `<button class="save-btn" onclick="psAddItemToJob('${job.id}')">Add to order</button>`;
+  if (psAddItemOpenFor !== job.id) {
+    // Collapsed by default — adding an item is a deliberate action, not something that should
+    // permanently occupy the space under every job whether or not anyone's about to use it.
+    html += `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="psToggleAddItemForm('${job.id}')"><i class="fa-solid fa-pen"></i> Edit production items</button>`;
+  } else {
+    html += `<div class="section-label">Add an item</div>`;
+    html += `<div class="settings-field">
+      <label>Item</label>
+      <select id="pi-item-${job.id}" onchange="psItemFieldsChanged('${job.id}')">${psItemOptionsHtml()}</select>
+    </div>`;
+    html += `<div class="settings-field" id="pi-linear-field-${job.id}" style="display:none">
+      <label>Actual footage</label>
+      <input type="number" id="pi-linear-${job.id}" inputmode="decimal" placeholder="e.g. 30">
+    </div>`;
+    html += `<div class="settings-field"><label>Quantity</label><input type="number" id="pi-qty-${job.id}" value="1" min="1" inputmode="numeric"></div>`;
+    html += `<div class="settings-field">
+      <label>Colors</label>
+      ${psColorPickerHtml(psColorDraftKey(job.id), psGetColorDraft(psColorDraftKey(job.id)))}
+    </div>`;
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Design (optional)</label><input type="text" id="pi-design-${job.id}" placeholder="e.g. Small Color Block"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Location (optional)</label><input type="text" id="pi-location-${job.id}" placeholder="e.g. Indoor"></div>
+    </div>`;
+    html += `<div id="pi-topper-field-${job.id}" style="display:none">
+      <div class="settings-field" style="margin-bottom:0"><label>Topper balloons (optional note)</label><input type="text" id="pi-topper-${job.id}" placeholder="e.g. 2 – 36in jumbo"></div>
+    </div>`;
+    html += `<div style="display:flex; gap:8px;">
+      <button class="save-btn" style="width:auto; padding:8px 16px;" onclick="psAddItemToJob('${job.id}')">Add to order</button>
+      <button class="icon-btn" style="width:auto; padding:8px 14px; font-size:13px;" onclick="psToggleAddItemForm('${job.id}')">Done</button>
+    </div>`;
+  }
 
   html += `<div class="section-label">Job details</div>
   <div class="row">
