@@ -1177,6 +1177,11 @@
   window.fbOnSnapshotSpecialtyLatexItems = (onNext, onError) => onSnapshot(specialtyLatexItemsRef, onNext, onError);
   window.fbSaveSpecialtyLatexItem = (item) => setDoc(doc(specialtyLatexItemsRef, item.id), item);
   window.fbDeleteSpecialtyLatexItem = (id) => deleteDoc(doc(specialtyLatexItemsRef, id));
+  // A real document reference (not just save/delete helpers) — needed so the generalized
+  // inventory ledger (see INV_SYSTEMS/invApplyInventoryTransactions) can read-then-write this
+  // item inside the same atomic transaction Standard Latex already uses, exactly like
+  // fbInventoryItemRef below.
+  window.fbSpecialtyLatexItemRef = (id) => doc(specialtyLatexItemsRef, id);
 
   // Foil (Letters & Numbers now; Decorator Shapes/Themed later) — its own collection, same
   // reasoning as Specialty Latex: nothing here should be able to affect Standard or Specialty
@@ -1186,6 +1191,7 @@
   window.fbOnSnapshotFoilItems = (onNext, onError) => onSnapshot(foilItemsRef, onNext, onError);
   window.fbSaveFoilItem = (item) => setDoc(doc(foilItemsRef, item.id), item);
   window.fbDeleteFoilItem = (id) => deleteDoc(doc(foilItemsRef, id));
+  window.fbFoilItemRef = (id) => doc(foilItemsRef, id); // see fbSpecialtyLatexItemRef's own comment
   // BUSINESS_ID is only in scope inside this module script — exposed once here so the classic
   // script's save-diagnostic logging can print the real path without hardcoding the business id
   // a second time.
@@ -1199,6 +1205,7 @@
   window.fbOnSnapshotInvxItems = (onNext, onError) => onSnapshot(invxItemsRef, onNext, onError);
   window.fbSaveInvxItem = (item) => setDoc(doc(invxItemsRef, item.id), item);
   window.fbDeleteInvxItem = (id) => deleteDoc(doc(invxItemsRef, id));
+  window.fbInvxItemRef = (id) => doc(invxItemsRef, id); // see fbSpecialtyLatexItemRef's own comment — covers both Add-Ons and Framework, same collection
 
   // Assets (backdrops, arches, pipe & drape, marquee letters, etc.) — a sibling system to
   // Inventory, not nested under it: reusable job property the business retains and expects back,
@@ -3355,7 +3362,15 @@ const PS_FORMULA_KINDS = [
 // comparisons are always false) and reached Review & Pull as an actionable "Ready — Pull NaN" row.
 function psComputeTotals(recipe, qty, customLinear) {
   if (!PS_FORMULA_KINDS.some(k => k.value === recipe.formula)) return { sizes: {}, valid: false, reason: 'missing-formula' };
-  let linear = recipe.customLinear ? customLinear : recipe.linearFt;
+  // A job-instance footage override (customLinear) always wins when present, regardless of
+  // whether the template is customLinear:true (footage always entered per job, e.g. Garland
+  // 25+ ft) or a fixed-length preset (e.g. Freeform Garland – 12 ft) — a business can now correct
+  // ANY line's footage after the fact (see psSaveEditItem) without needing to delete and re-add a
+  // different preset. A recipe with no override on the line falls back to its own fixed linearFt
+  // exactly as before — this is a strict superset of the old `recipe.customLinear ? customLinear :
+  // recipe.linearFt` behavior: every existing job's customLinear was already null/absent unless
+  // its recipe required one, so nothing about today's calculations changes.
+  let linear = (typeof customLinear === 'number' && customLinear > 0) ? customLinear : recipe.linearFt;
   if (!Number.isFinite(linear) || !Number.isFinite(qty)) return { sizes: {}, valid: false, reason: 'missing-footage' };
   const topperFt = psTopperFt(recipe);
   if (Number.isFinite(topperFt) && topperFt) linear = Math.max(0, linear - topperFt);
@@ -4316,6 +4331,45 @@ function psParseColorsField(text) {
   return (text || '').split(/[,/]+/).map(c => c.trim()).filter(Boolean);
 }
 
+// Case-insensitive lookup against a raw item's parsed "Key: Value" detail lines (see
+// PS_KV_LINE_RE) — Colors/Location/Description are matched by their exact, already-confirmed
+// case, but a Size/Footage field's own label casing isn't something worth risking a missed
+// extraction over, so this tries each candidate key normalized.
+function psDetailsField(details, ...keys) {
+  if (!details) return null;
+  const lower = {};
+  Object.keys(details).forEach(k => { lower[k.trim().toLowerCase()] = details[k]; });
+  for (const k of keys) {
+    const v = lower[k.toLowerCase()];
+    if (v) return v;
+  }
+  return null;
+}
+
+// Footage/size auto-extraction — deliberately two different trust levels, never a guess:
+// a structured field explicitly LABELED Size/Footage/Length already tells us a bare number means
+// footage (no unit suffix required); a number sitting loose in an item's raw NAME needs an
+// explicit unit marker (ft/feet/') before it's trusted, since an unmarked number in a title could
+// mean almost anything (a SKU, a pack count). A structured value that doesn't parse to one clean
+// number (e.g. "12x12", "Large") is left alone rather than forced into a footage. Feeds
+// item.customLinear (see psReviewItemFromRaw) — inert until a customLinear-using template is
+// selected, or a business later overrides a fixed-length template's own footage (see
+// psComputeTotals's own comment on why customLinear now applies to any template).
+function psExtractFootage(pItem) {
+  const structured = psDetailsField(pItem.details, 'Size', 'Footage', 'Length', 'Dimensions');
+  if (structured) {
+    const m = String(structured).trim().match(/^(\d+(?:\.\d+)?)\s*(?:ft|feet|')?$/i);
+    if (m) return parseFloat(m[1]);
+  }
+  // \b after the word-unit alternatives only (ft|feet) — a trailing \b right after a literal `'`
+  // can never match (an apostrophe isn't a word character, so there's no word/non-word transition
+  // to anchor on when it's immediately followed by another non-word character or end of string),
+  // which silently failed to match "12'" entirely until this was tested against that exact case.
+  const nameMatch = (pItem.name || '').match(/(\d+(?:\.\d+)?)\s*(?:(?:ft|feet)\b|')/i);
+  if (nameMatch) return parseFloat(nameMatch[1]);
+  return null;
+}
+
 // ─── Resolving a raw item to a classification + status ──────────────────────
 
 // The four needs_review triggers, in order: no saved mapping at all; more than one saved
@@ -4408,7 +4462,7 @@ function psReviewItemFromRaw(pItem) {
     description: pItem.details['Description'] || '',
     classification: resolution.classification,
     recipeId: resolution.recipeId,
-    customLinear: null,
+    customLinear: psExtractFootage(pItem),
     colors: psParseColorsField(pItem.details['Colors']),
     colorGeneralNotes: [], // colors explicitly confirmed as general/non-inventory notes (lowercased)
     location: pItem.details['Location'] || '',
@@ -4690,18 +4744,19 @@ function irItemCardHtml(item) {
       html += `</div>`;
     }
 
-    if (item.classification === 'production' && decisions.includes('colors')) {
+    // Colors stay fully editable regardless of resolution status — resolving every imported
+    // color must never mean "this field is now locked." IMPORT DATA IS A STARTING POINT, NOT A
+    // LOCKED RECORD: an invoice is often abbreviated or incomplete, and a job may legitimately
+    // need an additional color (or a correction) added after the fact, using the exact same
+    // picker/resolution flow either way. Previously this whole block (including "+ Add another
+    // color") only rendered while decisions.includes('colors') was true — the moment every color
+    // resolved, it vanished entirely in favor of a read-only text line below, with no way back in
+    // short of deleting and re-adding the item.
+    if (item.classification === 'production') {
       html += `<div>
-        <div class="ir-decision-q">Which colors are these?</div>
+        <div class="ir-decision-q"${decisions.includes('colors') ? '' : ' style="opacity:0.7;"'}>${decisions.includes('colors') ? 'Which colors are these?' : 'Colors'}</div>
         ${irColorPickerHtml(item)}
       </div>`;
-    }
-
-    // The collapsed header already states what this resolved item is (classification +
-    // destination) — the one thing it doesn't show is which colors were resolved, so that's the
-    // only quiet confirmation line worth repeating here.
-    if (!needsReview && item.classification === 'production' && item.colors.length) {
-      html += `<div style="font-size:13px; color:var(--text-secondary);">${item.colors.map(psEscape).join(', ')}</div>`;
     }
 
     // Secondary: renaming/quantity/location/notes/remember-mapping/split/ignore — real, still one
@@ -5234,6 +5289,22 @@ function psColorDistEditorHtml(key) {
   </div></div>`;
   return html;
 }
+// A job-instance footage override, editable regardless of whether the template is a fixed length
+// or always entered per job (see psComputeTotals's own comment on why this override now applies
+// universally, not just to customLinear:true templates) — "IMPORT DATA IS A STARTING POINT, NOT A
+// LOCKED RECORD": an imported 12 ft garland that actually needs to become 14 ft no longer requires
+// deleting and re-adding the item (losing its tasks/colorDist/sizeOverride/label along with it).
+// Blank means "use whatever it would otherwise use" — the template's own fixed length, or nothing
+// if this is a customLinear template with no footage entered yet — never a forced value. Only
+// rendered for a formula that actually has a footage concept (a fixed linearFt, or customLinear)
+// — a future non-linear-footage formula naturally has neither and gets no footage field at all.
+function psFootageEditorHtml(line, r, sanitizedKey) {
+  if (typeof r.linearFt !== 'number' && !r.customLinear) return '';
+  const currentOverride = (typeof line.customLinear === 'number' && line.customLinear > 0) ? line.customLinear : '';
+  const placeholder = typeof r.linearFt === 'number' ? String(r.linearFt) : 'e.g. 12';
+  const hint = typeof r.linearFt === 'number' ? `blank uses the template's own ${r.linearFt} ft` : 'the footage entered for this job';
+  return `<div class="settings-field"><label>Linear feet <span style="font-weight:400;">(${hint})</span></label><input type="number" step="0.5" min="0" id="pi-edit-linear-${sanitizedKey}" placeholder="${psEscape(placeholder)}" value="${currentOverride}"></div>`;
+}
 // A job-only override for one or more of this line's calculated sizes (see psApplySizeOverride).
 // Always shows all 5 balloon sizes, not just the ones the formula currently produces — a job can
 // add a size the template wouldn't otherwise include (e.g. a few 5" accents on a Classic Column)
@@ -5312,6 +5383,11 @@ function psSaveEditItem(jobId, idx) {
   const location = document.getElementById('pi-edit-location-' + sanitizedKey).value.trim();
   const topperEl = document.getElementById('pi-edit-topper-' + sanitizedKey);
   const topperNote = topperEl ? topperEl.value.trim() : (line.topperNote || '');
+  // Blank means "use whatever it would otherwise use" (the template's own fixed length, or
+  // nothing) — never a forced value. See psFootageEditorHtml/psComputeTotals's own comments.
+  const linearEl = document.getElementById('pi-edit-linear-' + sanitizedKey);
+  const linearRaw = linearEl ? linearEl.value.trim() : '';
+  const customLinear = linearRaw === '' ? null : parseFloat(linearRaw);
 
   line.qty = qty;
   line.colors = colors;
@@ -5320,6 +5396,7 @@ function psSaveEditItem(jobId, idx) {
   line.location = location;
   line.indoorOutdoor = psDetectIndoorOutdoor(location);
   line.topperNote = topperNote;
+  if (linearEl) line.customLinear = (Number.isFinite(customLinear) && customLinear > 0) ? customLinear : null;
   // Only a real, fully-numbered split is trusted — if colors.length is 1 there's nothing to
   // distribute, and if any paired percentage came back non-numeric (shouldn't happen given
   // psInitDistDraft/psAddColorDraftRow/psRemoveColorDraftRow keep the two arrays in lockstep, but
@@ -5538,7 +5615,7 @@ function psProductionBodyHtml(job) {
 
       if (editing) {
         html += `<div class="no-print">
-          <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;"><b>Size:</b> ${psEscape(psLineFootageText(line, r))} <span style="font-style:italic;">(delete and re-add to change size)</span></div>
+          ${psFootageEditorHtml(line, r, sanitizedEditKey)}
           <div class="settings-field"><label>Item label <span style="font-weight:400;">(optional — shown here and in Review &amp; Pull instead of the template name)</span></label><input type="text" id="pi-edit-label-${sanitizedEditKey}" placeholder="${psEscape(r.display)}" value="${psEscape(line.itemLabel || '')}"></div>
           <div class="settings-field"><label>Quantity</label><input type="number" id="pi-edit-qty-${sanitizedEditKey}" value="${line.qty}" min="1" inputmode="numeric"></div>
           <div class="settings-field">
@@ -7979,21 +8056,102 @@ function invResolveActor() {
 // removed, so this hard floor is now unconditional for every caller: if a pull would take a
 // balance below zero, the fix is to correct the recorded count via Adjust first, not to force
 // a negative number through.
+// ─── Generalized inventory-reference identity ───
+//
+// { system, itemId, size } + a qty on the requirement itself is the shared identity a Production
+// requirement is meant to point at, across every inventory category — not just Standard Latex.
+// `itemId` is that record's own stable, permanent, BUSINESS-scoped id (never a global
+// manufacturer/catalog identity): a business-created "Cow Print" Specialty Latex item or "Red
+// Starburst" Add-On is exactly as real an identity as a Standard Latex Color Library entry, it's
+// just addressed through a different collection. `size` is null/omitted for the systems whose
+// item is a single flat quantity (Specialty Latex, Add-Ons, Framework, and most of Foil) — only
+// Standard Latex, and Foil's Letters & Numbers per-character map, ever need a sub-key under one
+// item. This registry is the ONLY place that knows how to fetch/read/write each system's item —
+// invApplyInventoryTransactions below never hardcodes a collection or a quantity field itself
+// (beyond Standard Latex's own already-existing, untouched branch).
+const INV_SYSTEMS = {
+  standardLatex: { label: 'Standard Latex', itemRef: (itemId) => window.fbInventoryItemRef(itemId) },
+  specialtyLatex: {
+    label: 'Specialty Latex', itemRef: (itemId) => window.fbSpecialtyLatexItemRef(itemId),
+    getQty: (item) => item.backstock || 0,
+    setQty: (item, size, qty) => { item.backstock = qty; },
+  },
+  addOns: {
+    label: 'Add-Ons', itemRef: (itemId) => window.fbInvxItemRef(itemId),
+    getQty: (item) => item.quantity || 0,
+    setQty: (item, size, qty) => { item.quantity = qty; },
+  },
+  framework: {
+    label: 'Framework', itemRef: (itemId) => window.fbInvxItemRef(itemId), // same collection as Add-Ons, discriminated by item.category
+    getQty: (item) => item.quantity || 0,
+    setQty: (item, size, qty) => { item.quantity = qty; },
+  },
+  foil: {
+    label: 'Foil', itemRef: (itemId) => window.fbFoilItemRef(itemId),
+    // Letters & Numbers groups store quantities per character (size doubles as the character
+    // key); every other Foil category (Decorator Shapes, Themed) is one flat `quantity`.
+    getQty: (item, size) => size ? ((item.quantities && item.quantities[size]) || 0) : (item.quantity || 0),
+    setQty: (item, size, qty) => { if (size) { if (!item.quantities) item.quantities = {}; item.quantities[size] = qty; } else { item.quantity = qty; } },
+  },
+};
+function invSystemFor(name) { return INV_SYSTEMS[name || 'standardLatex'] || INV_SYSTEMS.standardLatex; }
+
+// entries: [{ system?, itemId, size, type, delta?, balloonsUsed?, ... }] — `system` defaults to
+// 'standardLatex' when omitted, so every existing caller (none of which pass `system` yet) keeps
+// its exact current behavior with zero changes required at the call site.
 function invApplyInventoryTransactions(entries) {
   const actor = invResolveActor();
   const trackingUnit = invTrackingUnit;
-  const itemIds = [...new Set(entries.map(e => e.itemId))];
+  // One representative entry per itemId (an itemId only ever belongs to one system, since ids are
+  // minted per-collection) — enough to know which system's ref-getter fetches it.
+  const entryByItemId = new Map(entries.map(e => [e.itemId, e]));
+  const itemIds = [...entryByItemId.keys()];
   return window.fbRunTransaction(async (transaction) => {
-    const itemSnaps = await Promise.all(itemIds.map(id => transaction.get(window.fbInventoryItemRef(id))));
+    const itemSnaps = await Promise.all(itemIds.map(id => transaction.get(invSystemFor(entryByItemId.get(id).system).itemRef(id))));
     const itemsById = new Map();
+    const systemById = new Map();
     itemSnaps.forEach((snap, idx) => {
       if (!snap.exists()) throw Object.assign(new Error('Item no longer exists.'), { code: 'MISSING_ITEM', itemId: itemIds[idx] });
       itemsById.set(itemIds[idx], snap.data());
+      systemById.set(itemIds[idx], entryByItemId.get(itemIds[idx]).system || 'standardLatex');
     });
 
     const txDocs = [];
     entries.forEach(e => {
       const item = itemsById.get(e.itemId);
+      const system = e.system || 'standardLatex';
+
+      if (system !== 'standardLatex') {
+        // Generic path for every non-Standard-Latex system: a plain quantity (flat, or one level
+        // of sub-key for Foil Letters & Numbers) with no packaging/bag/loose-balloon concepts —
+        // those are genuinely Standard-Latex-specific bookkeeping, not generalized here just to
+        // look symmetrical. A generic entry supplies `delta` directly; balloonsUsed/
+        // looseBalloonsReceived remain Standard-Latex-only conveniences.
+        const sys = invSystemFor(system);
+        const previousBalance = sys.getQty(item, e.size);
+        const delta = e.delta;
+        if (!Number.isFinite(delta)) {
+          throw Object.assign(new Error('Invalid quantity — this transaction was not applied.'), { code: 'INVALID_QUANTITY', itemId: e.itemId, size: e.size || null });
+        }
+        const newBalance = previousBalance + delta;
+        if (delta < 0 && newBalance < 0) {
+          throw Object.assign(new Error(`This would take this item's quantity negative (${newBalance}).`), { code: 'WOULD_GO_NEGATIVE', itemId: e.itemId, size: e.size || null, newBalance });
+        }
+        sys.setQty(item, e.size, newBalance);
+        txDocs.push({
+          id: psNewInventoryTransactionId(), system, itemId: e.itemId, size: e.size || null,
+          color: item.color || null, brand: item.brand || null, name: item.name || null,
+          type: e.type, unit: trackingUnit, delta, previousBalance, newBalance,
+          balloonsUsed: null, perBagAtTime: null, remainderBefore: null, remainderAfter: null, looseBefore: null, looseAfter: null,
+          jobId: e.jobId || null, jobName: e.jobName || null,
+          reference: e.reference || '', note: e.note || '',
+          who: actor.who, whoEmail: actor.whoEmail,
+          createdAt: Date.now(),
+        });
+        return;
+      }
+
+      // ── Standard Latex — exact existing behavior, untouched ──
       const sd = item.sizes[e.size];
       const previousBalance = sd.backstock || 0;
       let delta, balloonsUsed = null, perBagAtTime = null, remainderBefore = null, remainderAfter = null;
@@ -8098,7 +8256,7 @@ function invApplyInventoryTransactions(entries) {
       }
 
       txDocs.push({
-        id: psNewInventoryTransactionId(), itemId: e.itemId, size: e.size, color: item.color, brand: item.brand,
+        id: psNewInventoryTransactionId(), system: 'standardLatex', itemId: e.itemId, size: e.size, color: item.color, brand: item.brand,
         type, unit: trackingUnit, delta, previousBalance, newBalance,
         balloonsUsed, perBagAtTime, remainderBefore, remainderAfter, looseBefore, looseAfter,
         jobId: e.jobId || null, jobName: e.jobName || null,
@@ -8108,7 +8266,7 @@ function invApplyInventoryTransactions(entries) {
       });
     });
 
-    itemsById.forEach((item, id) => transaction.set(window.fbInventoryItemRef(id), item));
+    itemsById.forEach((item, id) => transaction.set(invSystemFor(systemById.get(id)).itemRef(id), item));
     txDocs.forEach(tx => transaction.set(window.fbInventoryTransactionRef(tx.id), tx));
     return txDocs;
   });
