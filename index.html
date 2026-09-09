@@ -3551,8 +3551,21 @@ function psItemTasksForPhase(job, productionItemId, phase) {
 function psItemPhaseComplete(job, productionItemId, phase) {
   return psItemTasksForPhase(job, productionItemId, phase).every(t => t.status === 'done');
 }
+// Physical quantity completion (line.completedQty vs line.qty) is a genuinely separate fact from
+// task completion — see psSetCompletedQty's own comment on why neither is ever derived from the
+// other. A line's qty defaults to 1 when unset/blank, matching how every other qty read in this
+// file already treats it.
+function psItemQtyComplete(job, productionItemId) {
+  const line = (job.productionItems || []).find(l => l.id === productionItemId);
+  if (!line) return true;
+  const bookedQty = Math.max(1, Math.round(line.qty) || 1);
+  const completedQty = Math.max(0, Math.min(bookedQty, line.completedQty || 0));
+  return completedQty >= bookedQty;
+}
+// Finished means both are true, together — physical units all built AND every required task
+// done. Neither alone is enough (see the batch report's own worked examples).
 function psItemFullyFinished(job, productionItemId) {
-  return TASK_PHASES.every(phase => psItemPhaseComplete(job, productionItemId, phase));
+  return psItemQtyComplete(job, productionItemId) && TASK_PHASES.every(phase => psItemPhaseComplete(job, productionItemId, phase));
 }
 
 function psFindTask(job, taskId) {
@@ -3707,6 +3720,15 @@ function psBlankJob(overrides) {
     // guessing for every OTHER job using that same name. Sparse — an unresolved name simply has no
     // key, matching this file's other sparse-map fields.
     colorResolutions: {},
+    // { [requirementKey]: true } — owner/admin-only inventory exclusion (see psRequirementKey/
+    // psToggleInventoryExclusion). Sparse, same convention as colorResolutions. Never mutates the
+    // master Production Template or an inventory record, and never touches the ledger — it only
+    // keeps psComputeJobRequirements from marking a requirement actionable in Review & Pull.
+    inventoryExclusions: {},
+    // { [productionItemId]: true } — a thin convenience over inventoryExclusions that excludes
+    // every (current and future) requirement one whole production item generates, rather than a
+    // second exclusion mechanism.
+    itemInventoryExclusions: {},
     // Flat array of task INSTANCES across every productionItems line on this job — see
     // psSnapshotTasksForItem/psUpdateTaskField/psBulkUpdateTasks above. Flat (not nested under
     // productionItems) so a future work-queue-style view can scan every job's tasks in one pass;
@@ -5487,6 +5509,11 @@ function psSaveEditItem(jobId, idx) {
   const customLinear = linearRaw === '' ? null : parseFloat(linearRaw);
 
   line.qty = qty;
+  // Booked quantity can only ever move the completed-count ceiling down, never invent progress —
+  // if a job's booked quantity is corrected downward below what's already marked built, the
+  // completed count is clamped to match; raising it back up needs no special handling since the
+  // existing completed count is still perfectly valid against a larger booked quantity.
+  if (Number.isFinite(line.completedQty)) line.completedQty = Math.min(line.completedQty, Math.max(1, Math.round(qty) || 1));
   line.colors = colors;
   if (itemLabel) line.itemLabel = itemLabel; else delete line.itemLabel;
   line.design = design;
@@ -5598,19 +5625,74 @@ function psPhaseSectionHtml(job, phase) {
   });
   return html;
 }
-// A per-item badge showing derived progress (never a separate manual completion flag) — "Finished"
-// once every task across all three phases is done, otherwise a plain "done/total" count so
-// "build complete" (this item's own build-phase tasks) is visible without implying the whole item
-// is finished if Finish & Pack work still remains.
+// A per-item badge showing derived progress (never a separate manual completion flag) —
+// "Finished" only once BOTH physical quantity and every task are complete (see
+// psItemFullyFinished). For a single-unit item (qty <= 1), this stays exactly the original
+// task-only badge — quantity tracking adds nothing a single unit's own "Finished" doesn't already
+// say. For a multi-quantity item, physical progress and task progress are reported side by side,
+// since neither implies the other: "2 of 2 built · 1 task remaining" and "1 of 2 built · tasks
+// complete" are both real, distinct states that need to stay visible rather than collapsing into
+// one number.
 function psItemProgressBadgeHtml(job, productionItemId) {
+  const line = (job.productionItems || []).find(l => l.id === productionItemId);
+  const bookedQty = line ? Math.max(1, Math.round(line.qty) || 1) : 1;
   const allTasks = (job.tasks || []).filter(t => t.productionItemId === productionItemId);
-  if (allTasks.length === 0) return '';
+
+  if (bookedQty <= 1) {
+    if (allTasks.length === 0) return '';
+    if (psItemFullyFinished(job, productionItemId)) {
+      return `<span style="font-size:11px; font-weight:700; color:var(--success);"><i class="fa-solid fa-circle-check"></i> Finished</span>`;
+    }
+    const done = allTasks.filter(t => t.status === 'done').length;
+    const buildNote = psItemPhaseComplete(job, productionItemId, 'build') ? ' · build complete' : '';
+    return `<span style="font-size:11px; color:var(--text-secondary);">${done}/${allTasks.length} tasks${buildNote}</span>`;
+  }
+
+  const completedQty = Math.max(0, Math.min(bookedQty, (line && line.completedQty) || 0));
   if (psItemFullyFinished(job, productionItemId)) {
     return `<span style="font-size:11px; font-weight:700; color:var(--success);"><i class="fa-solid fa-circle-check"></i> Finished</span>`;
   }
-  const done = allTasks.filter(t => t.status === 'done').length;
-  const buildNote = psItemPhaseComplete(job, productionItemId, 'build') ? ' · build complete' : '';
-  return `<span style="font-size:11px; color:var(--text-secondary);">${done}/${allTasks.length} tasks${buildNote}</span>`;
+  const qtyText = `${completedQty} of ${bookedQty} built`;
+  let taskText = null;
+  if (allTasks.length > 0) {
+    const done = allTasks.filter(t => t.status === 'done').length;
+    const tasksComplete = done === allTasks.length;
+    taskText = tasksComplete ? 'tasks complete' : `${allTasks.length - done} task${(allTasks.length - done) === 1 ? '' : 's'} remaining`;
+  }
+  return `<span style="font-size:11px; color:var(--text-secondary);">${taskText ? qtyText + ' · ' + taskText : qtyText}</span>`;
+}
+// Employee-facing physical build progress — completely independent of task completion (see the
+// batch report's own explicit rule: incrementing this never checks a task, and checking a task
+// never changes this). Always clamped to [0, booked qty], both here and again whenever the booked
+// qty itself is edited (see psSaveEditItem), so this can never silently exceed what was booked.
+function psSetCompletedQty(jobId, idx, value) {
+  const job = psFindJob(jobId);
+  const line = job && job.productionItems[idx];
+  if (!line) return;
+  const bookedQty = Math.max(1, Math.round(line.qty) || 1);
+  line.completedQty = Math.max(0, Math.min(bookedQty, Math.round(value) || 0));
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+// A qty-1 item gets a plain "mark built" checkbox — a +/- stepper would be noise for a single
+// unit (see the batch report's own "keep quantity=1 lightweight" instruction). A multi-quantity
+// item gets the "N of M" stepper, matching the exact wording used everywhere else this progress
+// is shown (psItemProgressBadgeHtml).
+function psCompletedQtyControlHtml(job, idx, line) {
+  const bookedQty = Math.max(1, Math.round(line.qty) || 1);
+  const completed = Math.max(0, Math.min(bookedQty, line.completedQty || 0));
+  if (bookedQty <= 1) {
+    return `<label class="no-print" style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin:0.3rem 0;">
+      <input type="checkbox" ${completed >= 1 ? 'checked' : ''} onchange="psSetCompletedQty('${job.id}',${idx}, this.checked ? 1 : 0)">
+      Mark built
+    </label>`;
+  }
+  return `<div class="no-print" style="display:flex; align-items:center; gap:8px; font-size:12px; margin:0.3rem 0;">
+    <span style="color:var(--text-secondary);">Completed:</span>
+    <button class="icon-btn" style="width:auto; padding:2px 8px;" ${completed <= 0 ? 'disabled' : ''} onclick="psSetCompletedQty('${job.id}',${idx}, ${completed - 1})" aria-label="Decrease completed count">−</button>
+    <span style="font-weight:600;">${completed} of ${bookedQty}</span>
+    <button class="icon-btn" style="width:auto; padding:2px 8px;" ${completed >= bookedQty ? 'disabled' : ''} onclick="psSetCompletedQty('${job.id}',${idx}, ${completed + 1})" aria-label="Increase completed count">+</button>
+  </div>`;
 }
 function psProductionBodyHtml(job) {
   let html = '';
@@ -5667,6 +5749,7 @@ function psProductionBodyHtml(job) {
         const trackedNote = mod.inventoryRef ? '' : ' <span style="color:var(--text-tertiary);">(not inventory-tracked)</span>';
         html += `<div style="font-size:13px; padding:2px 0;">${psEscape(mod.label)}${qtyText}${trackedNote}</div>`;
       });
+      html += psItemInventoryExclusionEditorHtml(job, line);
     });
     html += `<div class="ps-pack-note">Pack extras of each size/color.</div>`;
   }
@@ -5718,6 +5801,7 @@ function psProductionBodyHtml(job) {
           <button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>
         </div>
       </div>`;
+      html += psCompletedQtyControlHtml(job, idx, line);
 
       if (editing) {
         html += `<div class="no-print">
@@ -9536,6 +9620,32 @@ function invColorGroupSuggestions() {
 // function has to keep returning the requirement rows either way so that read-only view has
 // something to show — a Completed job's requirements don't just disappear, they stop being
 // live demand and become a fixed record of what was (or wasn't) actually pulled.
+// ─── Inventory exclusion (Batch 1 #8, built against the generalized requirement identity) ───
+//
+// A stable per-requirement key: which production item, which requirement category (a balloon
+// color split vs. a modifier), which system, which specific business inventory item, which
+// size/variant. This is deliberately granular enough that two different production items needing
+// the exact same color/item never collide (each gets its own key via productionItemId), and a
+// single item's several requirements (multiple colors, a modifier) can be excluded individually
+// without touching its others. Mirrors psReviewPullRows' own aggregation key one level finer
+// (that key merges across production items on purpose; this one deliberately doesn't).
+function psRequirementKey(req) {
+  return [req.productionItemId, req.category, req.system || 'standardLatex', req.inventoryItemId, req.size || ''].join('|');
+}
+// Sparse job-instance state — never touches the master Production Template or the inventory
+// record itself, and never creates a ledger transaction (see psComputeJobRequirements, which
+// simply flags a requirement as excluded rather than omitting it — Review & Pull still shows it,
+// just as a non-actionable acknowledgment, so it can never silently disappear). Two independent
+// mechanisms: job.inventoryExclusions excludes ONE specific requirement; job.itemInventoryExclusions
+// excludes every (current and future) requirement for one whole production item — a thin
+// convenience over the same per-requirement check, not a second exclusion model. Only ever
+// meaningful for an already-RESOLVED requirement (a real inventoryItemId) — there's nothing to
+// exclude about an unresolved color or a broken formula, those are decisions, not requirements yet.
+function psIsRequirementExcluded(job, req) {
+  if (!req.inventoryItemId) return false;
+  if (job.itemInventoryExclusions && job.itemInventoryExclusions[req.productionItemId]) return true;
+  return !!(job.inventoryExclusions && job.inventoryExclusions[psRequirementKey(req)]);
+}
 function psComputeJobRequirements(job) {
   const requirements = [];
   (job.productionItems || []).forEach((line, lineIdx) => {
@@ -9591,14 +9701,16 @@ function psComputeJobRequirements(job) {
         // addressing a different system. Never requires a global manufacturer/catalog identity —
         // itemId is that business's own permanent record id.
         if (resolution && resolution.system && resolution.system !== 'standardLatex') {
-          requirements.push({
+          const bizReq = {
             jobId: job.id, productionItemId, system: resolution.system,
             colorId: null, inventoryItemId: resolution.itemId, brand: '',
             color: cd.name, size: resolution.size || null,
             qty, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
             source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
             unresolved: false,
-          });
+          };
+          bizReq.excluded = psIsRequirementExcluded(job, bizReq);
+          requirements.push(bizReq);
           return;
         }
 
@@ -9614,7 +9726,7 @@ function psComputeJobRequirements(job) {
         const unresolved = !isPlaceholder && !libraryEntry;
         const invItem = libraryEntry ? INVENTORY_ITEMS.find(i => i.colorId === libraryEntry.id) : null;
 
-        requirements.push({
+        const stdReq = {
           jobId: job.id,
           productionItemId,
           system: 'standardLatex',
@@ -9630,7 +9742,9 @@ function psComputeJobRequirements(job) {
           source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
           unresolved, // multiple brands share this name (or it's not in the Library at all) — can't attribute precisely
           candidates: unresolved ? matches : undefined, // every brand this name matches, for Review & Pull's resolution UI
-        });
+        };
+        stdReq.excluded = psIsRequirementExcluded(job, stdReq);
+        requirements.push(stdReq);
       });
     });
 
@@ -9642,14 +9756,16 @@ function psComputeJobRequirements(job) {
       if (!mod.inventoryRef || !mod.inventoryRef.itemId) return;
       const modQty = Number.isFinite(mod.qty) ? mod.qty : 0;
       if (modQty <= 0) return;
-      requirements.push({
+      const modReq = {
         jobId: job.id, productionItemId, system: mod.inventoryRef.system,
         colorId: null, inventoryItemId: mod.inventoryRef.itemId, brand: '',
         color: mod.label || '(unnamed add-on)', size: mod.inventoryRef.size || null,
         qty: modQty, unit: 'unit', requiredBy: job.eventDate || '', category: 'modifier',
         source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
         unresolved: false,
-      });
+      };
+      modReq.excluded = psIsRequirementExcluded(job, modReq);
+      requirements.push(modReq);
     });
   });
   return requirements;
@@ -9759,7 +9875,15 @@ function psReviewPullRows(job) {
   reqs.forEach(req => {
     let key, groupInfo;
     const system = req.system || 'standardLatex';
-    if (req.formulaInvalid) {
+    if (req.excluded) {
+      // Never merged with anything else, even another occurrence of the exact same item from a
+      // DIFFERENT production item — each exclusion is a decision about one specific item's one
+      // specific requirement, so each gets its own fully-attributable acknowledgment row (see
+      // psRequirementKey's own comment on why productionItemId is part of the key).
+      const reqKey = psRequirementKey(req);
+      key = 'excluded:' + reqKey;
+      groupInfo = { kind: 'excluded', system, color: req.color, brand: req.brand, size: req.size, inventoryItemId: req.inventoryItemId, itemLabel: req.source && req.source.itemLabel, requirementKey: reqKey };
+    } else if (req.formulaInvalid) {
       // One row per broken-config production item — never merged with anything else, since
       // there's no real color/size to group by. Never Ready, never actionable, by construction.
       key = 'formulaInvalid:' + req.productionItemId;
@@ -9884,6 +10008,62 @@ function psReviewPullAlwaysMatch(jobId, colorName, colorId) {
   psRenderProductionJobs();
 }
 
+// ─── Inventory exclusion actions — owner/admin only ───
+//
+// An inventory policy decision (this job intentionally supplies something outside tracked
+// inventory), not a routine task — gated the same way every other admin-only inventory action in
+// Review & Pull already is (invAdminUnlocked). Never mutates the master Production Template or
+// the inventory record itself, and never touches the ledger: this only changes whether
+// psComputeJobRequirements marks the requirement `excluded`, which keeps it out of Ready/Short/
+// Pull but still visible (see psReviewPullRowHtml's own 'excluded' row). Un-excluding just deletes
+// the flag, so the normal requirement is restored on the very next render — no separate "restore"
+// path needed.
+function psToggleInventoryExclusion(jobId, requirementKey, excluded) {
+  if (!invAdminUnlocked) return;
+  const job = psFindJob(jobId);
+  if (!job) return;
+  if (!job.inventoryExclusions) job.inventoryExclusions = {};
+  if (excluded) job.inventoryExclusions[requirementKey] = true;
+  else delete job.inventoryExclusions[requirementKey];
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+// A thin convenience over the same mechanism — excludes (or restores) EVERY requirement this one
+// production item generates, current and future, without needing to click each one individually.
+function psToggleItemInventoryExclusion(jobId, productionItemId, excluded) {
+  if (!invAdminUnlocked) return;
+  const job = psFindJob(jobId);
+  if (!job) return;
+  if (!job.itemInventoryExclusions) job.itemInventoryExclusions = {};
+  if (excluded) job.itemInventoryExclusions[productionItemId] = true;
+  else delete job.itemInventoryExclusions[productionItemId];
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+// Owner/admin-only visibility into one production item's OWN resolved inventory requirements,
+// with a per-requirement Exclude toggle plus the "exclude all for this item" convenience. Only
+// ever lists already-RESOLVED requirements (a real inventoryItemId) — there's nothing to exclude
+// about an unresolved color or a broken formula, those are decisions, not requirements yet.
+function psItemInventoryExclusionEditorHtml(job, line) {
+  if (!invAdminUnlocked) return '';
+  const reqs = psComputeJobRequirements(job).filter(r => r.productionItemId === line.id && r.inventoryItemId);
+  if (reqs.length === 0) return '';
+  const allExcluded = !!(job.itemInventoryExclusions && job.itemInventoryExclusions[line.id]);
+  let html = `<div class="no-print" style="margin-top:0.4rem; padding-top:0.4rem; border-top:0.5px dashed var(--border);">
+    <div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Inventory requirements (admin)</div>`;
+  reqs.forEach(req => {
+    const key = psRequirementKey(req);
+    const sys = invSystemFor(req.system);
+    html += `<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:12px; padding:2px 0;">
+      <span>${psEscape(sys.label)}: ${psEscape(req.color)}${req.size ? ' — ' + psEscape(req.size) : ''} (${req.qty})${req.excluded ? ' <span style="color:var(--text-tertiary);">— excluded</span>' : ''}</span>
+      ${allExcluded ? '' : `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psToggleInventoryExclusion('${job.id}','${psJsKeyAttr(key)}', ${req.excluded ? 'false' : 'true'})">${req.excluded ? 'Remove exclusion' : 'Exclude'}</button>`}
+    </div>`;
+  });
+  html += `<button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; margin-top:4px;" onclick="psToggleItemInventoryExclusion('${job.id}','${line.id}', ${allExcluded ? 'false' : 'true'})">${allExcluded ? 'Include all for this item' : 'Exclude all for this item'}</button>`;
+  html += `</div>`;
+  return html;
+}
+
 // One row's confirmed pull. `qty` is the caller's requested amount (the row's full stillNeeded,
 // or an admin's capped "pull available" amount for a shortage row) — this re-fetches a fresh row
 // by key and caps against its current stillNeeded, so what's pulled can never exceed what's
@@ -9961,6 +10141,24 @@ function psReviewPullRowHtml(job, row, readOnly) {
   const busy = !!psReviewPullBusyKeys[busyKey];
 
   const rpBadge = (label) => `<span class="rp-badge rp-badge-attention">${label}</span>`;
+
+  if (row.kind === 'excluded') {
+    // Visible acknowledgment, never actionable — this requirement is deliberately not part of
+    // this job's inventory pull (see psToggleInventoryExclusion). Already-completed pulls are
+    // untouched (INVENTORY_TRANSACTIONS is independent of this flag) and shown here rather than
+    // hidden, so excluding something never makes prior pull history disappear or look reversed.
+    const alreadyPulled = row.system === 'standardLatex'
+      ? invBalloonsPulledForJob(job.id, row.inventoryItemId, row.size)
+      : invQtyPulledForJob(job.id, row.system, row.inventoryItemId, row.size);
+    return `<div class="rp-row">
+      <div class="rp-row-head">
+        <div style="font-size:13px; font-weight:700;">${psEscape(rpItemLabel(row))} <span style="font-weight:400; color:var(--text-secondary);">(${row.qty} needed)</span></div>
+        <span class="rp-badge" style="background:var(--border); color:var(--text-secondary);">Excluded</span>
+      </div>
+      <div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Excluded from this job's inventory pull${row.itemLabel ? ' — ' + psEscape(row.itemLabel) : ''}.${alreadyPulled > 0 ? ` ${alreadyPulled} already pulled before exclusion (kept, not reversed).` : ''}</div>
+      ${!readOnly && invAdminUnlocked ? `<div class="rp-actions"><button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psToggleInventoryExclusion('${job.id}','${psJsKeyAttr(row.requirementKey)}', false)">Remove exclusion</button></div>` : ''}
+    </div>`;
+  }
 
   if (row.kind === 'formulaInvalid') {
     return `<div class="rp-row">
