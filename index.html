@@ -3512,6 +3512,15 @@ function psSyntheticPrepTasksFor(line, recipe) {
     const original = (line.colors || []).find(c => c.trim().toLowerCase() === noteKey) || noteKey;
     tasks.push({ kind: 'note:' + noteKey, text: `${original} — not a Standard Latex color; pull manually (Specialty Latex, Foil, or elsewhere)` });
   });
+  // A job-instance add-on/modifier (see psAddModifier) only generates a task when its own
+  // generatesTask flag is on — most modifiers are purely inventory requirements (already visible
+  // via Review & Pull) with nothing separate to check off.
+  (line.modifiers || []).forEach(mod => {
+    if (mod.generatesTask && mod.label && mod.label.trim()) {
+      const qtyText = mod.qty > 1 ? ` × ${mod.qty}` : '';
+      tasks.push({ kind: 'modifier:' + mod.id, text: `Gather: ${mod.label.trim()}${qtyText}${mod.note ? ' — ' + mod.note.trim() : ''}` });
+    }
+  });
   return tasks;
 }
 // Called at item creation AND whenever an edit could change what this item's synthetic tasks
@@ -4436,7 +4445,7 @@ function irRecomputeItemStatus(item) {
     } else if (readyRecipe.customLinear && !item.customLinear) {
       reasons.push('This template needs an actual footage — enter it below.');
     }
-    if (clColorsNeedReview(item.colors, item.colorGeneralNotes)) reasons.push('One or more colors need review — pick a match, add new, or mark general.');
+    if (clColorsNeedReview(item.colors, item.colorGeneralNotes, IMPORT_REVIEW_DRAFT.event.colorResolutions)) reasons.push('One or more colors need review — pick a match, add new, or mark general.');
   }
   item.reasons = reasons;
   if (reasons.length > 0) item.status = 'needs_review';
@@ -4681,7 +4690,7 @@ function irPendingDecisions(item) {
   const mappingUncertain = item.reasons.some(r => r.startsWith('No saved mapping') || r.startsWith('Multiple saved mappings') || r.startsWith('Low-confidence match'));
   const needsTemplate = item.classification === 'production' && !readyRecipe;
   const needsFootage = item.classification === 'production' && !!readyRecipe && readyRecipe.customLinear && !item.customLinear;
-  const needsColors = item.classification === 'production' && clColorsNeedReview(item.colors, item.colorGeneralNotes);
+  const needsColors = item.classification === 'production' && clColorsNeedReview(item.colors, item.colorGeneralNotes, IMPORT_REVIEW_DRAFT.event.colorResolutions);
   const decisions = [];
   if (mappingUncertain) decisions.push('classification');
   if (needsTemplate || needsFootage) decisions.push('build');
@@ -4875,14 +4884,27 @@ function irColorPickerHtml(item) {
 function irColorRowHtml(item, idx, value) {
   const inputId = 'ir-color-' + item.id + '-' + idx;
   const text = (value || '').trim();
-  const isNote = (item.colorGeneralNotes || []).some(n => n === text.toLowerCase());
+  const key = text.toLowerCase();
+  const isNote = (item.colorGeneralNotes || []).some(n => n === key);
+  // A color resolved to a business-owned NON-Standard-Latex inventory record (e.g. "Cow Print" ->
+  // a Specialty Latex Printed item) — same generalized identity Step 3 introduced, stored the
+  // exact way Review & Pull's own ambiguous-brand answer already is (job.colorResolutions), which
+  // is why this works with zero extra wiring: IMPORT_REVIEW_DRAFT.event already IS a real job
+  // shell from the moment the draft exists, so this survives Approve untouched.
+  const bizResolution = IMPORT_REVIEW_DRAFT.event.colorResolutions && IMPORT_REVIEW_DRAFT.event.colorResolutions[key];
+  const isBizResolved = !!(bizResolution && bizResolution.system && bizResolution.system !== 'standardLatex');
   const resolution = text ? clResolveName(text) : { status: 'empty' };
-  const resolved = isNote || resolution.status === 'resolved';
+  const resolved = isNote || isBizResolved || resolution.status === 'resolved';
   let hintHtml = '', chipsHtml = '';
   if (!resolved && text) {
+    // Business-owned inventory is checked FIRST and never silently guessed between multiple
+    // matches — every plausible match becomes its own selectable chip, exactly like the
+    // ambiguous-brand picker Review & Pull already offers for Standard Latex.
+    const bizMatches = spFindByExactColorText(text);
     const suggestions = clSearch(text).slice(0, 4);
-    hintHtml = `<div class="ir-decision-hint">${suggestions.length ? 'Did you mean one of these?' : "Not in your Color Library yet — add it, or mark it a general note."}</div>`;
+    hintHtml = `<div class="ir-decision-hint">${bizMatches.length ? 'This matches inventory you already have:' : suggestions.length ? 'Did you mean one of these?' : "Not in your Color Library yet — add it, or mark it a general note."}</div>`;
     chipsHtml = `<div class="ir-color-suggestions">
+      ${bizMatches.map(m => `<button class="ir-chip-btn" onclick="irResolveColorToBusinessInventory('${item.id}',${idx},'specialtyLatex','${m.id}')">${psEscape(invGenericItemLabel('specialtyLatex', m))} <span style="opacity:0.7;">(${psEscape(INV_SYSTEMS.specialtyLatex.label)})</span></button>`).join('')}
       ${suggestions.map(s => `<span style="display:inline-flex; align-items:center; gap:1px;">
         <button class="ir-chip-btn" onclick="irResolveColorRow('${item.id}',${idx},'${s.colorName.replace(/'/g, "\\'")}')">${psEscape(s.colorName)}</button>
         <button class="ir-chip-btn" onclick="irAlwaysMatchColor('${item.id}',${idx},'${s.id}')" title="Always treat &quot;${invAttr(text)}&quot; as ${invAttr(s.colorName)} — future imports with this exact text resolve automatically">⭐</button>
@@ -4897,7 +4919,7 @@ function irColorRowHtml(item, idx, value) {
         style="border-bottom-color:${resolved || !text ? 'transparent' : 'var(--brand-ink)'};"
         oninput="irUpdateColorRowLive('${item.id}', ${idx}, this.value); invShowColorSuggestions('${inputId}')"
         onblur="invHideColorSuggestionsSoon('${inputId}'); irScheduleColorRecompute('${item.id}', ${idx})">
-      ${resolved ? `<i class="fa-solid fa-check" style="color:var(--success-text); font-size:12px; flex-shrink:0;" title="${isNote ? 'General note — not inventory-tracked' : 'Matches your Color Library'}"></i>` : ''}
+      ${resolved ? `<i class="fa-solid fa-check" style="color:var(--success-text); font-size:12px; flex-shrink:0;" title="${isNote ? 'General note — not inventory-tracked' : isBizResolved ? 'Resolved to your own ' + invSystemFor(bizResolution.system).label + ' inventory' : 'Matches your Color Library'}"></i>` : ''}
       <button class="ir-color-remove" onclick="irRemoveColorRow('${item.id}', ${idx})" aria-label="Remove color">&times;</button>
     </div>
     <div id="${inputId}-suggest" class="inv-color-suggest" style="display:none;"></div>
@@ -4940,6 +4962,23 @@ function irResolveColorRow(itemId, idx, colorName) {
   const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
   if (!item) return;
   item.colors[idx] = colorName;
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
+// Resolves this color to a business-owned inventory record from a NON-Standard-Latex system —
+// stored on the draft's own event.colorResolutions (the exact same map Review & Pull already uses
+// for an ambiguous Standard Latex brand answer, just with the generalized {system, itemId, size}
+// shape instead of {colorId}), so it needs no extra wiring to survive Approve. Never rewrites the
+// item's own raw color text — same "keep what the invoice actually said" principle the ordinary
+// Always Match flow already uses.
+function irResolveColorToBusinessInventory(itemId, idx, system, invItemId) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  const text = (item.colors[idx] || '').trim();
+  if (!text) return;
+  const event = IMPORT_REVIEW_DRAFT.event;
+  if (!event.colorResolutions) event.colorResolutions = {};
+  event.colorResolutions[text.toLowerCase()] = { system, itemId: invItemId, size: null };
   irRecomputeItemStatus(item);
   irRenderShell();
 }
@@ -5561,6 +5600,15 @@ function psProductionBodyHtml(job) {
           html += `<div style="font-size:13px; padding:2px 0;">${text}</div>`;
         }
       });
+      // Add-ons/modifiers are shown here too (so "it's required" is visible at a glance) even when
+      // not inventory-backed — an inventory-backed one is additionally tracked and deducted via
+      // Review & Pull just below; one with no inventoryRef is informational only, nothing to pull.
+      (line.modifiers || []).forEach(mod => {
+        if (!mod.label || !mod.label.trim()) return;
+        const qtyText = mod.qty > 1 ? ` × ${mod.qty}` : '';
+        const trackedNote = mod.inventoryRef ? '' : ' <span style="color:var(--text-tertiary);">(not inventory-tracked)</span>';
+        html += `<div style="font-size:13px; padding:2px 0;">${psEscape(mod.label)}${qtyText}${trackedNote}</div>`;
+      });
     });
     html += `<div class="ps-pack-note">Pack extras of each size/color.</div>`;
   }
@@ -5629,6 +5677,7 @@ function psProductionBodyHtml(job) {
             <div class="settings-field" style="margin-bottom:0"><label>Location (optional)</label><input type="text" id="pi-edit-location-${sanitizedEditKey}" value="${psEscape(line.location || '')}"></div>
           </div>
           ${psTopperFt(r) ? `<div class="settings-field"><label>Topper balloons (optional note)</label><input type="text" id="pi-edit-topper-${sanitizedEditKey}" value="${psEscape(line.topperNote || '')}"></div>` : ''}
+          ${psModifierEditorHtml(job, idx, line)}
           <div style="display:flex; gap:8px; margin-bottom:0.75rem;">
             <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="psSaveEditItem('${job.id}', ${idx})">Save changes</button>
             <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="psCancelEditItem()">Cancel</button>
@@ -5768,6 +5817,115 @@ function psUpdateItemNotes(jobId, idx, value) {
   if (!job) return;
   job.productionItems[idx].notes = value;
   psSaveJob(job);
+}
+
+// ─── Job-instance add-ons / modifiers ───
+//
+// A production item's job-specific extras — "Classic Arch + Red Starbursts," "Classic Column +
+// Vinyl" — that belong to THIS job instance, never the master template, unless a business
+// intentionally saves/promotes one later (not built yet — out of scope for this pass). Each
+// modifier: { id, label, inventoryRef: null|{system,itemId,size}, qty, generatesTask, note }.
+// inventoryRef reuses the exact generalized identity from INV_SYSTEMS — no parallel "extras
+// inventory" of its own; an inventory-backed modifier generates a real Review & Pull requirement
+// (see psComputeJobRequirements), a non-inventory-backed one is informational only. Saved
+// immediately on each field change (like Build notes/rentals already do), not staged behind the
+// item's own "Save changes" button, since a modifier is its own independent sub-list.
+function psNewModifierId() { return 'mod_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+function psAddModifier(jobId, idx) {
+  const job = psFindJob(jobId);
+  const line = job && job.productionItems[idx];
+  if (!line) return;
+  if (!line.modifiers) line.modifiers = [];
+  line.modifiers.push({ id: psNewModifierId(), label: '', inventoryRef: null, qty: 1, generatesTask: false, note: '' });
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+function psFindModifier(job, idx, modId) {
+  const line = job.productionItems[idx];
+  return line && (line.modifiers || []).find(m => m.id === modId);
+}
+function psUpdateModifierField(jobId, idx, modId, field, value) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const mod = psFindModifier(job, idx, modId);
+  if (!mod) return;
+  if (field === 'qty') mod.qty = parseFloat(value) || 0;
+  else if (field === 'generatesTask') mod.generatesTask = !!value;
+  else mod[field] = value; // 'label' | 'note'
+  const line = job.productionItems[idx];
+  psSyncSyntheticPrepTasks(job, line.id, line, psLineRecipe(line));
+  psSaveJob(job);
+}
+// value is '' (not inventory-backed) or 'system|itemId' from invGenericItemOptionsHtml.
+function psSetModifierInventoryRef(jobId, idx, modId, value) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const mod = psFindModifier(job, idx, modId);
+  if (!mod) return;
+  if (!value) { mod.inventoryRef = null; }
+  else {
+    const sepIdx = value.indexOf('|');
+    mod.inventoryRef = { system: value.slice(0, sepIdx), itemId: value.slice(sepIdx + 1), size: null };
+  }
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+function psRemoveModifier(jobId, idx, modId) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const line = job.productionItems[idx];
+  if (!line) return;
+  line.modifiers = (line.modifiers || []).filter(m => m.id !== modId);
+  psSyncSyntheticPrepTasks(job, line.id, line, psLineRecipe(line));
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+// Every business-owned inventory record a modifier could point at, grouped by system — "Not
+// inventory-backed" is always the default/first option, since most modifiers (a design note, a
+// build variation) have nothing to pull at all. Standard Latex is deliberately excluded here: a
+// modifier pointing at a balloon color would just be a color on the line itself, not an add-on.
+function invGenericItemOptionsHtml(selectedSystem, selectedItemId) {
+  let html = `<option value="">Not inventory-backed</option>`;
+  const groups = [
+    { system: 'addOns', items: INVX_ITEMS.filter(i => i.category === 'addOns' && !i.deletedAt) },
+    { system: 'framework', items: INVX_ITEMS.filter(i => i.category === 'framework' && !i.deletedAt) },
+    { system: 'specialtyLatex', items: SPECIALTY_ITEMS },
+    { system: 'foil', items: FOIL_ITEMS.filter(i => !i.deletedAt) },
+  ];
+  groups.forEach(g => {
+    if (g.items.length === 0) return;
+    html += `<optgroup label="${psEscape(invSystemFor(g.system).label)}">`;
+    g.items.forEach(item => {
+      const selected = selectedSystem === g.system && selectedItemId === item.id;
+      html += `<option value="${invAttr(g.system + '|' + item.id)}" ${selected ? 'selected' : ''}>${psEscape(invGenericItemLabel(g.system, item))}</option>`;
+    });
+    html += `</optgroup>`;
+  });
+  return html;
+}
+function psModifierEditorHtml(job, idx, line) {
+  const mods = line.modifiers || [];
+  let html = `<div class="settings-field"><label>Add-ons / modifiers <span style="font-weight:400;">(job-specific extras — never saved to the master template)</span></label>`;
+  mods.forEach(mod => {
+    html += `<div style="border:0.5px solid var(--border); border-radius:var(--radius-sm); padding:8px; margin-bottom:6px;">
+      <div class="row" style="margin-bottom:6px;">
+        <input type="text" placeholder="Label, e.g. Red Starbursts" value="${invAttr(mod.label)}" onchange="psUpdateModifierField('${job.id}',${idx},'${mod.id}','label', this.value)">
+        <input type="number" min="0" step="1" style="max-width:80px;" value="${mod.qty}" onchange="psUpdateModifierField('${job.id}',${idx},'${mod.id}','qty', this.value)">
+      </div>
+      <select style="width:100%; margin-bottom:6px;" onchange="psSetModifierInventoryRef('${job.id}',${idx},'${mod.id}', this.value)">
+        ${invGenericItemOptionsHtml(mod.inventoryRef && mod.inventoryRef.system, mod.inventoryRef && mod.inventoryRef.itemId)}
+      </select>
+      <input type="text" placeholder="Note (optional)" style="width:100%; margin-bottom:6px;" value="${invAttr(mod.note)}" onchange="psUpdateModifierField('${job.id}',${idx},'${mod.id}','note', this.value)">
+      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary);">
+        <input type="checkbox" ${mod.generatesTask ? 'checked' : ''} onchange="psUpdateModifierField('${job.id}',${idx},'${mod.id}','generatesTask', this.checked)">
+        Add a Prep task to gather this
+      </label>
+      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; margin-top:6px;" onclick="psRemoveModifier('${job.id}',${idx},'${mod.id}')"><i class="fa-solid fa-trash"></i> Remove</button>
+    </div>`;
+  });
+  html += `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="psAddModifier('${job.id}',${idx})"><i class="fa-solid fa-plus"></i> Add an add-on</button>`;
+  html += `</div>`;
+  return html;
 }
 
 // ═══════════════════════════════════════ QUANTITY CALCULATOR VIEW ═══════════════════════════════════════
@@ -8070,31 +8228,63 @@ function invResolveActor() {
 // invApplyInventoryTransactions below never hardcodes a collection or a quantity field itself
 // (beyond Standard Latex's own already-existing, untouched branch).
 const INV_SYSTEMS = {
-  standardLatex: { label: 'Standard Latex', itemRef: (itemId) => window.fbInventoryItemRef(itemId) },
+  standardLatex: {
+    label: 'Standard Latex', viewId: 'inventory-latex', itemRef: (itemId) => window.fbInventoryItemRef(itemId),
+    findItem: (itemId) => INVENTORY_ITEMS.find(i => i.id === itemId),
+    displayLabel: (item) => [item.brand, item.color].filter(Boolean).join(' '),
+  },
   specialtyLatex: {
-    label: 'Specialty Latex', itemRef: (itemId) => window.fbSpecialtyLatexItemRef(itemId),
+    label: 'Specialty Latex', viewId: 'inventory-specialty', itemRef: (itemId) => window.fbSpecialtyLatexItemRef(itemId),
     getQty: (item) => item.backstock || 0,
     setQty: (item, size, qty) => { item.backstock = qty; },
+    findItem: (itemId) => SPECIALTY_ITEMS.find(i => i.id === itemId),
+    displayLabel: (item) => [item.color, item.pattern].filter(Boolean).join(' — ') || item.brand || '(unnamed)',
   },
   addOns: {
-    label: 'Add-Ons', itemRef: (itemId) => window.fbInvxItemRef(itemId),
+    label: 'Add-Ons', viewId: 'inventory-extras', itemRef: (itemId) => window.fbInvxItemRef(itemId),
     getQty: (item) => item.quantity || 0,
     setQty: (item, size, qty) => { item.quantity = qty; },
+    findItem: (itemId) => INVX_ITEMS.find(i => i.id === itemId),
+    displayLabel: (item) => item.name || '(unnamed)',
   },
   framework: {
-    label: 'Framework', itemRef: (itemId) => window.fbInvxItemRef(itemId), // same collection as Add-Ons, discriminated by item.category
+    label: 'Framework', viewId: 'inventory-extras', itemRef: (itemId) => window.fbInvxItemRef(itemId), // same collection as Add-Ons, discriminated by item.category
     getQty: (item) => item.quantity || 0,
     setQty: (item, size, qty) => { item.quantity = qty; },
+    findItem: (itemId) => INVX_ITEMS.find(i => i.id === itemId),
+    displayLabel: (item) => item.name || '(unnamed)',
   },
   foil: {
-    label: 'Foil', itemRef: (itemId) => window.fbFoilItemRef(itemId),
+    label: 'Foil', viewId: 'inventory-foil', itemRef: (itemId) => window.fbFoilItemRef(itemId),
     // Letters & Numbers groups store quantities per character (size doubles as the character
     // key); every other Foil category (Decorator Shapes, Themed) is one flat `quantity`.
     getQty: (item, size) => size ? ((item.quantities && item.quantities[size]) || 0) : (item.quantity || 0),
     setQty: (item, size, qty) => { if (size) { if (!item.quantities) item.quantities = {}; item.quantities[size] = qty; } else { item.quantity = qty; } },
+    findItem: (itemId) => FOIL_ITEMS.find(i => i.id === itemId),
+    displayLabel: (item) => item.name || item.color || '(unnamed)',
   },
 };
 function invSystemFor(name) { return INV_SYSTEMS[name || 'standardLatex'] || INV_SYSTEMS.standardLatex; }
+// A requirement/modifier's inventory item, regardless of which system it lives in — the one place
+// that knows which in-memory array to look in, mirroring invFindItem's own job for Standard Latex.
+function invFindItemGeneric(system, itemId) {
+  return invSystemFor(system).findItem(itemId) || null;
+}
+function invGenericItemLabel(system, item) {
+  if (!item) return '(item not found)';
+  return invSystemFor(system).displayLabel(item);
+}
+// Sums one job's already-recorded PULL transactions for a non-Standard-Latex system's item —
+// the generic-system counterpart to invBalloonsPulledForJob, without any bag/balloon conversion
+// (a generic entry's delta is always already in the same unit the requirement itself is in).
+function invQtyPulledForJob(jobId, system, itemId, size) {
+  let total = 0;
+  INVENTORY_TRANSACTIONS.forEach(t => {
+    if (t.jobId !== jobId || (t.system || 'standardLatex') !== system || t.itemId !== itemId || (t.size || null) !== (size || null) || t.type !== 'PULL') return;
+    total += Math.abs(t.delta || 0);
+  });
+  return total;
+}
 
 // entries: [{ system?, itemId, size, type, delta?, balloonsUsed?, ... }] — `system` defaults to
 // 'standardLatex' when omitted, so every existing caller (none of which pass `system` yet) keeps
@@ -8564,11 +8754,22 @@ function clResolveName(text) {
   return { status: 'ambiguous', matches };
 }
 // Used by Import Review to gate Approve: true if any color text isn't a confident (exact)
-// Library match and hasn't been explicitly confirmed as a general/non-inventory note — the
-// "don't guess" rule for ambiguous or unmatched invoice color text.
-function clColorsNeedReview(colors, generalNotes) {
+// Library match, hasn't been explicitly confirmed as a general/non-inventory note, AND hasn't
+// been resolved to a business-owned NON-Standard-Latex inventory record (e.g. Import Review's
+// "Cow Print" -> Specialty Latex resolution — see irResolveColorToBusinessInventory) — the
+// "don't guess" rule for ambiguous or unmatched invoice color text, extended to the generalized
+// inventory identity without touching what "resolved" already meant for Standard Latex.
+// `resolutions` is the draft/job's own colorResolutions map — optional, since the one call site
+// that runs before a draft even exists (psResolveRawItem) has nothing to check yet.
+function clColorsNeedReview(colors, generalNotes, resolutions) {
   const notes = new Set((generalNotes || []).map(n => n.toLowerCase()));
-  return (colors || []).some(c => !notes.has(c.toLowerCase()) && clResolveName(c).status !== 'resolved');
+  return (colors || []).some(c => {
+    const key = c.trim().toLowerCase();
+    if (notes.has(key)) return false;
+    const r = resolutions && resolutions[key];
+    if (r && r.system && r.system !== 'standardLatex') return false;
+    return clResolveName(c).status !== 'resolved';
+  });
 }
 
 // Every active Library entry with this exact (case-insensitive) name or alias, across every
@@ -9268,20 +9469,38 @@ function psComputeJobRequirements(job) {
         const qty = (typeof cd.pct === 'number' && Number.isFinite(cd.pct)) ? Math.round(total * (cd.pct / 100)) : psColorCount(total, nColors);
         if (!Number.isFinite(qty) || qty <= 0) return;
 
+        const isPlaceholder = cd.name === 'Unspecified';
+        const nameKey = cd.name.trim().toLowerCase();
+        // A job-scoped resolution (set via Import Review or Review & Pull) always wins over
+        // anything computed below — it's this specific job's own confirmed answer.
+        const resolution = !isPlaceholder && job.colorResolutions && job.colorResolutions[nameKey];
+
+        // A color resolved to a business-owned NON-Standard-Latex inventory record (e.g. "Cow
+        // Print" -> a Specialty Latex Printed item) — the generalized identity from the
+        // Production Requirement / Material Reference architecture, routed through the exact
+        // same requirement/Review & Pull/ledger pipeline as a Standard Latex color, just
+        // addressing a different system. Never requires a global manufacturer/catalog identity —
+        // itemId is that business's own permanent record id.
+        if (resolution && resolution.system && resolution.system !== 'standardLatex') {
+          requirements.push({
+            jobId: job.id, productionItemId, system: resolution.system,
+            colorId: null, inventoryItemId: resolution.itemId, brand: '',
+            color: cd.name, size: resolution.size || null,
+            qty, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
+            source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
+            unresolved: false,
+          });
+          return;
+        }
+
+        // ── Standard Latex — exact existing resolution, untouched ──
         // Resolve against the Color Library by exact name/alias — deliberately not the fuzzy
         // Import Review matcher. A name shared by two+ brands can't be attributed to one of
         // them without guessing, so that case is flagged rather than picking arbitrarily —
         // and inventoryItemId stays null right along with colorId/brand in that case, rather
         // than quietly picking whichever brand's Inventory row happens to match by name.
-        const isPlaceholder = cd.name === 'Unspecified';
-        const nameKey = cd.name.trim().toLowerCase();
         const matches = isPlaceholder ? [] : clEntriesByExactName(cd.name);
-        // A job-scoped resolution (set via Review & Pull when a color name was ambiguous across
-        // brands) always wins over the general exact-name match — it's this specific job's own
-        // confirmed answer, and stays correct even if the name later becomes ambiguous or
-        // unambiguous for other jobs using the same plain-text color.
-        const resolution = !isPlaceholder && job.colorResolutions && job.colorResolutions[nameKey];
-        const resolvedEntry = resolution && COLOR_LIBRARY.find(e => e.id === resolution.colorId);
+        const resolvedEntry = resolution && resolution.colorId && COLOR_LIBRARY.find(e => e.id === resolution.colorId);
         const libraryEntry = resolvedEntry || (matches.length === 1 ? matches[0] : null);
         const unresolved = !isPlaceholder && !libraryEntry;
         const invItem = libraryEntry ? INVENTORY_ITEMS.find(i => i.colorId === libraryEntry.id) : null;
@@ -9289,6 +9508,7 @@ function psComputeJobRequirements(job) {
         requirements.push({
           jobId: job.id,
           productionItemId,
+          system: 'standardLatex',
           colorId: libraryEntry ? libraryEntry.id : null,
           inventoryItemId: invItem ? invItem.id : null,
           brand: libraryEntry ? libraryEntry.brand : '',
@@ -9302,6 +9522,24 @@ function psComputeJobRequirements(job) {
           unresolved, // multiple brands share this name (or it's not in the Library at all) — can't attribute precisely
           candidates: unresolved ? matches : undefined, // every brand this name matches, for Review & Pull's resolution UI
         });
+      });
+    });
+
+    // Job-instance add-ons/modifiers (e.g. "Red Starburst x6" on an arch) — a flat, directly-typed
+    // quantity, never derived from the balloon-count formula above. Only inventory-backed
+    // modifiers generate a requirement; a modifier with no inventoryRef is informational only
+    // (still shown in Production's Pull section, just nothing for Review & Pull to track).
+    (line.modifiers || []).forEach(mod => {
+      if (!mod.inventoryRef || !mod.inventoryRef.itemId) return;
+      const modQty = Number.isFinite(mod.qty) ? mod.qty : 0;
+      if (modQty <= 0) return;
+      requirements.push({
+        jobId: job.id, productionItemId, system: mod.inventoryRef.system,
+        colorId: null, inventoryItemId: mod.inventoryRef.itemId, brand: '',
+        color: mod.label || '(unnamed add-on)', size: mod.inventoryRef.size || null,
+        qty: modQty, unit: 'unit', requiredBy: job.eventDate || '', category: 'modifier',
+        source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
+        unresolved: false,
       });
     });
   });
@@ -9411,6 +9649,7 @@ function psReviewPullRows(job) {
   const groups = {};
   reqs.forEach(req => {
     let key, groupInfo;
+    const system = req.system || 'standardLatex';
     if (req.formulaInvalid) {
       // One row per broken-config production item — never merged with anything else, since
       // there's no real color/size to group by. Never Ready, never actionable, by construction.
@@ -9420,11 +9659,14 @@ function psReviewPullRows(job) {
       key = 'unresolved:' + req.color.trim().toLowerCase() + ':' + req.size;
       groupInfo = { kind: 'unresolved', color: req.color, size: req.size, candidates: req.candidates || [] };
     } else if (!req.inventoryItemId) {
-      key = 'noitem:' + req.colorId + ':' + req.size;
-      groupInfo = { kind: 'noItem', color: req.color, brand: req.brand, colorId: req.colorId, size: req.size };
+      key = 'noitem:' + system + ':' + req.colorId + ':' + req.size;
+      groupInfo = { kind: 'noItem', system, color: req.color, brand: req.brand, colorId: req.colorId, size: req.size };
     } else {
-      key = 'item:' + req.inventoryItemId + ':' + req.size;
-      groupInfo = { kind: 'item', color: req.color, brand: req.brand, colorId: req.colorId, inventoryItemId: req.inventoryItemId, size: req.size };
+      // Prefixed with `system` so two different collections can never collide on a coincidentally
+      // identical itemId — harmless for Standard Latex (system is always 'standardLatex' there)
+      // but a real safety margin now that itemId can come from any of several collections.
+      key = 'item:' + system + ':' + req.inventoryItemId + ':' + (req.size || '');
+      groupInfo = { kind: 'item', system, category: req.category || 'balloon', color: req.color, brand: req.brand, colorId: req.colorId, inventoryItemId: req.inventoryItemId, size: req.size };
     }
     if (!groups[key]) groups[key] = Object.assign({ key, qty: 0 }, groupInfo);
     groups[key].qty += req.qty;
@@ -9437,6 +9679,27 @@ function psReviewPullRows(job) {
     // above) — this is the last checkpoint before a quantity could ever reach a Pull button, so it
     // fails closed (never Ready, never actionable) rather than trusting every upstream guard held.
     if (!Number.isFinite(row.qty)) return Object.assign({}, row, { alreadyPulled: 0, stillNeeded: NaN, status: 'formulaInvalid' });
+
+    if (row.system && row.system !== 'standardLatex') {
+      // Generic path: a plain quantity comparison, no bag/balloon conversion — see the report's
+      // own note on why that stays out of scope here (a business's Specialty Latex item can
+      // itself be tracked in bags or individual balloons via its own backstockUnit field; this
+      // compares the requirement's qty directly against whatever unit that item's own quantity is
+      // already in, rather than attempting a conversion nothing has asked for yet).
+      const item = invFindItemGeneric(row.system, row.inventoryItemId);
+      if (!item) return Object.assign({}, row, { kind: 'noItem' }); // item was deleted since the requirement was computed
+      const alreadyPulled = invQtyPulledForJob(job.id, row.system, row.inventoryItemId, row.size);
+      const stillNeeded = Math.max(0, row.qty - alreadyPulled);
+      const available = invSystemFor(row.system).getQty(item, row.size);
+      if (!Number.isFinite(stillNeeded) || !Number.isFinite(available)) {
+        return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'formulaInvalid' });
+      }
+      if (stillNeeded <= 0) return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'done' });
+      if (available < stillNeeded) return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'short' });
+      return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'ready' });
+    }
+
+    // ── Standard Latex — exact existing behavior, untouched ──
     const item = invFindItem(row.inventoryItemId);
     if (!item) return Object.assign({}, row, { kind: 'noItem' }); // item was deleted since the requirement was computed
     const sd = item.sizes[row.size];
@@ -9523,11 +9786,14 @@ async function psReviewPullConfirmRow(jobId, rowKey, qty) {
   psReviewPullBusyKeys[busyKey] = true;
   psRenderProductionJobs();
   try {
-    await invApplyInventoryTransactions([{
-      itemId: row.inventoryItemId, size: row.size, type: 'PULL',
-      balloonsUsed: Math.min(qty, row.stillNeeded),
-      jobId: job.id, jobName: job.jobName || '',
-    }]);
+    const amount = Math.min(qty, row.stillNeeded);
+    // Standard Latex still pulls in balloonsUsed (the ledger converts to bags/loose stock itself);
+    // every other system supplies a plain delta — see invApplyInventoryTransactions's own generic
+    // branch, which has no packaging concept to convert through.
+    const entry = (row.system && row.system !== 'standardLatex')
+      ? { system: row.system, itemId: row.inventoryItemId, size: row.size, type: 'PULL', delta: -amount, jobId: job.id, jobName: job.jobName || '' }
+      : { itemId: row.inventoryItemId, size: row.size, type: 'PULL', balloonsUsed: amount, jobId: job.id, jobName: job.jobName || '' };
+    await invApplyInventoryTransactions([entry]);
   } catch (err) {
     console.error('Review & Pull failed:', err);
     alert(err.message || "Couldn't record that pull — check your connection and try again.");
@@ -9550,11 +9816,10 @@ async function psReviewPullConfirmAllReady(jobId) {
   rows.forEach(r => { psReviewPullBusyKeys[jobId + '|' + r.key] = true; });
   psRenderProductionJobs();
   try {
-    await invApplyInventoryTransactions(rows.map(r => ({
-      itemId: r.inventoryItemId, size: r.size, type: 'PULL',
-      balloonsUsed: r.stillNeeded,
-      jobId: job.id, jobName: job.jobName || '',
-    })));
+    await invApplyInventoryTransactions(rows.map(r => (r.system && r.system !== 'standardLatex')
+      ? { system: r.system, itemId: r.inventoryItemId, size: r.size, type: 'PULL', delta: -r.stillNeeded, jobId: job.id, jobName: job.jobName || '' }
+      : { itemId: r.inventoryItemId, size: r.size, type: 'PULL', balloonsUsed: r.stillNeeded, jobId: job.id, jobName: job.jobName || '' }
+    ));
   } catch (err) {
     console.error('Review & Pull (bulk) failed:', err);
     alert(err.message || "Couldn't record those pulls — check your connection and try again.");
@@ -9570,6 +9835,12 @@ async function psReviewPullConfirmAllReady(jobId) {
 // color resolution, a Standard Package Qty, or the ledger. A Completed job is done; if it needs
 // more inventory work, that's a correction (reopen the job, or use Adjust/Receive/Pull directly),
 // not something this screen should keep quietly offering.
+// A modifier/non-Standard-Latex row often has no size at all (a flat-quantity item) — this keeps
+// "Brand Color — Size" from rendering a dangling " — " when size is null, without touching the
+// balloon-row wording anywhere size IS present.
+function rpItemLabel(row) {
+  return [row.brand, row.color].filter(Boolean).join(' ') + (row.size ? ` — ${row.size}` : '');
+}
 function psReviewPullRowHtml(job, row, readOnly) {
   const busyKey = job.id + '|' + row.key;
   const busy = !!psReviewPullBusyKeys[busyKey];
@@ -9640,13 +9911,15 @@ function psReviewPullRowHtml(job, row, readOnly) {
   }
 
   if (row.kind === 'noItem') {
+    const sys = invSystemFor(row.system);
+    const isStandard = !row.system || row.system === 'standardLatex';
     return `<div class="rp-row">
       <div class="rp-row-head">
-        <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
+        <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)}${row.size ? ` — ${psEscape(row.size)}` : ''} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
         ${rpBadge('Not Stocked')}
       </div>
-      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">This color is in your Color Library but isn't stocked in Standard Latex Inventory yet.</div>
-      <div class="rp-actions"><button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="showView('inventory-latex')">Go to Standard Latex Inventory</button></div>
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">${isStandard ? "This color is in your Color Library but isn't stocked in Standard Latex Inventory yet." : `This item is no longer in your ${psEscape(sys.label)} inventory — it may have been deleted.`}</div>
+      <div class="rp-actions"><button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="showView('${sys.viewId}')">Go to ${psEscape(sys.label)}</button></div>
     </div>`;
   }
 
@@ -9656,7 +9929,7 @@ function psReviewPullRowHtml(job, row, readOnly) {
     // Never Ready, never a Pull button, regardless of cause.
     return `<div class="rp-row">
       <div class="rp-row-head">
-        <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)}</div>
+        <div style="font-size:13px; font-weight:700;">${psEscape(rpItemLabel(row))}</div>
         ${rpBadge('Needs Configuration')}
       </div>
       <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">${psEscape(psInvalidFormulaMessage())} Check this item's production template and color/size configuration.</div>
@@ -9679,14 +9952,14 @@ function psReviewPullRowHtml(job, row, readOnly) {
   }
 
   if (row.status === 'done') {
-    return `<div class="ps-check-row done" style="cursor:default;"><label>${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)}: ${row.qty} needed, fully pulled</label></div>`;
+    return `<div class="ps-check-row done" style="cursor:default;"><label>${psEscape(rpItemLabel(row))}: ${row.qty} needed, fully pulled</label></div>`;
   }
 
   if (row.status === 'short') {
     const short = row.stillNeeded - row.available;
     let html = `<div class="rp-row">
       <div class="rp-row-head">
-        <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)}</div>
+        <div style="font-size:13px; font-weight:700;">${psEscape(rpItemLabel(row))}</div>
         ${rpBadge('Short')}
       </div>
       <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">Need ${row.stillNeeded} · Available ${row.available} · Short ${short}</div>`;
@@ -9704,7 +9977,7 @@ function psReviewPullRowHtml(job, row, readOnly) {
   // ready
   return `<div class="rp-row">
     <div class="rp-row-head">
-      <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.stillNeeded}${row.alreadyPulled ? `, ${row.alreadyPulled} already pulled` : ''})</span></div>
+      <div style="font-size:13px; font-weight:700;">${psEscape(rpItemLabel(row))} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.stillNeeded}${row.alreadyPulled ? `, ${row.alreadyPulled} already pulled` : ''})</span></div>
       <span class="rp-badge rp-badge-ready">Ready</span>
     </div>
     ${readOnly
@@ -12359,6 +12632,18 @@ const SP_SIZE_OPTIONS = {
   printed: ['5"', '11"', '18"', '24"'],
   shapes: ['5"', '12"', '14"', '16"', '18"'],
 };
+// Business-owned inventory resolution (Import Review's "Cow Print" case) — exact match only
+// (never fuzzy), against whichever field a business is more likely to have actually named the
+// print in: `pattern` (the common case — spAddFormHtml's own placeholder for a printed item is
+// literally "e.g. Cow Print") or `color`, if a business used that field for the print's name
+// instead. Scoped to 'printed' only — Twisting/Linking/Shapes aren't balloon "colors" in this
+// app's own vocabulary, so a color-resolution search has no reason to consider them.
+function spFindByExactColorText(text) {
+  const key = (text || '').trim().toLowerCase();
+  if (!key) return [];
+  return SPECIALTY_ITEMS.filter(i => i.kind === 'printed' &&
+    ((i.color || '').trim().toLowerCase() === key || (i.pattern || '').trim().toLowerCase() === key));
+}
 let spKindTab = 'twisting';
 let spExpandedItem = null;
 let spSearchQuery = '';
