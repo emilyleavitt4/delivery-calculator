@@ -737,6 +737,57 @@
   .rp-badge-attention { background: var(--warning-bg); color: var(--warning-text); }
   .rp-actions { margin-top: 0.4rem; }
   .rp-actions .icon-btn, .rp-actions .save-btn { padding: 8px 14px; font-size: 13px; }
+
+  /* IMPORT REVIEW — decisions read as questions, not form fields. The item boundary is a single
+     thin divider, not a stack of nested boxes; resolved items go quiet; a "pill" control reads as
+     an answer you tap, not a labeled input box. Scoped entirely to .ir- classes. */
+  .ir-header { margin-bottom: 1.5rem; }
+  .ir-header-title { font-size: 21px; font-weight: 800; letter-spacing: -0.3px; text-wrap: balance; }
+  .ir-header-sub { font-size: 13px; color: var(--text-secondary); margin-top: 3px; }
+  .ir-header-status { font-size: 14.5px; font-weight: 700; margin-top: 12px; display: flex; align-items: center; gap: 7px; }
+  .ir-header-status.attention { color: var(--warning-text); }
+  .ir-header-status.clear { color: var(--success-text); }
+  .ir-header-meta { font-size: 11.5px; color: var(--text-tertiary); margin-top: 10px; line-height: 1.6; }
+
+  .ir-list { margin-bottom: 1.5rem; }
+  .ir-item { padding: 1rem 0; border-bottom: 0.5px solid var(--border); }
+  .ir-item:first-child { padding-top: 0; }
+  .ir-item:last-child { border-bottom: none; }
+  .ir-item-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; cursor: pointer; }
+  .ir-item-title { font-size: 15.5px; font-weight: 700; letter-spacing: -0.1px; }
+  .ir-item-title-quiet { font-size: 13.5px; font-weight: 500; color: var(--text-secondary); }
+  .ir-item-qty { font-weight: 400; color: var(--text-tertiary); }
+  .ir-item-need { font-size: 12.5px; font-weight: 600; color: var(--warning-text); margin-top: 4px; }
+  .ir-item-resolved-note { font-size: 12px; color: var(--text-tertiary); margin-top: 3px; }
+  .ir-item-resolved-note i { color: var(--success-text); margin-right: 4px; }
+  .ir-chevron { color: var(--text-tertiary); font-size: 13px; margin-top: 3px; flex-shrink: 0; }
+
+  .ir-decisions { margin-top: 16px; display: flex; flex-direction: column; gap: 18px; }
+  .ir-decision-q { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 7px; }
+  .ir-decision-hint { font-size: 12px; color: var(--warning-text); margin-top: 6px; }
+  .ir-decision-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+  .ir-pill-select {
+    font: inherit; font-size: 14.5px; font-weight: 600; color: var(--text);
+    background: var(--brand-surface); border: none; border-radius: 999px;
+    padding: 9px 14px; cursor: pointer; max-width: 100%;
+  }
+  .ir-text-action { background: none; border: none; padding: 4px 0; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--brand-blue); cursor: pointer; white-space: nowrap; }
+  .ir-text-action-muted { color: var(--text-secondary); font-weight: 500; }
+  .ir-setup-block { margin-top: 10px; padding: 12px; background: var(--bg); border-radius: var(--radius-sm); }
+
+  .ir-color-list { display: flex; flex-direction: column; gap: 12px; }
+  .ir-color-chip-row { display: flex; align-items: center; gap: 8px; }
+  .ir-color-input {
+    flex: 1; min-width: 0; font: inherit; font-size: 14.5px; font-weight: 600; color: var(--text);
+    background: transparent; border: none; border-bottom: 1.5px solid transparent; padding: 4px 2px;
+  }
+  .ir-color-input:focus { outline: none; border-bottom-color: var(--brand-blue); }
+  .ir-color-remove { background: none; border: none; padding: 4px 6px; font-size: 15px; color: var(--text-tertiary); cursor: pointer; flex-shrink: 0; }
+  .ir-chip-btn { background: var(--surface); border: 0.5px solid var(--border-strong); border-radius: 999px; padding: 6px 13px; font-size: 12px; font-weight: 600; color: var(--text); cursor: pointer; white-space: nowrap; }
+  .ir-chip-btn:hover, .ir-chip-btn:active { border-color: var(--brand-blue); color: var(--brand-blue); }
+
+  .ir-secondary { margin-top: 18px; padding-top: 16px; border-top: 0.5px solid var(--border); }
   .ps-sub-row { padding-left: 0.75rem; }
   .ps-sub-row .label { color: var(--text-tertiary); font-size: 12px; }
   .ps-sub-row .val { font-size: 13px; }
@@ -4326,20 +4377,18 @@ function irToggleExpanded(id) {
 // fields, e.g. "Themes & Colors"). No mapping/decision UI yet, per the current scope — this
 // exists only so the data is visible to a human reviewing the import, not silently invisible in
 // an object nobody looks at. Renders nothing at all for the PDF pipeline, which never sets either.
+// Quiet, secondary line under the header — facts about the invoice itself, not something anyone
+// decides on. Kept out of the primary decision surface entirely (no card, no border) since it's
+// context, not a task.
 function irOtherFieldsHtml(draft) {
   const meta = draft.invoiceMeta;
   const fields = draft.customFields || {};
   const fieldEntries = Object.entries(fields).filter(([, v]) => v !== '' && v != null);
   if (!meta && fieldEntries.length === 0) return '';
-  let html = `<div style="font-size:11px; color:var(--text-secondary); margin-top:8px; padding-top:8px; border-top:0.5px solid var(--border); text-align:left;">`;
-  if (meta) {
-    html += `<div>${[meta.number ? `Invoice #${psEscape(meta.number)}` : '', meta.total ? psEscape(meta.total) : '', meta.dueDate ? `Due ${psEscape(meta.dueDate)}` : ''].filter(Boolean).join(' · ')}</div>`;
-  }
-  fieldEntries.forEach(([key, value]) => {
-    html += `<div><b>${psEscape(key)}:</b> ${psEscape(String(value))}</div>`;
-  });
-  html += `</div>`;
-  return html;
+  const lines = [];
+  if (meta) lines.push([meta.number ? `Invoice #${psEscape(meta.number)}` : '', meta.total ? psEscape(meta.total) : '', meta.dueDate ? `Due ${psEscape(meta.dueDate)}` : ''].filter(Boolean).join(' · '));
+  fieldEntries.forEach(([key, value]) => lines.push(`${psEscape(key)}: ${psEscape(String(value))}`));
+  return `<div class="ir-header-meta">${lines.filter(Boolean).join('<br>')}</div>`;
 }
 
 function irRenderShell() {
@@ -4354,28 +4403,27 @@ function irRenderShell() {
   const needsReview = draft.reviewItems.filter(i => i.status === 'needs_review');
   const recognized = draft.reviewItems.filter(i => i.status !== 'needs_review');
 
-  // Leads with whichever fact actually matters right now: outstanding decisions if there are any
-  // (in warning color, since that's genuinely what's blocking Approve), or a calm all-clear once
-  // there aren't — rather than a neutral "X need review, Y recognized" tally every time.
-  const headlineHtml = needsReview.length > 0
-    ? `<div style="font-size:15px; font-weight:700; color:var(--warning-text);">${needsReview.length} item${needsReview.length === 1 ? '' : 's'} need${needsReview.length === 1 ? 's' : ''} your review</div>
-       <div style="font-size:12px; color:var(--text-tertiary); margin-top:2px;">${recognized.length} already recognized</div>`
-    : `<div style="font-size:15px; font-weight:700; color:var(--success-text);"><i class="fa-solid fa-circle-check"></i> All ${recognized.length} item${recognized.length === 1 ? '' : 's'} recognized</div>
-       <div style="font-size:12px; color:var(--text-tertiary); margin-top:2px;">Ready to approve</div>`;
+  // The event's own identity leads, composed like a page header (name, then date/title) rather
+  // than metadata poured into a box — then one status line saying what's actually true right now.
+  const statusHtml = needsReview.length > 0
+    ? `<div class="ir-header-status attention">${needsReview.length} item${needsReview.length === 1 ? '' : 's'} need${needsReview.length === 1 ? 's' : ''} your input</div>`
+    : `<div class="ir-header-status clear"><i class="fa-solid fa-circle-check"></i> All set — ready to approve</div>`;
+  const titleLine = draft.event.jobName || 'New import';
+  const subParts = [draft.event.eventDate, draft.event.eventTitle].filter(Boolean).map(psEscape);
 
   root.innerHTML = `
-    <div class="card" style="margin-bottom:0.75rem; text-align:center;">
-      ${headlineHtml}
-      ${draft.event.jobName || draft.event.eventDate ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:8px;">${psEscape(draft.event.jobName)}${draft.event.eventDate ? ' — ' + psEscape(draft.event.eventDate) : ''}</div>` : ''}
-      ${draft.event.eventTitle ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">${psEscape(draft.event.eventTitle)}</div>` : ''}
+    <div class="ir-header">
+      <div class="ir-header-title">${psEscape(titleLine)}</div>
+      ${subParts.length ? `<div class="ir-header-sub">${subParts.join(' · ')}</div>` : ''}
+      ${statusHtml}
       ${irOtherFieldsHtml(draft)}
     </div>
 
     <div class="section-label" style="margin-top:0">Needs Review</div>
-    <div id="ir-needs-review">${needsReview.length === 0 ? `<div class="card" style="text-align:center; color:var(--text-secondary);">Nothing needs review.</div>` : needsReview.map(i => irItemCardHtml(i)).join('')}</div>
+    <div class="ir-list" id="ir-needs-review">${needsReview.length === 0 ? `<div style="font-size:13px; color:var(--text-secondary); padding:0.5rem 0;">Nothing needs review.</div>` : needsReview.map(i => irItemCardHtml(i)).join('')}</div>
 
     <div class="section-label">Recognized Items</div>
-    <div id="ir-recognized">${recognized.length === 0 ? `<div class="card" style="text-align:center; color:var(--text-secondary);">No recognized items.</div>` : recognized.map(i => irItemCardHtml(i)).join('')}</div>
+    <div class="ir-list" id="ir-recognized">${recognized.length === 0 ? `<div style="font-size:13px; color:var(--text-secondary); padding:0.5rem 0;">No recognized items.</div>` : recognized.map(i => irItemCardHtml(i)).join('')}</div>
 
     <div id="ir-save-status" style="text-align:center; font-size:12px; color:var(--success-text); min-height:16px; margin-top:0.5rem;"></div>
     <div style="display:flex; gap:8px; margin: 0.5rem 0 1.5rem;">
@@ -4385,10 +4433,21 @@ function irRenderShell() {
   `;
 }
 
-function irStatusBadgeHtml(status) {
-  if (status === 'needs_review') return `<span style="background:var(--warning-bg); color:var(--warning-text); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap;">Needs review</span>`;
-  if (status === 'ignored') return `<span style="background:var(--bg); color:var(--text-secondary); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap; border:0.5px solid var(--border-strong);">Ignored</span>`;
-  return `<span style="background:var(--success-bg); color:var(--success-text); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap;">Mapped</span>`;
+// What this item still needs a human to decide, derived from the exact same conditions
+// irRecomputeItemStatus already checks (never a separate source of truth) — just organized as
+// named questions instead of a flat reasons array, so the header can say "N things" and the body
+// can render exactly those N blocks, no more.
+function irPendingDecisions(item) {
+  const readyRecipe = item.classification === 'production' ? ptReadyRecipe(item.recipeId) : null;
+  const mappingUncertain = item.reasons.some(r => r.startsWith('No saved mapping') || r.startsWith('Multiple saved mappings') || r.startsWith('Low-confidence match'));
+  const needsTemplate = item.classification === 'production' && !readyRecipe;
+  const needsFootage = item.classification === 'production' && !!readyRecipe && readyRecipe.customLinear && !item.customLinear;
+  const needsColors = item.classification === 'production' && clColorsNeedReview(item.colors, item.colorGeneralNotes);
+  const decisions = [];
+  if (mappingUncertain) decisions.push('classification');
+  if (needsTemplate || needsFootage) decisions.push('build');
+  if (needsColors) decisions.push('colors');
+  return { decisions, needsTemplate, needsFootage };
 }
 
 function irItemCardHtml(item) {
@@ -4398,56 +4457,72 @@ function irItemCardHtml(item) {
     : imClassificationLabel(item.classification);
   const needsReview = item.status === 'needs_review';
   const expanded = irExpandedItems.has(item.id) || needsReview;
-  // Once an item is resolved there's no flagged reason left to filter by, so its expanded view
+  // Once an item is resolved there's no pending decision left to narrow by, so its expanded view
   // always shows the full form (identical to today's behavior for Mapped/Ignored items). Only a
-  // Needs Review item's expanded view starts narrowed to just what the flagged reason(s) need.
+  // Needs Review item's expanded view starts narrowed to just its pending decisions.
   const detailsOpen = irDetailsExpandedItems.has(item.id) || !needsReview;
+  const { decisions, needsTemplate, needsFootage } = needsReview ? irPendingDecisions(item) : { decisions: [] };
 
-  // Collapsed row: a Needs Review item leads with WHY (the actual flagged reason, in the same
-  // warning color as its badge) ahead of the routine classification summary — that's the decision
-  // this card is asking for. A resolved item has no reason to lead with, so it renders quieter
-  // (smaller, muted) rather than competing for attention with the items that still need one.
-  let html = `<div class="card" style="margin-bottom:0.5rem;">
-    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; cursor:pointer;" onclick="irToggleExpanded('${item.id}')">
+  let html = `<div class="ir-item">
+    <div class="ir-item-head" onclick="irToggleExpanded('${item.id}')">
       <div style="flex:1; min-width:0;">
-        <div style="font-size:${needsReview ? '14px' : '13px'}; font-weight:${needsReview ? '700' : '600'}; color:${needsReview ? 'var(--text)' : 'var(--text-secondary)'};">${psEscape(item.rawName)} <span style="font-weight:400; color:var(--text-tertiary);">× ${item.rawQty}</span></div>
-        ${needsReview ? `<div style="font-size:12.5px; font-weight:600; color:var(--warning-text); margin-top:3px;">${item.reasons.map(r => psEscape(r)).join(' ')}</div>` : ''}
-        <div style="font-size:11px; color:var(--text-tertiary); margin-top:2px;">${psEscape(imClassificationLabel(item.classification))} — ${psEscape(destinationSummary)}</div>
+        <div class="${needsReview ? 'ir-item-title' : 'ir-item-title-quiet'}">${psEscape(item.rawName)}${item.rawQty > 1 ? ` <span class="ir-item-qty">× ${item.rawQty}</span>` : ''}</div>
+        ${needsReview
+          ? `<div class="ir-item-need">${decisions.length} thing${decisions.length === 1 ? '' : 's'} need${decisions.length === 1 ? 's' : ''} your input</div>`
+          : `<div class="ir-item-resolved-note"><i class="fa-solid fa-check"></i>${psEscape(imClassificationLabel(item.classification))}${item.classification === 'production' ? ' — ' + psEscape(destinationSummary) : ''}</div>`}
       </div>
-      ${irStatusBadgeHtml(item.status)}
+      <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} ir-chevron"></i>
     </div>`;
 
   if (expanded) {
-    html += `<div style="margin-top:10px; padding-top:10px; border-top:0.5px solid var(--border);">`;
+    html += `<div class="ir-decisions">`;
 
-    // Primary: the field(s) that actually resolve a flagged reason — classification, and (for
-    // production items) the template/footage/colors decisions that follow from it. Shown first
-    // and always, whether or not "Edit all details" is open.
-    html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Classification</label><select onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select></div>`;
-
-    if (item.classification === 'production') {
-      html += `<div class="settings-field" style="margin-bottom:0.6rem;">
-        <label>Production template</label>
-        <div style="display:flex; gap:6px;">
-          <select style="flex:1;" onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">— choose one —</option>${psItemOptionsHtml(item.recipeId)}</select>
-          <button class="icon-btn" style="width:auto; padding:6px 10px; font-size:12px; white-space:nowrap;" onclick="irCreateNewTemplateForItem('${item.id}')"><i class="fa-solid fa-plus"></i> Create new template</button>
-        </div>
+    if (decisions.includes('classification')) {
+      html += `<div>
+        <div class="ir-decision-q">What type of decor is this?</div>
+        <select class="ir-pill-select" onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select>
       </div>`;
-      if (recipe && recipe.needsSetup) {
-        html += `<div style="margin:0 0 0.6rem; padding:8px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);">
-          ${ptTemplateFieldsEditorHtml(recipe)}
-          <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="irCompleteTemplateSetup('${item.id}','${recipe.id}')"><i class="fa-solid fa-check"></i> Complete Template Setup</button>
+    }
+
+    if (item.classification === 'production' && decisions.includes('build')) {
+      html += `<div>
+        <div class="ir-decision-q">${needsTemplate ? 'How do you build this?' : 'How many feet is this?'}</div>`;
+      if (needsTemplate) {
+        html += `<div class="ir-decision-row">
+          <select class="ir-pill-select" onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">Choose one…</option>${psItemOptionsHtml(item.recipeId)}</select>
+          <button class="ir-text-action" onclick="irCreateNewTemplateForItem('${item.id}')">+ New template</button>
         </div>`;
+        if (recipe && recipe.needsSetup) {
+          html += `<div class="ir-setup-block">
+            ${ptTemplateFieldsEditorHtml(recipe)}
+            <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="irCompleteTemplateSetup('${item.id}','${recipe.id}')"><i class="fa-solid fa-check"></i> Complete Template Setup</button>
+          </div>`;
+        }
       }
       if (recipe && recipe.customLinear) {
-        html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Actual footage</label><input type="number" step="0.5" min="0" value="${item.customLinear || ''}" placeholder="e.g. 30" onchange="irUpdateItemField('${item.id}','customLinear', this.value)"></div>`;
+        html += `<input type="number" class="ir-pill-select" style="width:100px;" step="0.5" min="0" value="${item.customLinear || ''}" placeholder="e.g. 30" onchange="irUpdateItemField('${item.id}','customLinear', this.value)">`;
       }
-      html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Colors</label>${irColorPickerHtml(item)}</div>`;
+      html += `</div>`;
+    }
+
+    if (item.classification === 'production' && decisions.includes('colors')) {
+      html += `<div>
+        <div class="ir-decision-q">Which colors are these?</div>
+        ${irColorPickerHtml(item)}
+      </div>`;
+    }
+
+    // The collapsed header already states what this resolved item is (classification +
+    // destination) — the one thing it doesn't show is which colors were resolved, so that's the
+    // only quiet confirmation line worth repeating here.
+    if (!needsReview && item.classification === 'production' && item.colors.length) {
+      html += `<div style="font-size:13px; color:var(--text-secondary);">${item.colors.map(psEscape).join(', ')}</div>`;
     }
 
     // Secondary: renaming/quantity/location/notes/remember-mapping/split/ignore — real, still one
     // click away, just not what's shown by default while a decision is still pending.
     if (detailsOpen) {
+      html += `<div class="ir-secondary">`;
       if (item.rawDescription) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;"><b>Original description:</b> ${psEscape(item.rawDescription)}</div>`;
       if (item.totalPrice != null) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;"><b>Imported price:</b> ${jccFmtMoney(item.totalPrice)}${item.unitPrice != null ? ` (${jccFmtMoney(item.unitPrice)} ea)` : ''}</div>`;
 
@@ -4457,6 +4532,18 @@ function irItemCardHtml(item) {
       </div>`;
 
       if (item.classification === 'production') {
+        if (!decisions.includes('classification')) {
+          html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Classification</label><select onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select></div>`;
+        }
+        if (!decisions.includes('build')) {
+          html += `<div class="settings-field" style="margin-bottom:0.6rem;">
+            <label>Production template</label>
+            <div style="display:flex; gap:6px;">
+              <select style="flex:1;" onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">— choose one —</option>${psItemOptionsHtml(item.recipeId)}</select>
+              <button class="icon-btn" style="width:auto; padding:6px 10px; font-size:12px; white-space:nowrap;" onclick="irCreateNewTemplateForItem('${item.id}')"><i class="fa-solid fa-plus"></i> New</button>
+            </div>
+          </div>`;
+        }
         html += `<div class="row">
           <div class="settings-field" style="margin-bottom:0.6rem;"><label>Location (optional)</label><input type="text" value="${invAttr(item.location)}" onchange="irUpdateItemField('${item.id}','location', this.value)"></div>
           <div class="settings-field" style="margin-bottom:0.6rem;"><label>Indoor/Outdoor</label>
@@ -4467,6 +4554,8 @@ function irItemCardHtml(item) {
             </select>
           </div>
         </div>`;
+      } else {
+        html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Classification</label><select onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select></div>`;
       }
 
       html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Description / notes (optional)</label><input type="text" value="${invAttr(item.description)}" onchange="irUpdateItemField('${item.id}','description', this.value)"></div>`;
@@ -4476,16 +4565,15 @@ function irItemCardHtml(item) {
         Remember this mapping for future imports
       </label>`;
 
-      html += `<div style="display:flex; gap:8px; flex-wrap:wrap;">
-        <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irSplitItem('${item.id}')"><i class="fa-solid fa-scissors"></i> Split into multiple</button>
-        <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irMarkIgnored('${item.id}')"><i class="fa-solid fa-ban"></i> Ignore</button>
+      html += `<div style="display:flex; gap:16px;">
+        <button class="ir-text-action ir-text-action-muted" onclick="irSplitItem('${item.id}')">Split into multiple</button>
+        <button class="ir-text-action ir-text-action-muted" onclick="irMarkIgnored('${item.id}')">Ignore this item</button>
       </div>`;
+      html += `</div>`;
     }
 
     if (needsReview) {
-      html += `<button class="icon-btn" style="width:auto; padding:4px 2px; font-size:12px; color:var(--brand-blue); margin-top:4px;" onclick="irToggleDetails('${item.id}')">
-        <i class="fa-solid fa-chevron-${detailsOpen ? 'up' : 'down'}"></i> ${detailsOpen ? 'Hide' : 'Edit'} all details
-      </button>`;
+      html += `<button class="ir-text-action" style="margin-top:2px;" onclick="irToggleDetails('${item.id}')">${detailsOpen ? 'Hide' : 'Show'} all details</button>`;
     }
 
     html += `</div>`;
@@ -4536,39 +4624,41 @@ function irCompleteTemplateSetup(itemId, templateId) {
 // add the typed text as a brand-new color, or mark it a general/non-inventory note. ────────────
 function irColorPickerHtml(item) {
   const colors = item.colors.length ? item.colors : [''];
-  return `<div>${colors.map((c, idx) => irColorRowHtml(item, idx, c)).join('')}</div>
-    <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px; margin-top:2px;" onclick="irAddColorRow('${item.id}')"><i class="fa-solid fa-plus"></i> Add color</button>`;
+  return `<div class="ir-color-list">${colors.map((c, idx) => irColorRowHtml(item, idx, c)).join('')}</div>
+    <button class="ir-text-action" style="margin-top:4px;" onclick="irAddColorRow('${item.id}')">+ Add another color</button>`;
 }
+// A resolved (or general-note) color reads as a settled answer — quiet text with a checkmark,
+// its input styled borderless so it looks like a label until focused, not an open field. A color
+// that still needs a decision gets the opposite treatment: an underlined field plus every
+// candidate answer (Library suggestions, "add as new," "general note") rendered as one row of
+// equally-weighted tappable chips, so picking one feels like answering, not editing a row.
 function irColorRowHtml(item, idx, value) {
   const inputId = 'ir-color-' + item.id + '-' + idx;
   const text = (value || '').trim();
   const isNote = (item.colorGeneralNotes || []).some(n => n === text.toLowerCase());
   const resolution = text ? clResolveName(text) : { status: 'empty' };
-  let statusHtml = '';
-  if (isNote) {
-    statusHtml = `<div style="font-size:11px; color:var(--text-secondary); margin-top:2px;"><i class="fa-solid fa-note-sticky"></i> General note — not inventory-tracked</div>`;
-  } else if (resolution.status === 'resolved') {
-    statusHtml = `<div style="font-size:11px; color:var(--success-text); margin-top:2px;"><i class="fa-solid fa-check"></i> Matches your Color Library</div>`;
-  } else if (text) {
+  const resolved = isNote || resolution.status === 'resolved';
+  let hintHtml = '', chipsHtml = '';
+  if (!resolved && text) {
     const suggestions = clSearch(text).slice(0, 4);
-    statusHtml = `<div style="font-size:11px; color:var(--warning-text); margin-top:4px;">
-      <i class="fa-solid fa-triangle-exclamation"></i> Needs Color Review — ${resolution.status === 'ambiguous' ? 'more than one Library color could match' : 'no match in your Color Library'}
-      <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;">
-        ${suggestions.map(s => `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irResolveColorRow('${item.id}',${idx},'${s.colorName.replace(/'/g, "\\'")}')">${psEscape(s.colorName)}</button>`).join('')}
-        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irAddColorAsNew('${item.id}',${idx})"><i class="fa-solid fa-plus"></i> Add "${psEscape(text)}" as new color</button>
-        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irMarkColorGeneralNote('${item.id}',${idx})">Mark as general note</button>
-      </div>
+    hintHtml = `<div class="ir-decision-hint">${suggestions.length ? 'Did you mean one of these?' : "Not in your Color Library yet — add it, or mark it a general note."}</div>`;
+    chipsHtml = `<div class="ir-color-suggestions">
+      ${suggestions.map(s => `<button class="ir-chip-btn" onclick="irResolveColorRow('${item.id}',${idx},'${s.colorName.replace(/'/g, "\\'")}')">${psEscape(s.colorName)}</button>`).join('')}
+      <button class="ir-chip-btn" onclick="irAddColorAsNew('${item.id}',${idx})">+ Add "${psEscape(text)}" as new</button>
+      <button class="ir-chip-btn" onclick="irMarkColorGeneralNote('${item.id}',${idx})">General note</button>
     </div>`;
   }
-  return `<div style="position:relative; margin-bottom:8px;">
-    <div style="display:flex; gap:6px;">
-      <input type="text" id="${inputId}" value="${psEscape(value)}" placeholder="Start typing a color..." style="flex:1;"
+  return `<div style="position:relative;">
+    <div class="ir-color-chip-row">
+      <input type="text" id="${inputId}" value="${psEscape(value)}" placeholder="Type a color…" class="ir-color-input"
+        style="border-bottom-color:${resolved || !text ? 'transparent' : 'var(--warning-text)'};"
         oninput="irUpdateColorRowLive('${item.id}', ${idx}, this.value); invShowColorSuggestions('${inputId}')"
         onblur="invHideColorSuggestionsSoon('${inputId}'); irScheduleColorRecompute('${item.id}', ${idx})">
-      <button class="icon-btn" style="padding:4px;" onclick="irRemoveColorRow('${item.id}', ${idx})" aria-label="Remove color"><i class="fa-solid fa-trash"></i></button>
+      ${resolved ? `<i class="fa-solid fa-check" style="color:var(--success-text); font-size:12px; flex-shrink:0;" title="${isNote ? 'General note — not inventory-tracked' : 'Matches your Color Library'}"></i>` : ''}
+      <button class="ir-color-remove" onclick="irRemoveColorRow('${item.id}', ${idx})" aria-label="Remove color">&times;</button>
     </div>
     <div id="${inputId}-suggest" class="inv-color-suggest" style="display:none;"></div>
-    ${statusHtml}
+    ${hintHtml}${chipsHtml}
   </div>`;
 }
 function irUpdateColorRowLive(itemId, idx, value) {
