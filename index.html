@@ -3416,6 +3416,13 @@ function psSnapshotTemplate(recipe) {
 // recipe/formula fields, applied at task grain instead of whole-recipe grain.
 const TASK_PHASES = ['prep', 'build', 'finish'];
 const TASK_PHASE_LABELS = { prep: 'Prep', build: 'Inflate & Build', finish: 'Finish & Pack' };
+// A task instance's own status — the one and only place "is this done" lives for a task. Ready is
+// the default a job enters Production with; Hold is a deliberate pause (blocked/waiting on
+// something), never a synonym for "not started yet"; Done is the only state build/phase/item
+// completion is ever derived from (see psItemPhaseComplete/psItemFullyFinished below) — there is
+// no separate manual "mark complete" flag anywhere that could disagree with this.
+const TASK_STATUSES = ['ready', 'hold', 'done'];
+const TASK_STATUS_LABELS = { ready: 'Ready', hold: 'Hold', done: 'Done' };
 
 function psNewTaskId() {
   return 'task_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -3433,6 +3440,69 @@ function psSnapshotTasksForItem(recipe, productionItemId) {
     status: 'ready',
     priority: false,
   }));
+}
+
+// ─── Synthetic Prep tasks: the reconciliation of the old job.pullChecklist ───
+//
+// pullChecklist used to be the only place a topper note, a template's own pull-list note, or a
+// color marked "general note — not inventory-tracked" during import (see colorGeneralNotes) could
+// be checked off — a second, disconnected checkbox map with no relationship to job.tasks and no
+// effect on anything. The calculated balloon size/color counts stay Review & Pull's job alone (the
+// real, ledger-backed pull tracking — nothing else should ever claim to know whether a balloon
+// pull actually happened). But this handful of genuinely human, non-ledger Prep facts belongs in
+// the SAME checkable/persistent system as every other task, not a parallel one — so they become
+// real job.tasks entries, phase 'prep', flagged `synthetic: true` so this sync can find and update
+// them without needing a second, independently-maintained id scheme.
+//
+// Deterministic (not psNewTaskId's random) so re-running the sync after an edit finds the SAME
+// task by id instead of creating a duplicate every time.
+function psSyntheticTaskId(productionItemId, kind) {
+  return productionItemId + ':synthetic:' + kind;
+}
+function psSyntheticPrepTasksFor(line, recipe) {
+  const tasks = [];
+  if (line.topperNote && line.topperNote.trim()) {
+    tasks.push({ kind: 'topper', text: `Pull topper: ${line.topperNote.trim()}` });
+  }
+  if (recipe && recipe.pullListNotes) {
+    tasks.push({ kind: 'pullnote', text: recipe.pullListNotes });
+  }
+  (line.colorGeneralNotes || []).forEach(noteKey => {
+    const original = (line.colors || []).find(c => c.trim().toLowerCase() === noteKey) || noteKey;
+    tasks.push({ kind: 'note:' + noteKey, text: `${original} — not a Standard Latex color; pull manually (Specialty Latex, Foil, or elsewhere)` });
+  });
+  return tasks;
+}
+// Called at item creation AND whenever an edit could change what this item's synthetic tasks
+// should say (topperNote is the only one of these three that's ever actually editable after
+// creation). Adds tasks that newly apply, removes ones that no longer do (e.g. the topper note was
+// cleared), and updates the TEXT of one that's still relevant without touching its status/priority
+// — editing a topper note's wording shouldn't silently un-check work someone already marked done.
+function psSyncSyntheticPrepTasks(job, productionItemId, line, recipe) {
+  if (!job.tasks) job.tasks = [];
+  const desired = psSyntheticPrepTasksFor(line, recipe);
+  const desiredIds = new Set(desired.map(d => psSyntheticTaskId(productionItemId, d.kind)));
+  job.tasks = job.tasks.filter(t => !(t.synthetic && t.productionItemId === productionItemId && !desiredIds.has(t.id)));
+  desired.forEach(d => {
+    const id = psSyntheticTaskId(productionItemId, d.kind);
+    const existing = job.tasks.find(t => t.id === id);
+    if (existing) existing.text = d.text;
+    else job.tasks.push({ id, productionItemId, phase: 'prep', text: d.text, dueOffsetDays: null, status: 'ready', priority: false, synthetic: true });
+  });
+}
+
+// ─── Deriving completion from tasks (never a separate manual flag) ───
+function psItemTasksForPhase(job, productionItemId, phase) {
+  return (job.tasks || []).filter(t => t.productionItemId === productionItemId && t.phase === phase);
+}
+// An item with zero tasks in a phase has nothing blocking it there, so it counts as complete for
+// that phase by construction — this is what lets "entire item finished" fall straight out of the
+// three phases below with no separate flag that could ever drift from the tasks underneath it.
+function psItemPhaseComplete(job, productionItemId, phase) {
+  return psItemTasksForPhase(job, productionItemId, phase).every(t => t.status === 'done');
+}
+function psItemFullyFinished(job, productionItemId) {
+  return TASK_PHASES.every(phase => psItemPhaseComplete(job, productionItemId, phase));
 }
 
 function psFindTask(job, taskId) {
@@ -3580,16 +3650,12 @@ function psBlankJob(overrides) {
     serviceItems: [],  // { id, name, qty } — logistics-affecting, not a build item; no dedicated view yet
     fees: [],          // { id, name, qty } — attached to the event record only
     attachments: [],   // { id, title, category, visibility, displayLocations, fileName, fileType, storagePath, url, uploadedAt } — see psAttachmentsSectionHtml
-    // { [rowKey]: true } — which Pull-section checkboxes are checked, keyed by a composite
-    // string built from a production line's own permanent id (see psPullCheckRowHtml). Sparse —
-    // an unchecked row simply has no key, matching this file's other sparse-map fields. Old jobs
-    // without this just read as `{}`; this never touches job.status or any workflow/lifecycle field.
-    pullChecklist: {},
     // { [lowercasedColorName]: { colorId } } — Review & Pull's job-scoped answer to "which brand
     // did this job actually mean" for a color name that matches 2+ Color Library brands (see
     // psComputeJobRequirements). Deliberately per-job, not global: the ambiguity is inherent to
     // this job's own plain-text color, not something a Library-wide alias could resolve without
-    // guessing for every OTHER job using that same name. Sparse, same convention as pullChecklist.
+    // guessing for every OTHER job using that same name. Sparse — an unresolved name simply has no
+    // key, matching this file's other sparse-map fields.
     colorResolutions: {},
     // Flat array of task INSTANCES across every productionItems line on this job — see
     // psSnapshotTasksForItem/psUpdateTaskField/psBulkUpdateTasks above. Flat (not nested under
@@ -3924,18 +3990,6 @@ function psToggleRentalStatus(jobId, itemId, field, checked) {
   const item = job.rentalItems.find(i => i.id === itemId);
   if (!item) return;
   item[field] = checked;
-  psSaveJob(job);
-}
-// The Pull section's checkbox rows aren't their own array elements (they're generated per size /
-// per color-split / topper / pull-note from each productionItems[] line), so unlike rentals'
-// pulled/packed/returned booleans, checked state lives in one flat sparse map keyed by a composite
-// string built from the line's own permanent id — see psPullCheckRowHtml. Deleting the key on
-// uncheck keeps the persisted map from growing unbounded across a job's whole history.
-function psTogglePullCheck(jobId, key, checked) {
-  const job = psFindJob(jobId);
-  if (!job) return;
-  if (!job.pullChecklist) job.pullChecklist = {};
-  if (checked) job.pullChecklist[key] = true; else delete job.pullChecklist[key];
   psSaveJob(job);
 }
 
@@ -4369,7 +4423,7 @@ function psApplyReviewDraftToEvent(draft) {
       const recipe = ptReadyRecipe(item.recipeId);
       if (!recipe) return;
       const newItemId = psNewLineItemId();
-      event.productionItems.push({
+      const newLine = {
         id: newItemId,
         recipeId: item.recipeId,
         customRecipe: psSnapshotTemplate(recipe), // frozen at approval time — editing the template later won't change this job
@@ -4391,8 +4445,10 @@ function psApplyReviewDraftToEvent(draft) {
         indoorOutdoor: item.indoorOutdoor || null,
         topperNote: '',
         notes: item.description || '',
-      });
+      };
+      event.productionItems.push(newLine);
       event.tasks = (event.tasks || []).concat(psSnapshotTasksForItem(recipe, newItemId));
+      psSyncSyntheticPrepTasks(event, newItemId, newLine, recipe);
     } else if (item.classification === 'rental') {
       event.rentalItems.push({ id: psNewLineItemId(), name: item.name, qty: item.qty, pulled: false, packed: false, returned: false });
     } else if (item.classification === 'service') {
@@ -5217,6 +5273,10 @@ function psSaveEditItem(jobId, idx) {
   }
   if (Object.keys(sizeOverride).length > 0) line.sizeOverride = sizeOverride; else delete line.sizeOverride;
 
+  // topperNote is the one of the three synthetic-task sources that's actually editable here —
+  // keeps that task's wording current without touching its status if someone already checked it.
+  psSyncSyntheticPrepTasks(job, line.id, line, r);
+
   delete psColorDraftStore[key];
   delete psDistDraftStore[key];
   psEditingItemKey = null;
@@ -5234,12 +5294,78 @@ function psSaveEditItem(jobId, idx) {
 function psJsKeyAttr(s) {
   return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
-// One Pull-section checkbox row, checked state read from/written to job.pullChecklist[key] —
-// see psTogglePullCheck. `key` is caller-built from the owning line's own permanent id so it
-// stays stable across re-renders regardless of array position.
-function psPullCheckRowHtml(job, key, text) {
-  const checked = !!(job.pullChecklist && job.pullChecklist[key]);
-  return `<div class="ps-check-row${checked ? ' done' : ''}"><input type="checkbox" ${checked ? 'checked' : ''} onchange="this.closest('.ps-check-row').classList.toggle('done', this.checked); psTogglePullCheck('${job.id}','${psJsKeyAttr(key)}',this.checked)"><label>${text}</label></div>`;
+// ─── Stage-based task board (Prep / Inflate & Build / Finish & Pack) ───
+//
+// One checkable row for a real task instance (template-defined or synthetic — see
+// psSyncSyntheticPrepTasks). The checkbox is the primary Ready/Done toggle (unchecking a Done task
+// returns it to Ready, never to Hold — Hold is only ever a deliberate, explicit action); the star
+// mirrors the same "Prioritize" star already used in Standard Latex Inventory, so "Do Next" reads
+// as the same idea wherever it appears in this app; Hold/Resume is its own control since it's a
+// third state, not a modifier on the checkbox.
+function psTaskRowHtml(job, task, itemLabel) {
+  const done = task.status === 'done';
+  const held = task.status === 'hold';
+  return `<div class="ps-check-row${done ? ' done' : ''}"${held ? ' style="opacity:0.55;"' : ''}>
+    <input type="checkbox" ${done ? 'checked' : ''} onchange="psSetTaskStatus('${job.id}','${task.id}', this.checked ? 'done' : 'ready')">
+    <label>${itemLabel ? `<span style="color:var(--text-secondary);">${psEscape(itemLabel)}:</span> ` : ''}${psEscape(task.text)}${held ? ' <span style="font-size:11px; font-weight:700; color:var(--warning-text);">HOLD</span>' : ''}</label>
+    <button class="icon-btn" style="width:auto; padding:2px 6px; flex-shrink:0;" title="${task.priority ? 'Do Next — click to unmark' : 'Do Next'}" onclick="psSetTaskPriority('${job.id}','${task.id}', ${task.priority ? 'false' : 'true'})"><i class="fa-${task.priority ? 'solid' : 'regular'} fa-star" style="color:${task.priority ? 'var(--warning-text)' : 'var(--text-tertiary)'};"></i></button>
+    ${!done ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psSetTaskStatus('${job.id}','${task.id}', '${held ? 'ready' : 'hold'}')">${held ? 'Resume' : 'Hold'}</button>` : ''}
+  </div>`;
+}
+// { [jobId|phase]: true } — expand state only, never persisted (matches every other in-memory
+// expand/collapse map in this file, e.g. ptExpandedTemplates) — collapsed by default per phase.
+let psExpandedTaskPhases = {};
+function psToggleTaskPhase(jobId, phase) {
+  const key = jobId + '|' + phase;
+  psExpandedTaskPhases[key] = !psExpandedTaskPhases[key];
+  psRenderProductionJobs();
+}
+// One stage's task list across every item on the job — a task's own itemLabel is only shown when
+// the job has more than one item, since with a single item it would just repeat the section
+// header's own context. Completion ("N/M complete") is read straight off task.status — there is no
+// separate stored count to ever drift from the tasks themselves.
+function psPhaseSectionHtml(job, phase) {
+  const tasks = (job.tasks || []).filter(t => t.phase === phase);
+  const done = tasks.filter(t => t.status === 'done').length;
+  const key = job.id + '|' + phase;
+  const expanded = !!psExpandedTaskPhases[key];
+  const label = TASK_PHASE_LABELS[phase];
+  if (tasks.length === 0) {
+    return `<div class="section-label">${psEscape(label)}</div><div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">No ${psEscape(label.toLowerCase())} tasks for this job yet.</div>`;
+  }
+  let html = `<div class="section-label" style="display:flex; align-items:center; justify-content:space-between; cursor:pointer;" onclick="psToggleTaskPhase('${job.id}','${phase}')">
+    <span>${psEscape(label)}</span>
+    <span style="font-size:12px; font-weight:400; color:var(--text-secondary); display:flex; align-items:center; gap:6px;">
+      ${done}/${tasks.length} complete
+      <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'}" style="font-size:11px;"></i>
+    </span>
+  </div>`;
+  if (!expanded) return html;
+  const multiItem = new Set(tasks.map(t => t.productionItemId)).size > 1;
+  tasks.forEach(t => {
+    let itemLabel = null;
+    if (multiItem) {
+      const line = (job.productionItems || []).find(l => l.id === t.productionItemId);
+      const r = line && psLineRecipe(line);
+      itemLabel = (line && r) ? psLineLabel(line, r) : null;
+    }
+    html += psTaskRowHtml(job, t, itemLabel);
+  });
+  return html;
+}
+// A per-item badge showing derived progress (never a separate manual completion flag) — "Finished"
+// once every task across all three phases is done, otherwise a plain "done/total" count so
+// "build complete" (this item's own build-phase tasks) is visible without implying the whole item
+// is finished if Finish & Pack work still remains.
+function psItemProgressBadgeHtml(job, productionItemId) {
+  const allTasks = (job.tasks || []).filter(t => t.productionItemId === productionItemId);
+  if (allTasks.length === 0) return '';
+  if (psItemFullyFinished(job, productionItemId)) {
+    return `<span style="font-size:11px; font-weight:700; color:var(--success);"><i class="fa-solid fa-circle-check"></i> Finished</span>`;
+  }
+  const done = allTasks.filter(t => t.status === 'done').length;
+  const buildNote = psItemPhaseComplete(job, productionItemId, 'build') ? ' · build complete' : '';
+  return `<span style="font-size:11px; color:var(--text-secondary);">${done}/${allTasks.length} tasks${buildNote}</span>`;
 }
 function psProductionBodyHtml(job) {
   let html = '';
@@ -5266,6 +5392,10 @@ function psProductionBodyHtml(job) {
           ${r.id ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; margin-left:4px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psGoToProductionTemplate('${r.id}')">Fix template</button>` : ''}
         </div>`;
       }
+      // Plain, informational counts — never a checkbox. Review & Pull just below is the one real,
+      // ledger-backed record of whether a balloon pull actually happened; this is purely a quick
+      // per-item read (Review & Pull itself aggregates across every item on the job by color+size,
+      // so it can't show "which specific column needs how many" the way this can).
       SIZE_ORDER.forEach(size => {
         if (!totals[size]) return;
         if (line.colorDist && line.colorDist.length) {
@@ -5275,35 +5405,25 @@ function psProductionBodyHtml(job) {
             const n = Math.round(totals[size] * (cd.pct / 100));
             if (n <= 0) return;
             const text = nColors > 1 ? `${n} – ${size} (${psEscape(cd.name)})` : `${n} – ${size}`;
-            html += psPullCheckRowHtml(job, `${line.id}|size|${size}|${cd.name}`, text);
+            html += `<div style="font-size:13px; padding:2px 0;">${text}</div>`;
           });
         } else {
           const perColor = psColorCount(totals[size], nColors);
           const text = nColors > 1 ? `${perColor} – ${size} of each color` : `${perColor} – ${size}`;
-          html += psPullCheckRowHtml(job, `${line.id}|size|${size}`, text);
+          html += `<div style="font-size:13px; padding:2px 0;">${text}</div>`;
         }
-      });
-      if (line.topperNote) {
-        html += psPullCheckRowHtml(job, `${line.id}|topper`, `Topper: ${psEscape(line.topperNote)}`);
-      }
-      // Template-owned supplementary pull note (e.g. non-balloon pull items) — alongside the
-      // calculated balloon counts above, never replacing them.
-      if (r.pullListNotes) {
-        html += psPullCheckRowHtml(job, `${line.id}|pullnote`, psEscape(r.pullListNotes));
-      }
-      // Colors explicitly marked "general note" during import are left out of the balloon split
-      // above entirely (see psLineBalloonColors) — surfaced here instead, plainly, as something
-      // that may still need a real manual pull (Specialty Latex, Foil, or elsewhere) rather than
-      // silently vanishing or being miscounted as a Standard Latex balloon color.
-      (line.colorGeneralNotes || []).forEach(noteKey => {
-        const original = line.colors.find(c => c.trim().toLowerCase() === noteKey) || noteKey;
-        html += `<div style="font-size:12px; color:var(--warning-text); margin:4px 0;"><i class="fa-solid fa-note-sticky"></i> ${psEscape(original)} — marked as a note during import, not counted above. If this needs to be physically pulled from Specialty Latex, Foil, or elsewhere, handle it manually.</div>`;
       });
     });
     html += `<div class="ps-pack-note">Pack extras of each size/color.</div>`;
   }
 
   html += psReviewPullSectionHtml(job);
+
+  // Topper notes, a template's own pull-list note, and colors marked "general note — not
+  // inventory-tracked" during import are real, checkable Prep work (see
+  // psSyncSyntheticPrepTasks) — this is where they live now, alongside any template-defined Prep
+  // tasks, instead of the old disconnected pullChecklist checkboxes.
+  if (job.productionItems.length > 0) html += psPhaseSectionHtml(job, 'prep');
 
   // Rental-classified import items (see the Mapping Layer / IM_CLASSIFICATIONS) land in
   // job.rentalItems instead of productionItems — they're gear to gather and bring back, not
@@ -5325,7 +5445,7 @@ function psProductionBodyHtml(job) {
   }
 
   if (job.productionItems.length > 0) {
-    html += `<div class="section-label">Inflate &amp; build</div>`;
+    html += psPhaseSectionHtml(job, 'build');
     job.productionItems.forEach((line, idx) => {
       const r = psLineRecipe(line);
       if (!r) return;
@@ -5335,7 +5455,10 @@ function psProductionBodyHtml(job) {
 
       html += `<div class="ps-item-block">`;
       html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
-        <div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))}</div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))}</div>
+          ${psItemProgressBadgeHtml(job, line.id)}
+        </div>
         <div style="display:flex; gap:2px;">
           ${!editing ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx})">Edit</button>` : ''}
           <button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>
@@ -5390,6 +5513,8 @@ function psProductionBodyHtml(job) {
       </div>`;
       html += `</div>`;
     });
+
+    html += psPhaseSectionHtml(job, 'finish');
   }
 
   html += `<div class="no-print">`;
@@ -5461,8 +5586,10 @@ function psAddItemToJob(jobId) {
   }
 
   const newItemId = psNewLineItemId();
-  job.productionItems.push({ id: newItemId, recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, indoorOutdoor: psDetectIndoorOutdoor(location), topperNote, notes: '' });
+  const newLine = { id: newItemId, recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, indoorOutdoor: psDetectIndoorOutdoor(location), topperNote, notes: '' };
+  job.productionItems.push(newLine);
   job.tasks = (job.tasks || []).concat(psSnapshotTasksForItem(recipe, newItemId));
+  psSyncSyntheticPrepTasks(job, newItemId, newLine, recipe);
   delete psColorDraftStore[draftKey]; // reset the color picker to a single blank row for next time
   psSaveJob(job);
 }
@@ -5472,9 +5599,8 @@ function psRemoveItemFromJob(jobId, idx) {
   if (!job) return;
   const removed = job.productionItems[idx];
   job.productionItems.splice(idx, 1);
-  // New code, so no reason to reproduce pullChecklist's existing (accepted, untouched)
-  // staleness-on-edit gap — an orphaned task instance for a line that no longer exists would be
-  // pure clutter with no possible owner to act on it.
+  // Drops every task instance for this line — including any synthetic Prep tasks (topper/pull
+  // note/general-note) it had — so a removed item never leaves a clutter task with no owner.
   if (removed) job.tasks = (job.tasks || []).filter(t => t.productionItemId !== removed.id);
   psSaveJob(job);
   psRenderProductionJobs();
@@ -5947,7 +6073,7 @@ function qcAddToJob() {
   }
 
   const newItemId = psNewLineItemId();
-  job.productionItems.push({
+  const newLine = {
     id: newItemId,
     recipeId: qcState.sizeMode === 'preset' ? recipe.id : null,
     customRecipe: psSnapshotTemplate(recipe), // frozen at add-time — editing the template later won't change this job, for either size mode
@@ -5956,8 +6082,10 @@ function qcAddToJob() {
     colorDist: colors.map(c => ({ name: c.name, pct: c.pct })),
     customLinear: null,
     design: '', location: '', indoorOutdoor: null, topperNote: '', notes: ''
-  });
+  };
+  job.productionItems.push(newLine);
   job.tasks = (job.tasks || []).concat(psSnapshotTasksForItem(recipe, newItemId));
+  psSyncSyntheticPrepTasks(job, newItemId, newLine, recipe);
   psExpandedProduction = job.id;
   psSaveJob(job);
 
