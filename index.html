@@ -831,6 +831,7 @@
   import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
   import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot, writeBatch, runTransaction } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
   import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
+  import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-functions.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyAaOVXNBCXXfO_HpuhTOeFi5dDHZ4hCBro",
@@ -845,6 +846,14 @@
   const auth = getAuth(fbApp);
   const db = getFirestore(fbApp);
   const storage = getStorage(fbApp);
+  const functionsInstance = getFunctions(fbApp);
+
+  // The 17hats structured-import adapter — a real server-side fetch (see functions/index.js),
+  // never a browser-side fetch to a third-party domain. Requires the Cloud Functions
+  // deployment described in that file's own comments; calling this before that deployment
+  // exists just rejects with a normal "not found"-style error, same as any other unavailable
+  // callable — nothing here assumes the backend is live.
+  window.fbFetch17hatsInvoice = (data) => httpsCallable(functionsInstance, 'fetch17hatsInvoice')(data);
 
   // One business exists today (yours). Every job lives under this path — so if a second
   // business is ever added later, it just gets its own BUSINESS_ID and its own jobs
@@ -1456,7 +1465,18 @@
 
   <!-- ═══════════════════════════════════════ IMPORT JOB VIEW -->
   <div class="view" id="view-import">
-    <div class="section-label" style="margin-top:0">Upload invoice</div>
+    <div class="section-label" style="margin-top:0">Paste invoice link</div>
+    <div class="card">
+      <div class="settings-field" style="margin-bottom:0.6rem;">
+        <label>17hats invoice link</label>
+        <div style="display:flex; gap:6px;">
+          <input type="text" id="ps-import-url" placeholder="https://yourbusiness.17hats.com/p#/i/..." style="flex:1;">
+          <button class="save-btn" style="width:auto; padding:8px 14px;" onclick="psHandleInvoiceUrlImport()">Import</button>
+        </div>
+      </div>
+      <div style="font-size:11px; color:var(--text-secondary);">Paste the public invoice link a client would see — no 17hats login needed.</div>
+    </div>
+    <div class="section-label">Or upload invoice</div>
     <div class="card">
       <div class="settings-field" style="margin-bottom:0">
         <label>Upload invoice PDF</label>
@@ -3009,6 +3029,58 @@ async function psImportInvoicePdf(file) {
   };
 }
 
+// A public 17hats invoice URL looks like https://<subdomain>.17hats.com/p#/i/<token> — this
+// extracts and validates {subdomain, token} client-side, purely as a fast/free rejection of
+// obvious garbage before ever calling the backend; the callable function independently
+// re-validates both server-side and is what actually builds the real fetch URL (see
+// functions/index.js) — this client-side check is not the security boundary.
+const PS_17HATS_URL_RE = /^https:\/\/([a-z0-9-]{1,63})\.17hats\.com\/p#\/i\/([A-Za-z0-9]{6,20})\/?$/;
+function ps17hatsParseUrl(url) {
+  const m = (url || '').trim().match(PS_17HATS_URL_RE);
+  return m ? { subdomain: m[1], token: m[2] } : null;
+}
+
+// The second Import Layer entry point — same async (source) => { clientName, rawItems } contract
+// psImportInvoicePdf already established, so nothing downstream (Mapping Layer, Import Review,
+// Approve) needs to know or care which source produced it. The real fetch happens entirely
+// server-side (window.fbFetch17hatsInvoice, wired in the module script) — this function's only
+// job is client-side URL validation and translating the callable function's result/error shape
+// into that same contract, never touching the 17hats domain directly from the browser.
+async function psImportInvoice17hatsUrl(url) {
+  const parsed = ps17hatsParseUrl(url);
+  if (!parsed) {
+    const err = new Error("That doesn't look like a 17hats invoice link — it should look like https://yourbusiness.17hats.com/p#/i/XXXXXXXX.");
+    err.code = 'invalid_url';
+    throw err;
+  }
+  let result;
+  try {
+    result = await window.fbFetch17hatsInvoice(parsed);
+  } catch (err) {
+    // A callable function that doesn't exist yet (not deployed) surfaces here as a normal
+    // "not-found"-style error — deliberately not a special case, since from this function's
+    // perspective an undeployed backend and an unreachable one look the same.
+    const wrapped = new Error('Could not reach the 17hats import service — check your connection and try again, or use Upload invoice instead.');
+    wrapped.code = 'unreachable';
+    throw wrapped;
+  }
+  const data = result && result.data;
+  if (!data || data.ok !== true) {
+    const reason = data && data.reason;
+    const messages = {
+      invalid_url: "That doesn't look like a valid 17hats invoice link.",
+      not_found: "This invoice link doesn't look valid, or the invoice may have expired.",
+      timeout: "17hats didn't respond in time — try again in a moment.",
+      unexpected_format: "This invoice came back in a format we don't recognize yet — try Upload invoice instead.",
+    };
+    const err = new Error(messages[reason] || "Couldn't import that invoice — try Upload invoice instead.");
+    err.code = reason || 'unknown';
+    throw err;
+  }
+  // The function already returns exactly the normalized shape — nothing left to reshape here.
+  return { clientName: data.clientName, rawItems: data.rawItems, eventTitle: data.eventTitle || '', customFields: data.customFields || {}, invoiceMeta: data.invoiceMeta || null };
+}
+
 function psEscape(str) {
   const div = document.createElement('div');
   div.textContent = str || '';
@@ -3256,6 +3328,24 @@ function psBlankJob(overrides) {
   return Object.assign({
     id: psNewJobId(),
     jobName: '',
+    // The event/job's own title, distinct from jobName (which this app has always used for the
+    // CLIENT's name — that convention is preserved, not changed, by any import source). Only a
+    // structured source (like 17hats' own job.name/main_event.title) can ever populate this; the
+    // PDF pipeline has no equivalent field and simply leaves it blank. Purely additive — no
+    // existing screen reads it yet (see the 17hats import work), so this has zero effect on any
+    // job created before it existed.
+    eventTitle: '',
+    // Both additive, both real, permanent facts about this job once a structured import source
+    // (currently only 17hats) provides them — preserved here specifically so they survive past
+    // Approve instead of vanishing with the transient IMPORT_REVIEW_DRAFT that first carried them
+    // (see psApplyReviewDraftToEvent). No screen renders these on the Job yet beyond Import
+    // Review's own read-only summary — that's a deliberate, separate scope boundary, not an
+    // oversight. customFields is this business's own 17hats custom job fields, keyed by whatever
+    // name that business gave them (never a numeric id, never assumed universal — see the 17hats
+    // import work for why); invoiceMeta is a few facts about the invoice itself (number/total/due
+    // date), kept deliberately separate since those aren't business-defined fields at all.
+    customFields: {},
+    invoiceMeta: null,
     eventDate: '',
     status: 'not_started',
     staffingStatus: 'open',
@@ -3532,7 +3622,7 @@ function psToggleExpandAttachment(jobId, attId) {
 // for everything else: staffing details and production items both come from mapping the
 // import's raw line items onto this event afterward.
 function psEventModelFromImport(rawImportData) {
-  return psBlankJob({ jobName: rawImportData.clientName });
+  return psBlankJob({ jobName: rawImportData.clientName, eventTitle: rawImportData.eventTitle || '' });
 }
 
 // Jobs with a real, parseable date sort chronologically first; anything without a usable
@@ -4018,7 +4108,16 @@ function psBuildReviewDraft(rawImportData) {
     if (psMapRawItemToEventFields(pItem, event)) return; // event/staffing metadata, not a line item
     reviewItems.push(psReviewItemFromRaw(pItem));
   });
-  return { event, reviewItems };
+  return {
+    event, reviewItems,
+    // Both additive, both absent/empty for the PDF pipeline (which never sets them on
+    // rawImportData) — real, business-defined 17hats job fields (customFields) and a small,
+    // deliberately separate set of invoice facts (invoiceMeta) that aren't business-defined
+    // custom fields at all, just properties of the invoice itself. Read-only in Import Review
+    // for now (see irRenderShell) — no mapping/decision UI built yet, per the current scope.
+    customFields: rawImportData.customFields || {},
+    invoiceMeta: rawImportData.invoiceMeta || null,
+  };
 }
 
 // ─── Approve: the ONLY place a review draft turns into real Production/Staffing data ────────
@@ -4073,6 +4172,12 @@ function psApplyReviewDraftToEvent(draft) {
 
     if (item.rememberMapping) psRememberMapping(item);
   });
+  // Without this, customFields/invoiceMeta would exist only on the transient draft and vanish the
+  // moment Approve clears IMPORT_REVIEW_DRAFT — this is what makes them permanent, real facts on
+  // the saved Job instead of a silent discard. Unconditional assignment is safe: both already
+  // default to {}/null on the draft (see psBuildReviewDraft) for any source that doesn't set them.
+  event.customFields = draft.customFields || {};
+  event.invoiceMeta = draft.invoiceMeta || null;
   return event;
 }
 
@@ -4125,6 +4230,28 @@ function irToggleExpanded(id) {
   irRenderShell();
 }
 
+// Plain, read-only display of whatever a structured source (currently only the 17hats adapter)
+// preserved beyond the normal {clientName, rawItems} contract — invoiceMeta (facts about the
+// invoice itself: number/total/due date) and customFields (this business's own 17hats job
+// fields, e.g. "Themes & Colors"). No mapping/decision UI yet, per the current scope — this
+// exists only so the data is visible to a human reviewing the import, not silently invisible in
+// an object nobody looks at. Renders nothing at all for the PDF pipeline, which never sets either.
+function irOtherFieldsHtml(draft) {
+  const meta = draft.invoiceMeta;
+  const fields = draft.customFields || {};
+  const fieldEntries = Object.entries(fields).filter(([, v]) => v !== '' && v != null);
+  if (!meta && fieldEntries.length === 0) return '';
+  let html = `<div style="font-size:11px; color:var(--text-secondary); margin-top:8px; padding-top:8px; border-top:0.5px solid var(--border); text-align:left;">`;
+  if (meta) {
+    html += `<div>${[meta.number ? `Invoice #${psEscape(meta.number)}` : '', meta.total ? psEscape(meta.total) : '', meta.dueDate ? `Due ${psEscape(meta.dueDate)}` : ''].filter(Boolean).join(' · ')}</div>`;
+  }
+  fieldEntries.forEach(([key, value]) => {
+    html += `<div><b>${psEscape(key)}:</b> ${psEscape(String(value))}</div>`;
+  });
+  html += `</div>`;
+  return html;
+}
+
 function irRenderShell() {
   const root = document.getElementById('ir-root');
   if (!root) return;
@@ -4141,6 +4268,8 @@ function irRenderShell() {
     <div class="card" style="margin-bottom:0.75rem; text-align:center;">
       <div style="font-size:14px; font-weight:600;">${needsReview.length} item${needsReview.length === 1 ? '' : 's'} need review • ${recognized.length} item${recognized.length === 1 ? '' : 's'} recognized</div>
       ${draft.event.jobName || draft.event.eventDate ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">${psEscape(draft.event.jobName)}${draft.event.eventDate ? ' — ' + psEscape(draft.event.eventDate) : ''}</div>` : ''}
+      ${draft.event.eventTitle ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">${psEscape(draft.event.eventTitle)}</div>` : ''}
+      ${irOtherFieldsHtml(draft)}
     </div>
 
     <div class="section-label" style="margin-top:0">Needs Review</div>
@@ -17905,28 +18034,28 @@ function psStaffingBodyHtml(job) {
 // to the Mapping Layer's psBuildReviewDraft to score every line item and opens the Import
 // Review screen. It never calls psSaveJob itself: no Job is created, and nothing reaches
 // Production or Staffing, until the user reviews the draft and clicks "Approve Import."
+// Guards the exact loss the audit flagged: IMPORT_REVIEW_DRAFT is a single-draft singleton, and
+// Import Review auto-saves whatever's in it (irSaveDraft) — proceeding without asking would
+// silently and permanently discard whatever review work is still unapproved. Cancel is always
+// the non-destructive choice here, matching how confirm() dialogs read everywhere else in this
+// app (OK commits to the stated action; Cancel backs out) — OK explicitly means "yes, discard."
+// Shared by both Import Job entry points (PDF upload and the 17hats link) so this safety-critical
+// check can't drift between them.
+function psConfirmDiscardExistingDraft() {
+  if (!IMPORT_REVIEW_DRAFT) return true;
+  const label = (IMPORT_REVIEW_DRAFT.event && IMPORT_REVIEW_DRAFT.event.jobName) ? ` for "${IMPORT_REVIEW_DRAFT.event.jobName}"` : '';
+  const discard = confirm(`You already have an unfinished import review${label}. Discard it and import this new invoice instead?`);
+  if (!discard) { showView('importReview'); irRenderShell(); return false; }
+  IMPORT_REVIEW_DRAFT = null;
+  window.fbSaveImportReviewDraft({ draft: null }).catch(err => console.error('Clearing saved import draft failed:', err));
+  irRenderResumeBanner();
+  return true;
+}
+
 async function psHandleInvoiceUpload(fileInput) {
   const file = fileInput.files[0];
   if (!file) return;
-
-  // Guards the exact loss the audit flagged: IMPORT_REVIEW_DRAFT is a single-draft singleton, and
-  // Import Review auto-saves whatever's in it (irSaveDraft) — proceeding without asking would
-  // silently and permanently discard whatever review work is still unapproved. Cancel is always
-  // the non-destructive choice here, matching how confirm() dialogs read everywhere else in this
-  // app (OK commits to the stated action; Cancel backs out) — OK explicitly means "yes, discard."
-  if (IMPORT_REVIEW_DRAFT) {
-    const label = (IMPORT_REVIEW_DRAFT.event && IMPORT_REVIEW_DRAFT.event.jobName) ? ` for "${IMPORT_REVIEW_DRAFT.event.jobName}"` : '';
-    const discard = confirm(`You already have an unfinished import review${label}. Discard it and import this new invoice instead?`);
-    fileInput.value = '';
-    if (!discard) {
-      showView('importReview');
-      irRenderShell();
-      return;
-    }
-    IMPORT_REVIEW_DRAFT = null;
-    window.fbSaveImportReviewDraft({ draft: null }).catch(err => console.error('Clearing saved import draft failed:', err));
-    irRenderResumeBanner();
-  }
+  if (!psConfirmDiscardExistingDraft()) { fileInput.value = ''; return; }
 
   const statusEl = document.getElementById('ps-import-status');
   statusEl.style.display = 'block';
@@ -17951,6 +18080,39 @@ async function psHandleInvoiceUpload(fileInput) {
     statusEl.className = 'warn';
   }
   fileInput.value = '';
+}
+
+// Second Import Job entry point — same shape as psHandleInvoiceUpload above (existing-draft
+// guard, status element, build draft, open Import Review), just sourced from
+// psImportInvoice17hatsUrl instead of psImportInvoicePdf. See that function's own comments for
+// why a failure here (including "backend not deployed yet") surfaces as a plain, specific message
+// rather than a generic error.
+async function psHandleInvoiceUrlImport() {
+  const input = document.getElementById('ps-import-url');
+  const url = input.value.trim();
+  if (!url) return;
+  if (!psConfirmDiscardExistingDraft()) return;
+
+  const statusEl = document.getElementById('ps-import-status');
+  statusEl.style.display = 'block';
+  statusEl.className = '';
+  statusEl.textContent = 'Fetching invoice from 17hats…';
+
+  try {
+    const rawImportData = await psImportInvoice17hatsUrl(url);
+    IMPORT_REVIEW_DRAFT = psBuildReviewDraft(rawImportData);
+    irExpandedItems = new Set();
+
+    statusEl.style.display = 'none';
+    statusEl.textContent = '';
+    input.value = '';
+    showView('importReview');
+    irRenderShell();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = err.message || "Couldn't import that invoice link.";
+    statusEl.className = 'warn';
+  }
 }
 
 function showView(v) {

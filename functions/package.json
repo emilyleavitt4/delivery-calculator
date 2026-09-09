@@ -1,0 +1,12 @@
+{
+  "name": "functions",
+  "description": "Backend for Balloon Toolbox App — currently just the 17hats structured-invoice import adapter.",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "dependencies": {
+    "firebase-functions": "^5.0.0"
+  },
+  "private": true
+}
