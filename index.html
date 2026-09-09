@@ -3274,10 +3274,21 @@ function psLineBalloonColors(line) {
 
 // How much height a topper takes off the balloon-spiral body — via psTopperFt (0 for
 // anything without a topper, i.e. everything except columns).
+//
+// Returns { sizes: {[prodSize]: count}, valid: boolean }. `valid` is false whenever the
+// underlying footage or rate isn't a real, usable number — a customLinear item whose per-job
+// footage was never entered, a template snapshot missing linearFt, a freeform template with no
+// (or non-numeric) rates table, etc. This is the same "don't guess, say so" convention already
+// used for missing Standard Package Qty (see invNeedBreakdown's configMissing) — every caller
+// must treat valid:false as "needs configuration," never render or act on `sizes` (always {} in
+// that case) as if it were a real answer. Fixes a real bug: an undefined linear/rate previously
+// produced NaN counts that then silently passed every downstream `<= 0` guard (NaN comparisons
+// are always false) and reached Review & Pull as an actionable "Ready — Pull NaN" row.
 function psComputeTotals(recipe, qty, customLinear) {
   let linear = recipe.customLinear ? customLinear : recipe.linearFt;
+  if (!Number.isFinite(linear) || !Number.isFinite(qty)) return { sizes: {}, valid: false };
   const topperFt = psTopperFt(recipe);
-  if (topperFt) linear = Math.max(0, linear - topperFt);
+  if (Number.isFinite(topperFt) && topperFt) linear = Math.max(0, linear - topperFt);
   const totalLinear = linear * qty;
   const totals = {};
   if (recipe.formula === 'classic') {
@@ -3286,14 +3297,20 @@ function psComputeTotals(recipe, qty, customLinear) {
     // change a job someone already built. Catalog RECIPES entries (no snapshot yet) still use
     // the live rate, unchanged from before.
     const rate = typeof recipe.classicPerFt === 'number' ? recipe.classicPerFt : FORMULAS.classicPerFt;
+    if (!Number.isFinite(rate)) return { sizes: {}, valid: false };
     totals['11"'] = Math.ceil(totalLinear * rate);
   } else {
+    if (!recipe.rates || typeof recipe.rates !== 'object') return { sizes: {}, valid: false };
+    let allRatesValid = true;
     Object.keys(recipe.rates).forEach(size => {
-      const v = recipe.rates[size] * totalLinear;
+      const rate = recipe.rates[size];
+      if (!Number.isFinite(rate)) { allRatesValid = false; return; }
+      const v = rate * totalLinear;
       if (v > 0.001) totals[size] = Math.ceil(v);
     });
+    if (!allRatesValid) return { sizes: {}, valid: false };
   }
-  return totals;
+  return { sizes: totals, valid: true };
 }
 
 // Deep-copies a production template (RECIPES entry) into a self-contained snapshot suitable
@@ -5000,11 +5017,15 @@ function psProductionBodyHtml(job) {
     job.productionItems.forEach(line => {
       const r = psLineRecipe(line);
       if (!r) return;
-      const totals = psComputeTotals(r, line.qty, line.customLinear);
+      const totalsResult = psComputeTotals(r, line.qty, line.customLinear);
+      const totals = totalsResult.sizes;
       const balloonColors = psLineBalloonColors(line);
       const nColors = balloonColors.length || line.colors.length; // guard: if every color was flagged as a note, fall back rather than divide by zero
       html += `<div style="font-size:14px; font-weight:700; margin-bottom:2px;">${psEscape(r.display)} <span style="font-weight:400; color:var(--text-secondary);">× ${line.qty}</span></div>`;
       html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.3rem;">Colors: ${psEscape(line.colors.join(' / '))}</div>`;
+      if (!totalsResult.valid) {
+        html += `<div style="font-size:12px; color:var(--warning-text); margin:4px 0;"><i class="fa-solid fa-triangle-exclamation"></i> Can't calculate a pull count for this item — its template is missing footage or a rate configuration. Fix it in Production Templates before pulling.</div>`;
+      }
       SIZE_ORDER.forEach(size => {
         if (!totals[size]) return;
         if (line.colorDist && line.colorDist.length) {
@@ -5576,13 +5597,16 @@ function qcRenderResults() {
     return;
   }
 
-  const totals = psComputeTotals(recipe, qcState.qty, null);
+  const totalsResult = psComputeTotals(recipe, qcState.qty, null);
+  const totals = totalsResult.sizes;
   const sizes = SIZE_ORDER.filter(s => totals[s]);
   const colors = qcState.colors.filter(c => c.name.trim());
 
   let html = `<div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">${psEscape(recipe.display)} <span style="font-weight:400; color:var(--text-secondary);">× ${qcState.qty}</span></div>`;
 
-  if (sizes.length === 0) {
+  if (!totalsResult.valid) {
+    html += `<div style="font-size:13px; color:var(--warning-text);"><i class="fa-solid fa-triangle-exclamation"></i> Can't calculate this template — it's missing footage or a rate configuration. Fix it in Production Templates.</div>`;
+  } else if (sizes.length === 0) {
     html += `<div style="font-size:13px; color:var(--text-secondary);">No balloons needed for this combination.</div>`;
   } else if (colors.length <= 1) {
     sizes.forEach(size => { html += `<div style="font-size:14px; padding:4px 0;">${totals[size]} – ${size}</div>`; });
@@ -7447,6 +7471,12 @@ function invApplyInventoryTransactions(entries) {
       } else {
         delta = e.delta;
       }
+      // Last line of defense before any quantity can touch the ledger — regardless of which
+      // caller or upstream calculation produced it. A non-finite delta must never silently become
+      // a no-op-looking `backstock = NaN` write; it fails the whole transaction loudly instead.
+      if (!Number.isFinite(delta)) {
+        throw Object.assign(new Error(`Invalid quantity for ${item.color} ${e.size} — this transaction was not applied.`), { code: 'INVALID_QUANTITY', itemId: e.itemId, size: e.size });
+      }
       const newBalance = previousBalance + delta;
       // Only a DECREASE can trigger this — a positive delta (Receive, or an upward Adjustment)
       // should never be blocked just because the balance was already negative from some earlier
@@ -8470,7 +8500,23 @@ function psComputeJobRequirements(job) {
   (job.productionItems || []).forEach((line, lineIdx) => {
     const recipe = psLineRecipe(line);
     if (!recipe) return;
-    const totals = psComputeTotals(recipe, line.qty, line.customLinear);
+    const productionItemId = line.id || (job.id + ':' + lineIdx); // older items predate the id field
+    const totalsResult = psComputeTotals(recipe, line.qty, line.customLinear);
+    // A broken formula config (missing footage, missing/non-numeric rates) must surface as an
+    // explicit, actionable "needs configuration" requirement — never silently disappear, and
+    // never let an invalid (NaN) total reach the requirement list below, where every existing
+    // "<= 0" skip-guard would fail to catch it (NaN comparisons are always false), letting it
+    // slide all the way to Review & Pull as a false "Ready" row with an actionable Pull button.
+    if (!totalsResult.valid) {
+      requirements.push({
+        jobId: job.id, productionItemId, colorId: null, inventoryItemId: null, brand: '',
+        color: '', size: '', qty: 0, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
+        source: { jobId: job.id, jobName: job.jobName || '', itemLabel: recipe.display || '' },
+        unresolved: false, formulaInvalid: true,
+      });
+      return;
+    }
+    const totals = totalsResult.sizes;
     // Colors marked "general note" during import (see irMarkColorGeneralNote) never generate an
     // inventory requirement here — they're not resolvable Standard Latex colors, and treating one
     // as an unresolved color would wrongly invite "add this to your Color Library." They're still
@@ -8479,18 +8525,17 @@ function psComputeJobRequirements(job) {
     const colors = psLineBalloonColors({ colors: rawColors, colorGeneralNotes: line.colorGeneralNotes });
     if (colors.length === 0) return; // every color on this line was a general note — nothing balloon-inventory-shaped to require
     const nColors = colors.length;
-    const productionItemId = line.id || (job.id + ':' + lineIdx); // older items predate the id field
 
     Object.keys(totals).forEach(prodSize => {
       const invSize = INV_SIZE_FROM_PRODUCTION[prodSize];
       if (!invSize) return;
       const total = totals[prodSize];
-      if (total <= 0) return;
+      if (!Number.isFinite(total) || total <= 0) return;
 
       const distEntries = (line.colorDist && line.colorDist.length) ? line.colorDist : colors.map(name => ({ name, pct: null }));
       distEntries.forEach(cd => {
-        const qty = cd.pct != null ? Math.round(total * (cd.pct / 100)) : psColorCount(total, nColors);
-        if (qty <= 0) return;
+        const qty = (typeof cd.pct === 'number' && Number.isFinite(cd.pct)) ? Math.round(total * (cd.pct / 100)) : psColorCount(total, nColors);
+        if (!Number.isFinite(qty) || qty <= 0) return;
 
         // Resolve against the Color Library by exact name/alias — deliberately not the fuzzy
         // Import Review matcher. A name shared by two+ brands can't be attributed to one of
@@ -8635,7 +8680,12 @@ function psReviewPullRows(job) {
   const groups = {};
   reqs.forEach(req => {
     let key, groupInfo;
-    if (req.unresolved) {
+    if (req.formulaInvalid) {
+      // One row per broken-config production item — never merged with anything else, since
+      // there's no real color/size to group by. Never Ready, never actionable, by construction.
+      key = 'formulaInvalid:' + req.productionItemId;
+      groupInfo = { kind: 'formulaInvalid', itemLabel: req.source && req.source.itemLabel };
+    } else if (req.unresolved) {
       key = 'unresolved:' + req.color.trim().toLowerCase() + ':' + req.size;
       groupInfo = { kind: 'unresolved', color: req.color, size: req.size, candidates: req.candidates || [] };
     } else if (!req.inventoryItemId) {
@@ -8651,6 +8701,11 @@ function psReviewPullRows(job) {
 
   return Object.values(groups).map(row => {
     if (row.kind !== 'item') return row; // nothing further to compute until this row is resolved and stocked
+    // Defense in depth: even though psComputeJobRequirements/psComputeTotals now guard against a
+    // non-finite qty at the source, a row's qty is an accumulated sum (see `groups[key].qty +=`
+    // above) — this is the last checkpoint before a quantity could ever reach a Pull button, so it
+    // fails closed (never Ready, never actionable) rather than trusting every upstream guard held.
+    if (!Number.isFinite(row.qty)) return Object.assign({}, row, { alreadyPulled: 0, stillNeeded: NaN, status: 'formulaInvalid' });
     const item = invFindItem(row.inventoryItemId);
     if (!item) return Object.assign({}, row, { kind: 'noItem' }); // item was deleted since the requirement was computed
     const sd = item.sizes[row.size];
@@ -8660,6 +8715,9 @@ function psReviewPullRows(job) {
       return Object.assign({}, row, { alreadyPulled, stillNeeded, status: 'configMissing' });
     }
     const available = invAvailableBalloons(sd);
+    if (!Number.isFinite(stillNeeded) || !Number.isFinite(available)) {
+      return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'formulaInvalid' });
+    }
     if (stillNeeded <= 0) return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'done' });
     if (available < stillNeeded) return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'short' });
     return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'ready' });
@@ -8787,6 +8845,16 @@ function psReviewPullRowHtml(job, row, readOnly) {
 
   const rpBadge = (label) => `<span class="rp-badge rp-badge-attention">${label}</span>`;
 
+  if (row.kind === 'formulaInvalid') {
+    return `<div class="rp-row">
+      <div class="rp-row-head">
+        <div style="font-size:13px; font-weight:700;">${psEscape(row.itemLabel || 'Production item')}</div>
+        ${rpBadge('Needs Configuration')}
+      </div>
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">Can't calculate what this item needs — its production template is missing footage or a rate configuration. Fix it in Production Templates, then this will recompute automatically.</div>
+    </div>`;
+  }
+
   if (row.kind === 'unresolved') {
     const draftKey = job.id + '|' + row.color.trim().toLowerCase();
     if (row.candidates && row.candidates.length > 1) {
@@ -8847,6 +8915,19 @@ function psReviewPullRowHtml(job, row, readOnly) {
       </div>
       <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">This color is in your Color Library but isn't stocked in Standard Latex Inventory yet.</div>
       <div class="rp-actions"><button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="showView('inventory-latex')">Go to Standard Latex Inventory</button></div>
+    </div>`;
+  }
+
+  if (row.status === 'formulaInvalid') {
+    // Defense in depth: an accumulated quantity that somehow isn't a real number, caught here
+    // even if every upstream guard (psComputeTotals/psComputeJobRequirements) somehow missed it.
+    // Never Ready, never a Pull button, regardless of cause.
+    return `<div class="rp-row">
+      <div class="rp-row-head">
+        <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)}</div>
+        ${rpBadge('Needs Configuration')}
+      </div>
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">This requirement's quantity couldn't be calculated. Check this item's production template and color/size configuration.</div>
     </div>`;
   }
 
