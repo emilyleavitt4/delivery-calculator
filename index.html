@@ -25,8 +25,11 @@
     --accent-light: #e8f5ee;
     --accent-border: #52b788;
     --accent-border-rgb: 82,183,136;
-    --warning-bg: #fff8e6;
-    --warning-text: #92600a;
+    /* Subdued chartreuse, not amber — tuned to sit with Ink/Blue/Seafoam rather than clash with
+       them, and to read as "pay attention," not just "unresolved" (see Import Review, the first
+       screen to actually reserve this for something other than routine needs-input state). */
+    --warning-bg: #F3F6E1;
+    --warning-text: #576B1C;
     --info-bg: #e8f1fb;
     --info-text: #2f6ca3;
     --radius: 10px;
@@ -65,8 +68,8 @@
       --accent-light: #0d2b1e;
       --accent-border: #2d6a4f;
       --accent-border-rgb: 45,106,79;
-      --warning-bg: #2a1f00;
-      --warning-text: #f0a500;
+      --warning-bg: #20260A;
+      --warning-text: #BFD066;
       --info-bg: #10202e;
       --info-text: #6fa8d8;
 
@@ -745,7 +748,9 @@
   .ir-header-title { font-size: 21px; font-weight: 800; letter-spacing: -0.3px; text-wrap: balance; }
   .ir-header-sub { font-size: 13px; color: var(--text-secondary); margin-top: 3px; }
   .ir-header-status { font-size: 14.5px; font-weight: 700; margin-top: 12px; display: flex; align-items: center; gap: 7px; }
-  .ir-header-status.attention { color: var(--warning-text); }
+  /* Routine "you have decisions to make" is Ink, not Warning — Warning/chartreuse is reserved for
+     something that genuinely deserves a second look, which this ordinary per-import state isn't. */
+  .ir-header-status.attention { color: var(--brand-ink); }
   .ir-header-status.clear { color: var(--success-text); }
   .ir-header-meta { font-size: 11.5px; color: var(--text-tertiary); margin-top: 10px; line-height: 1.6; }
 
@@ -757,14 +762,14 @@
   .ir-item-title { font-size: 15.5px; font-weight: 700; letter-spacing: -0.1px; }
   .ir-item-title-quiet { font-size: 13.5px; font-weight: 500; color: var(--text-secondary); }
   .ir-item-qty { font-weight: 400; color: var(--text-tertiary); }
-  .ir-item-need { font-size: 12.5px; font-weight: 600; color: var(--warning-text); margin-top: 4px; }
+  .ir-item-need { font-size: 12.5px; font-weight: 600; color: var(--brand-ink); margin-top: 4px; }
   .ir-item-resolved-note { font-size: 12px; color: var(--text-tertiary); margin-top: 3px; }
   .ir-item-resolved-note i { color: var(--success-text); margin-right: 4px; }
   .ir-chevron { color: var(--text-tertiary); font-size: 13px; margin-top: 3px; flex-shrink: 0; }
 
   .ir-decisions { margin-top: 16px; display: flex; flex-direction: column; gap: 18px; }
   .ir-decision-q { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 7px; }
-  .ir-decision-hint { font-size: 12px; color: var(--warning-text); margin-top: 6px; }
+  .ir-decision-hint { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
   .ir-decision-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
   .ir-pill-select {
@@ -4651,7 +4656,7 @@ function irColorRowHtml(item, idx, value) {
   return `<div style="position:relative;">
     <div class="ir-color-chip-row">
       <input type="text" id="${inputId}" value="${psEscape(value)}" placeholder="Type a color…" class="ir-color-input"
-        style="border-bottom-color:${resolved || !text ? 'transparent' : 'var(--warning-text)'};"
+        style="border-bottom-color:${resolved || !text ? 'transparent' : 'var(--brand-ink)'};"
         oninput="irUpdateColorRowLive('${item.id}', ${idx}, this.value); invShowColorSuggestions('${inputId}')"
         onblur="invHideColorSuggestionsSoon('${inputId}'); irScheduleColorRecompute('${item.id}', ${idx})">
       ${resolved ? `<i class="fa-solid fa-check" style="color:var(--success-text); font-size:12px; flex-shrink:0;" title="${isNote ? 'General note — not inventory-tracked' : 'Matches your Color Library'}"></i>` : ''}
