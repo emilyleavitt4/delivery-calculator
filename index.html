@@ -723,6 +723,20 @@
   }
   .ps-item-block { margin-bottom: 1.25rem; padding-bottom: 1.25rem; border-bottom: 0.5px solid var(--border); }
   .ps-item-block:last-of-type { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+  /* REVIEW & PULL — dense per-row status pattern, scoped to .rp- classes so the shared
+     .ps-item-block/.ps-status-* components elsewhere (Production, Staffing) are untouched. Each
+     row gets one small trailing badge (Ready/Short/Unresolved/Not Stocked/Setup Needed) so a
+     color's state reads at a glance without parsing its explanatory line — same trailing-pill
+     placement already used for .ps-status-btn elsewhere in the app, just a tighter row shell. */
+  .rp-row { padding: 0.55rem 0; border-bottom: 0.5px solid var(--border); }
+  .rp-row:last-of-type { border-bottom: none; padding-bottom: 0; }
+  .rp-row-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .rp-badge { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; margin-top: 1px; }
+  .rp-badge-ready { background: var(--success-bg); color: var(--success-text); }
+  .rp-badge-attention { background: var(--warning-bg); color: var(--warning-text); }
+  .rp-actions { margin-top: 0.4rem; }
+  .rp-actions .icon-btn, .rp-actions .save-btn { padding: 8px 14px; font-size: 13px; }
   .ps-sub-row { padding-left: 0.75rem; }
   .ps-sub-row .label { color: var(--text-tertiary); font-size: 12px; }
   .ps-sub-row .val { font-size: 13px; }
@@ -8625,15 +8639,20 @@ function psReviewPullRowHtml(job, row, readOnly) {
   const busyKey = job.id + '|' + row.key;
   const busy = !!psReviewPullBusyKeys[busyKey];
 
+  const rpBadge = (label) => `<span class="rp-badge rp-badge-attention">${label}</span>`;
+
   if (row.kind === 'unresolved') {
     const draftKey = job.id + '|' + row.color.trim().toLowerCase();
     if (row.candidates && row.candidates.length > 1) {
       // Ambiguous — this exact color name belongs to 2+ brands in the Library. Only this job
       // can say which one it meant; the Library itself stays untouched.
-      return `<div class="ps-item-block">
-        <div style="font-size:13px; font-weight:700; margin-bottom:4px;">${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
-        <div style="font-size:12px; color:var(--warning-text); margin-bottom:6px;">This color name matches more than one brand${readOnly ? ' — left unresolved (job is Completed)' : ' — pick which one this job means'}:</div>
-        ${readOnly ? '' : row.candidates.map(c => `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; margin:0 6px 6px 0;" onclick="psReviewPullResolveForJob('${job.id}','${psJsKeyAttr(row.color)}','${c.id}')">${psEscape(c.brand)} — ${psEscape(c.colorName)}</button>`).join('')}
+      return `<div class="rp-row">
+        <div class="rp-row-head">
+          <div style="font-size:13px; font-weight:700;">${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
+          ${rpBadge('Unresolved')}
+        </div>
+        <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">This color name matches more than one brand${readOnly ? ' — left unresolved (job is Completed)' : ' — pick which one this job means'}:</div>
+        ${readOnly ? '' : `<div class="rp-actions" style="display:flex; flex-wrap:wrap; gap:6px;">${row.candidates.map(c => `<button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psReviewPullResolveForJob('${job.id}','${psJsKeyAttr(row.color)}','${c.id}')">${psEscape(c.brand)} — ${psEscape(c.colorName)}</button>`).join('')}</div>`}
       </div>`;
     }
     // No exact match — either genuinely new to the Color Library, or a generic name (e.g.
@@ -8653,40 +8672,49 @@ function psReviewPullRowHtml(job, row, readOnly) {
     // all — the color still needs a person to search/resolve it deliberately, not a truncated list.
     const allMatches = clSearch(row.color);
     const suggestions = allMatches.length > 0 && allMatches.length <= 4 ? allMatches : [];
-    return `<div class="ps-item-block">
-      <div style="font-size:13px; font-weight:700; margin-bottom:4px;">${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
-      ${suggestions.length && !readOnly ? `<div style="font-size:12px; color:var(--warning-text); margin-bottom:4px;">Did you mean one of these?</div>
-      ${suggestions.map(s => `<div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+    return `<div class="rp-row">
+      <div class="rp-row-head">
+        <div style="font-size:13px; font-weight:700;">${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
+        ${rpBadge('Unresolved')}
+      </div>
+      ${suggestions.length && !readOnly ? `<div style="font-size:12px; color:var(--warning-text); margin-top:4px;">Did you mean one of these?</div>
+      ${suggestions.map(s => `<div style="display:flex; align-items:center; gap:6px; margin-top:6px;">
         <span style="font-size:12px; flex:1;">${psEscape(s.brand)} — ${psEscape(s.colorName)}</span>
-        <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px;" onclick="psReviewPullResolveForJob('${job.id}','${psJsKeyAttr(row.color)}','${s.id}')">Use for this job</button>
-        <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px;" onclick="psReviewPullAlwaysMatch('${job.id}','${psJsKeyAttr(row.color)}','${s.id}')" title="Add &quot;${invAttr(row.color)}&quot; as a permanent alias on this color, so every future job matches it automatically">Always match</button>
+        <button class="icon-btn" style="width:auto; padding:6px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psReviewPullResolveForJob('${job.id}','${psJsKeyAttr(row.color)}','${s.id}')">Use for this job</button>
+        <button class="icon-btn" style="width:auto; padding:6px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psReviewPullAlwaysMatch('${job.id}','${psJsKeyAttr(row.color)}','${s.id}')" title="Add &quot;${invAttr(row.color)}&quot; as a permanent alias on this color, so every future job matches it automatically">Always match</button>
       </div>`).join('')}` : ''}
-      <div style="font-size:12px; color:var(--warning-text); margin-bottom:6px;">${suggestions.length && !readOnly ? 'Or, if none of these are right, add' : 'This color isn\'t in your Color Library yet'}${readOnly ? ' (job is Completed — left as-is).' : (suggestions.length ? ' it as a new color.' : ' — add it so it (and future jobs using this name) can be matched to Inventory automatically.')}</div>
-      ${readOnly ? '' : `<div style="display:flex; gap:6px; align-items:center;">
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">${suggestions.length && !readOnly ? 'Or, if none of these are right, add' : 'This color isn\'t in your Color Library yet'}${readOnly ? ' (job is Completed — left as-is).' : (suggestions.length ? ' it as a new color.' : ' — add it so it (and future jobs using this name) can be matched to Inventory automatically.')}</div>
+      ${readOnly ? '' : `<div class="rp-actions" style="display:flex; gap:6px; align-items:center;">
         <select style="flex:1;" onchange="psReviewPullBrandDraft['${invAttr(draftKey)}'] = this.value">
           ${psReviewPullBrandOptionsHtml(psReviewPullBrandDraft[draftKey] || '')}
         </select>
-        <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="psReviewPullCreateColor('${job.id}','${psJsKeyAttr(row.color)}')">Add to Library</button>
+        <button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psReviewPullCreateColor('${job.id}','${psJsKeyAttr(row.color)}')">Add to Library</button>
       </div>`}
     </div>`;
   }
 
   if (row.kind === 'noItem') {
-    return `<div class="ps-item-block">
-      <div style="font-size:13px; font-weight:700; margin-bottom:4px;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
-      <div style="font-size:12px; color:var(--warning-text); margin-bottom:6px;">This color is in your Color Library but isn't stocked in Standard Latex Inventory yet.</div>
-      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="showView('inventory-latex')">Go to Standard Latex Inventory</button>
+    return `<div class="rp-row">
+      <div class="rp-row-head">
+        <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
+        ${rpBadge('Not Stocked')}
+      </div>
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">This color is in your Color Library but isn't stocked in Standard Latex Inventory yet.</div>
+      <div class="rp-actions"><button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="showView('inventory-latex')">Go to Standard Latex Inventory</button></div>
     </div>`;
   }
 
   if (row.status === 'configMissing') {
     const inputId = 'rp-perbag-' + job.id + '-' + row.inventoryItemId + '-' + row.size.replace(/[^a-zA-Z0-9]/g, '');
-    return `<div class="ps-item-block">
-      <div style="font-size:13px; font-weight:700; margin-bottom:4px;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
-      <div style="font-size:12px; color:var(--warning-text); margin-bottom:6px;">Standard Package Qty isn't set for this size${readOnly ? ' (job is Completed — left unpulled)' : ' — set it before it can be pulled'}.</div>
-      ${readOnly ? '' : `<div style="display:flex; gap:6px; align-items:center;">
+    return `<div class="rp-row">
+      <div class="rp-row-head">
+        <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
+        ${rpBadge('Setup Needed')}
+      </div>
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">Standard Package Qty isn't set for this size${readOnly ? ' (job is Completed — left unpulled)' : ' — set it before it can be pulled'}.</div>
+      ${readOnly ? '' : `<div class="rp-actions" style="display:flex; gap:6px; align-items:center;">
         <input type="number" id="${inputId}" min="1" placeholder="e.g. 100" style="width:100px;">
-        <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="invUpdateSizeField('${row.inventoryItemId}','${invAttr(row.size)}','perBag', document.getElementById('${inputId}').value); psRenderProductionJobs();">Save</button>
+        <button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invUpdateSizeField('${row.inventoryItemId}','${invAttr(row.size)}','perBag', document.getElementById('${inputId}').value); psRenderProductionJobs();">Save</button>
       </div>`}
     </div>`;
   }
@@ -8697,28 +8725,32 @@ function psReviewPullRowHtml(job, row, readOnly) {
 
   if (row.status === 'short') {
     const short = row.stillNeeded - row.available;
-    let html = `<div class="ps-item-block">
-      <div style="font-size:13px; font-weight:700; margin-bottom:4px;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)}</div>
-      <div style="font-size:12px; color:var(--warning-text); margin-bottom:6px;">Not enough inventory: Need ${row.stillNeeded} / Available ${row.available} / Short ${short}</div>`;
+    let html = `<div class="rp-row">
+      <div class="rp-row-head">
+        <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)}</div>
+        ${rpBadge('Short')}
+      </div>
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">Need ${row.stillNeeded} · Available ${row.available} · Short ${short}</div>`;
     if (readOnly) {
-      html += `<div style="font-size:12px; color:var(--text-secondary);">Left unpulled — job is Completed.</div>`;
+      html += `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Left unpulled — job is Completed.</div>`;
     } else if (invAdminUnlocked) {
-      html += `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" ${busy ? 'disabled' : ''} onclick="psReviewPullConfirmRow('${job.id}','${psJsKeyAttr(row.key)}', ${row.available})">${busy ? 'Pulling…' : `Pull available (${row.available})`}</button>`;
+      html += `<div class="rp-actions"><button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" ${busy ? 'disabled' : ''} onclick="psReviewPullConfirmRow('${job.id}','${psJsKeyAttr(row.key)}', ${row.available})">${busy ? 'Pulling…' : `Pull available (${row.available})`}</button></div>`;
     } else {
-      html += `<div style="font-size:12px; color:var(--text-secondary);">Needs an admin decision (restock, substitute, partial pull, or a count correction) before this can be pulled.</div>`;
+      html += `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Needs an admin decision (restock, substitute, partial pull, or a count correction) before this can be pulled.</div>`;
     }
     html += `</div>`;
     return html;
   }
 
   // ready
-  return `<div class="ps-item-block">
-    <div style="display:flex; align-items:center; justify-content:space-between;">
+  return `<div class="rp-row">
+    <div class="rp-row-head">
       <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.stillNeeded}${row.alreadyPulled ? `, ${row.alreadyPulled} already pulled` : ''})</span></div>
-      ${readOnly
-        ? `<span style="font-size:12px; color:var(--text-secondary);">Not pulled — job is Completed</span>`
-        : `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" ${busy ? 'disabled' : ''} onclick="psReviewPullConfirmRow('${job.id}','${psJsKeyAttr(row.key)}', ${row.stillNeeded})">${busy ? 'Pulling…' : `Pull ${row.stillNeeded}`}</button>`}
+      <span class="rp-badge rp-badge-ready">Ready</span>
     </div>
+    ${readOnly
+      ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Not pulled — job is Completed</div>`
+      : `<div class="rp-actions"><button class="save-btn" style="width:auto; padding:8px 16px;" ${busy ? 'disabled' : ''} onclick="psReviewPullConfirmRow('${job.id}','${psJsKeyAttr(row.key)}', ${row.stillNeeded})">${busy ? 'Pulling…' : `Pull ${row.stillNeeded}`}</button></div>`}
   </div>`;
 }
 
@@ -11152,7 +11184,7 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
   html += `<div class="inv-color-row-header"${invRearrangeMode ? '' : ` onclick="invToggleExpand('${item.id}')"`}>
     ${orderRankInput}
     <div class="inv-color-row-text">
-      <div class="inv-color-row-name"><i class="fa-${item.useUp ? 'solid' : 'regular'} fa-star" style="color:${item.useUp ? '#d4a017' : 'var(--text-tertiary)'}; font-size:13px; margin-right:3px; cursor:pointer;" onclick="event.stopPropagation(); invToggleUseUp('${item.id}')" title="${item.useUp ? 'Prioritized — click to unmark' : 'Prioritize Stock'}"></i>${psEscape(item.color)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px; margin-left:2px;">INACTIVE</span>'}</div>
+      <div class="inv-color-row-name"><i class="fa-${item.useUp ? 'solid' : 'regular'} fa-star" style="color:${item.useUp ? '#d4a017' : 'var(--text-tertiary)'}; font-size:13px; cursor:pointer; padding:9px; margin:-9px -6px -9px -9px;" onclick="event.stopPropagation(); invToggleUseUp('${item.id}')" title="${item.useUp ? 'Prioritized — click to unmark' : 'Prioritize Stock'}"></i>${psEscape(item.color)}${isActive ? '' : ' <span style="font-size:10px; font-weight:600; color:var(--text-secondary); border:0.5px solid var(--border-strong); border-radius:999px; padding:1px 6px; margin-left:2px;">INACTIVE</span>'}</div>
       <div class="inv-color-row-brand">${psEscape(item.brand || 'No brand')}</div>
     </div>
     ${invRearrangeMode ? '' : sizeSummary}
