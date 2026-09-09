@@ -3967,6 +3967,19 @@ function imLockAdmin() {
 
 let IMPORT_REVIEW_DRAFT = null;
 let irExpandedItems = new Set();
+// Separate from irExpandedItems (which controls whether a card shows any editable content at
+// all). This controls a second, narrower disclosure *inside* an expanded Needs Review card: by
+// default it shows only the field(s) tied to the actual flagged reason (classification, a
+// production template, colors), not every editable field on the item. "Edit all details" opens
+// this to reveal renaming/quantity/location/notes/remember-mapping/split/ignore — present but
+// deliberately not the first thing shown, since resolving the flagged reason is the actual
+// decision this screen exists to ask for. Recognized/Ignored items are unaffected — expanding one
+// of those (there's no flagged reason to filter by) always shows the full form, same as before.
+let irDetailsExpandedItems = new Set();
+function irToggleDetails(id) {
+  if (irDetailsExpandedItems.has(id)) irDetailsExpandedItems.delete(id); else irDetailsExpandedItems.add(id);
+  irRenderShell();
+}
 const IM_FUZZY_THRESHOLD = 0.65; // below this, a raw item's best candidate isn't worth suggesting at all
 
 function irInit() {
@@ -4327,10 +4340,19 @@ function irRenderShell() {
   const needsReview = draft.reviewItems.filter(i => i.status === 'needs_review');
   const recognized = draft.reviewItems.filter(i => i.status !== 'needs_review');
 
+  // Leads with whichever fact actually matters right now: outstanding decisions if there are any
+  // (in warning color, since that's genuinely what's blocking Approve), or a calm all-clear once
+  // there aren't — rather than a neutral "X need review, Y recognized" tally every time.
+  const headlineHtml = needsReview.length > 0
+    ? `<div style="font-size:15px; font-weight:700; color:var(--warning-text);">${needsReview.length} item${needsReview.length === 1 ? '' : 's'} need${needsReview.length === 1 ? 's' : ''} your review</div>
+       <div style="font-size:12px; color:var(--text-tertiary); margin-top:2px;">${recognized.length} already recognized</div>`
+    : `<div style="font-size:15px; font-weight:700; color:var(--success-text);"><i class="fa-solid fa-circle-check"></i> All ${recognized.length} item${recognized.length === 1 ? '' : 's'} recognized</div>
+       <div style="font-size:12px; color:var(--text-tertiary); margin-top:2px;">Ready to approve</div>`;
+
   root.innerHTML = `
     <div class="card" style="margin-bottom:0.75rem; text-align:center;">
-      <div style="font-size:14px; font-weight:600;">${needsReview.length} item${needsReview.length === 1 ? '' : 's'} need review • ${recognized.length} item${recognized.length === 1 ? '' : 's'} recognized</div>
-      ${draft.event.jobName || draft.event.eventDate ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">${psEscape(draft.event.jobName)}${draft.event.eventDate ? ' — ' + psEscape(draft.event.eventDate) : ''}</div>` : ''}
+      ${headlineHtml}
+      ${draft.event.jobName || draft.event.eventDate ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:8px;">${psEscape(draft.event.jobName)}${draft.event.eventDate ? ' — ' + psEscape(draft.event.eventDate) : ''}</div>` : ''}
       ${draft.event.eventTitle ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">${psEscape(draft.event.eventTitle)}</div>` : ''}
       ${irOtherFieldsHtml(draft)}
     </div>
@@ -4360,28 +4382,33 @@ function irItemCardHtml(item) {
   const destinationSummary = item.classification === 'production'
     ? (recipe ? recipe.display : '(no template selected)')
     : imClassificationLabel(item.classification);
-  const expanded = irExpandedItems.has(item.id) || item.status === 'needs_review';
+  const needsReview = item.status === 'needs_review';
+  const expanded = irExpandedItems.has(item.id) || needsReview;
+  // Once an item is resolved there's no flagged reason left to filter by, so its expanded view
+  // always shows the full form (identical to today's behavior for Mapped/Ignored items). Only a
+  // Needs Review item's expanded view starts narrowed to just what the flagged reason(s) need.
+  const detailsOpen = irDetailsExpandedItems.has(item.id) || !needsReview;
 
+  // Collapsed row: a Needs Review item leads with WHY (the actual flagged reason, in the same
+  // warning color as its badge) ahead of the routine classification summary — that's the decision
+  // this card is asking for. A resolved item has no reason to lead with, so it renders quieter
+  // (smaller, muted) rather than competing for attention with the items that still need one.
   let html = `<div class="card" style="margin-bottom:0.5rem;">
     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; cursor:pointer;" onclick="irToggleExpanded('${item.id}')">
       <div style="flex:1; min-width:0;">
-        <div style="font-size:14px; font-weight:700;">${psEscape(item.rawName)} <span style="font-weight:400; color:var(--text-secondary);">× ${item.rawQty}</span></div>
-        <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">${psEscape(imClassificationLabel(item.classification))} — ${psEscape(destinationSummary)}</div>
-        ${item.reasons.length ? `<div style="font-size:11px; color:var(--warning-text); margin-top:4px;">${item.reasons.map(r => psEscape(r)).join(' ')}</div>` : ''}
+        <div style="font-size:${needsReview ? '14px' : '13px'}; font-weight:${needsReview ? '700' : '600'}; color:${needsReview ? 'var(--text)' : 'var(--text-secondary)'};">${psEscape(item.rawName)} <span style="font-weight:400; color:var(--text-tertiary);">× ${item.rawQty}</span></div>
+        ${needsReview ? `<div style="font-size:12.5px; font-weight:600; color:var(--warning-text); margin-top:3px;">${item.reasons.map(r => psEscape(r)).join(' ')}</div>` : ''}
+        <div style="font-size:11px; color:var(--text-tertiary); margin-top:2px;">${psEscape(imClassificationLabel(item.classification))} — ${psEscape(destinationSummary)}</div>
       </div>
       ${irStatusBadgeHtml(item.status)}
     </div>`;
 
   if (expanded) {
     html += `<div style="margin-top:10px; padding-top:10px; border-top:0.5px solid var(--border);">`;
-    if (item.rawDescription) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;"><b>Original description:</b> ${psEscape(item.rawDescription)}</div>`;
-    if (item.totalPrice != null) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;"><b>Imported price:</b> ${jccFmtMoney(item.totalPrice)}${item.unitPrice != null ? ` (${jccFmtMoney(item.unitPrice)} ea)` : ''}</div>`;
 
-    html += `<div class="row">
-      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Item name</label><input type="text" value="${invAttr(item.name)}" onchange="irUpdateItemField('${item.id}','name', this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0.6rem;"><label>Quantity</label><input type="number" min="1" value="${item.qty}" onchange="irUpdateItemField('${item.id}','qty', this.value)"></div>
-    </div>`;
-
+    // Primary: the field(s) that actually resolve a flagged reason — classification, and (for
+    // production items) the template/footage/colors decisions that follow from it. Shown first
+    // and always, whether or not "Edit all details" is open.
     html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Classification</label><select onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select></div>`;
 
     if (item.classification === 'production') {
@@ -4402,29 +4429,51 @@ function irItemCardHtml(item) {
         html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Actual footage</label><input type="number" step="0.5" min="0" value="${item.customLinear || ''}" placeholder="e.g. 30" onchange="irUpdateItemField('${item.id}','customLinear', this.value)"></div>`;
       }
       html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Colors</label>${irColorPickerHtml(item)}</div>`;
+    }
+
+    // Secondary: renaming/quantity/location/notes/remember-mapping/split/ignore — real, still one
+    // click away, just not what's shown by default while a decision is still pending.
+    if (detailsOpen) {
+      if (item.rawDescription) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;"><b>Original description:</b> ${psEscape(item.rawDescription)}</div>`;
+      if (item.totalPrice != null) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;"><b>Imported price:</b> ${jccFmtMoney(item.totalPrice)}${item.unitPrice != null ? ` (${jccFmtMoney(item.unitPrice)} ea)` : ''}</div>`;
+
       html += `<div class="row">
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Location (optional)</label><input type="text" value="${invAttr(item.location)}" onchange="irUpdateItemField('${item.id}','location', this.value)"></div>
-        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Indoor/Outdoor</label>
-          <select onchange="irUpdateItemField('${item.id}','indoorOutdoor', this.value || null)">
-            <option value="">— unspecified —</option>
-            <option value="Indoor"${item.indoorOutdoor === 'Indoor' ? ' selected' : ''}>Indoor</option>
-            <option value="Outdoor"${item.indoorOutdoor === 'Outdoor' ? ' selected' : ''}>Outdoor</option>
-          </select>
-        </div>
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Item name</label><input type="text" value="${invAttr(item.name)}" onchange="irUpdateItemField('${item.id}','name', this.value)"></div>
+        <div class="settings-field" style="margin-bottom:0.6rem;"><label>Quantity</label><input type="number" min="1" value="${item.qty}" onchange="irUpdateItemField('${item.id}','qty', this.value)"></div>
+      </div>`;
+
+      if (item.classification === 'production') {
+        html += `<div class="row">
+          <div class="settings-field" style="margin-bottom:0.6rem;"><label>Location (optional)</label><input type="text" value="${invAttr(item.location)}" onchange="irUpdateItemField('${item.id}','location', this.value)"></div>
+          <div class="settings-field" style="margin-bottom:0.6rem;"><label>Indoor/Outdoor</label>
+            <select onchange="irUpdateItemField('${item.id}','indoorOutdoor', this.value || null)">
+              <option value="">— unspecified —</option>
+              <option value="Indoor"${item.indoorOutdoor === 'Indoor' ? ' selected' : ''}>Indoor</option>
+              <option value="Outdoor"${item.indoorOutdoor === 'Outdoor' ? ' selected' : ''}>Outdoor</option>
+            </select>
+          </div>
+        </div>`;
+      }
+
+      html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Description / notes (optional)</label><input type="text" value="${invAttr(item.description)}" onchange="irUpdateItemField('${item.id}','description', this.value)"></div>`;
+
+      html += `<label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:10px;">
+        <input type="checkbox" ${item.rememberMapping ? 'checked' : ''} onchange="irUpdateItemField('${item.id}','rememberMapping', this.checked)">
+        Remember this mapping for future imports
+      </label>`;
+
+      html += `<div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irSplitItem('${item.id}')"><i class="fa-solid fa-scissors"></i> Split into multiple</button>
+        <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irMarkIgnored('${item.id}')"><i class="fa-solid fa-ban"></i> Ignore</button>
       </div>`;
     }
 
-    html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Description / notes (optional)</label><input type="text" value="${invAttr(item.description)}" onchange="irUpdateItemField('${item.id}','description', this.value)"></div>`;
+    if (needsReview) {
+      html += `<button class="icon-btn" style="width:auto; padding:4px 2px; font-size:12px; color:var(--brand-blue); margin-top:4px;" onclick="irToggleDetails('${item.id}')">
+        <i class="fa-solid fa-chevron-${detailsOpen ? 'up' : 'down'}"></i> ${detailsOpen ? 'Hide' : 'Edit'} all details
+      </button>`;
+    }
 
-    html += `<label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:10px;">
-      <input type="checkbox" ${item.rememberMapping ? 'checked' : ''} onchange="irUpdateItemField('${item.id}','rememberMapping', this.checked)">
-      Remember this mapping for future imports
-    </label>`;
-
-    html += `<div style="display:flex; gap:8px; flex-wrap:wrap;">
-      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irSplitItem('${item.id}')"><i class="fa-solid fa-scissors"></i> Split into multiple</button>
-      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irMarkIgnored('${item.id}')"><i class="fa-solid fa-ban"></i> Ignore</button>
-    </div>`;
     html += `</div>`;
   }
 
@@ -18132,6 +18181,7 @@ async function psHandleInvoiceUpload(fileInput) {
 
     IMPORT_REVIEW_DRAFT = psBuildReviewDraft(rawImportData);        // Internal Event Model + Mapping Layer scoring
     irExpandedItems = new Set();
+    irDetailsExpandedItems = new Set();
 
     statusEl.style.display = 'none';
     statusEl.textContent = '';
@@ -18165,6 +18215,7 @@ async function psHandleInvoiceUrlImport() {
     const rawImportData = await psImportInvoice17hatsUrl(url);
     IMPORT_REVIEW_DRAFT = psBuildReviewDraft(rawImportData);
     irExpandedItems = new Set();
+    irDetailsExpandedItems = new Set();
 
     statusEl.style.display = 'none';
     statusEl.textContent = '';
