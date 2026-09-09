@@ -3010,6 +3010,28 @@ let RECIPES = [
   { id:'arch-freeform-28', display:'Freeform Arch – 28 ft',     category:'Arch', style:'Freeform', label:'Freeform — 28 ft (42 linear)', formula:'freeform', linearFt:42, rates:FORMULAS.freeformRates.Arch },
 ];
 
+// Default built-in tasks — deliberately minimal and milestone-only, never procedural: what has to
+// happen for this TYPE of piece to exist, not how any particular business does it (no adhesive,
+// tool, base/frame method, or staffing count named — that's what a business's own
+// buildInstructions/equipmentList/staffingRecommendation fields are for). One set per CATEGORY,
+// not per template — Classic vs Freeform is only a quantity-math distinction, never a different
+// assembly process, so both styles share the same tasks. Column's "Add topper" is a safe given,
+// not an invented step: every built-in Column template already has a topper by design (see the
+// comment above the Columns list). Deliberately no Prep tasks (Prep's dynamic content already
+// comes from psSyncSyntheticPrepTasks — topper/pull-note/general-note tasks) and no Finish & Pack
+// tasks (no packing/transport action is universal across every business's own method — some decor
+// travels assembled, some as components, some is built on-site; inventing one here would be
+// exactly the "fake required work" this was scoped to avoid).
+const PS_BUILTIN_TASKS = {
+  Column:  [{ phase: 'build', text: 'Build column' }, { phase: 'build', text: 'Add topper' }],
+  Garland: [{ phase: 'build', text: 'Build garland to full length' }],
+  Arch:    [{ phase: 'build', text: 'Build arch' }],
+};
+RECIPES.forEach(r => {
+  const defaults = PS_BUILTIN_TASKS[r.category] || [];
+  r.tasks = defaults.map((t, i) => ({ id: r.id + '-t' + (i + 1), phase: t.phase, text: t.text, dueOffsetDays: null }));
+});
+
 // Step 8 (User-Owned Production Templates) added build/equipment/pack/install/labor/staffing
 // fields to what a template can hold — this fills in blank defaults on every entry above so
 // they all have the full shape without having to write out six empty fields 22 times over.
