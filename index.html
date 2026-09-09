@@ -33,9 +33,14 @@
     --radius-sm: 7px;
     --font: 'Urbanist', -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
 
-    /* Balloon Code brand tokens — Migration Step 1: defined, not yet wired into any selector. */
+    /* Balloon Code brand + semantic tokens (Migration Step 2 wired every former --accent* call
+       site to one of these, plus the promoted --danger*). --text/--text-secondary/--text-tertiary/
+       --border/--border-strong above are deliberately unchanged — deferred to a later typography/
+       neutral-refinement pass. */
     --brand-ink: #0B2740;
     --brand-blue: #146C7D;
+    --brand-blue-light: #E3F1F3;
+    --brand-blue-rgb: 20,108,125;
     --brand-seafoam: #7CC6A7;
     --brand-surface: #ECF7F4;
     --brand-neutral: #CFD9DE;
@@ -65,11 +70,14 @@
       --info-bg: #10202e;
       --info-text: #6fa8d8;
 
-      /* Balloon Code brand tokens — dark-mode counterparts, same light/dark pairing convention as
-         --accent/--accent-border and --warning-bg/--warning-text above (bg roles go to a deep tint
-         of the same hue; foreground/solid roles brighten for contrast). Not yet wired in. */
+      /* Balloon Code brand + semantic tokens — dark-mode counterparts, same light/dark pairing
+         convention as --accent/--accent-border and --warning-bg/--warning-text above (bg roles go
+         to a deep tint of the same hue; foreground/solid roles brighten for contrast). Wired into
+         selectors as of Migration Step 2. */
       --brand-ink: #9FC2D6;
       --brand-blue: #4FB8CE;
+      --brand-blue-light: #0E2A2F;
+      --brand-blue-rgb: 79,184,206;
       --brand-seafoam: #8ED4B7;
       --brand-surface: #132D28;
       --brand-neutral: #3A4A52;
@@ -126,16 +134,16 @@
   }
 
   .topbar-left { display: flex; align-items: center; gap: 9px; }
-  .topbar-icon { font-size: 17px; color: var(--accent); }
+  .topbar-icon { font-size: 17px; color: var(--brand-blue); }
   .topbar h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.2px; }
   .app-mode-badge {
     font-size: 9.5px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--accent);
-    background: var(--accent-light);
-    border: 0.5px solid var(--accent-border);
+    color: var(--brand-seafoam);
+    background: var(--brand-surface);
+    border: 0.5px solid var(--brand-seafoam);
     border-radius: 5px;
     padding: 2px 6px;
   }
@@ -163,7 +171,7 @@
     cursor: pointer;
     flex-shrink: 0;
   }
-  .breadcrumb-seg:hover { color: var(--accent); text-decoration: underline; }
+  .breadcrumb-seg:hover { color: var(--brand-blue); text-decoration: underline; }
   .breadcrumb-seg.current {
     color: var(--text);
     font-weight: 600;
@@ -236,13 +244,13 @@
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
   }
-  .tool-tile:hover, .tool-tile:active { background: var(--accent-light); border-color: var(--accent-border); }
+  .tool-tile:hover, .tool-tile:active { background: var(--brand-blue-light); border-color: var(--brand-blue); }
   .tool-tile-icon {
     width: 36px;
     height: 36px;
     border-radius: var(--radius-sm);
-    background: var(--accent-light);
-    color: var(--accent);
+    background: var(--brand-blue-light);
+    color: var(--brand-blue);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -273,7 +281,7 @@
   .tool-tile.editing { cursor: grab; touch-action: none; animation: tile-wiggle 0.22s ease-in-out infinite; }
   .tool-tile.editing:nth-child(even) { animation-delay: -0.11s; }
   .tool-tile.dragging { cursor: grabbing; animation: none; box-shadow: 0 8px 20px rgba(0,0,0,0.18); z-index: 10; }
-  .tool-tile.drop-target { border-color: var(--accent-border); background: var(--accent-light); }
+  .tool-tile.drop-target { border-color: var(--brand-seafoam); background: var(--brand-surface); }
   @keyframes tile-wiggle {
     0%, 100% { transform: rotate(-1deg); }
     50% { transform: rotate(1deg); }
@@ -329,8 +337,8 @@
 
   .field input:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(var(--accent-border-rgb), 0.15);
+    border-color: var(--brand-blue);
+    box-shadow: 0 0 0 3px rgba(var(--brand-blue-rgb), 0.15);
   }
 
   .field .hint {
@@ -358,17 +366,17 @@
   .check-item:active { background: var(--bg); }
   .check-item input[type=checkbox] {
     width: 18px; height: 18px;
-    accent-color: var(--accent);
+    accent-color: var(--brand-seafoam);
     cursor: pointer;
     flex-shrink: 0;
   }
   .check-item span { font-size: 14px; flex: 1; }
   .check-item .mult { font-size: 12px; color: var(--text-tertiary); }
   .check-item.active-check {
-    border-color: var(--accent-border);
-    background: var(--accent-light);
+    border-color: var(--brand-seafoam);
+    background: var(--brand-surface);
   }
-  .check-item.active-check span { color: var(--accent); font-weight: 500; }
+  .check-item.active-check span { color: var(--brand-seafoam); font-weight: 500; }
 
   /* RESULTS BREAKDOWN */
   .results {
@@ -468,7 +476,7 @@
   }
   .trip-btn.active {
     background: var(--surface);
-    color: var(--accent);
+    color: var(--brand-seafoam);
     box-shadow: 0 1px 3px rgba(0,0,0,0.1);
   }
 
@@ -584,8 +592,8 @@
   }
   .settings-field input:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(var(--accent-border-rgb), 0.15);
+    border-color: var(--brand-blue);
+    box-shadow: 0 0 0 3px rgba(var(--brand-blue-rgb), 0.15);
   }
   .settings-field .hint {
     font-size: 11px;
@@ -598,7 +606,7 @@
   .save-btn {
     width: 100%;
     padding: 11px;
-    background: var(--accent);
+    background: var(--brand-blue);
     border: none;
     border-radius: var(--radius-sm);
     font-size: 14.5px;
@@ -615,7 +623,7 @@
   .saved-msg {
     text-align: center;
     font-size: 13px;
-    color: var(--accent);
+    color: var(--success-text);
     margin-top: 0.625rem;
     height: 20px;
     font-weight: 500;
@@ -648,18 +656,18 @@
 
   /* CPM CALC */
   .cpm-result-box {
-    background: var(--accent-light);
-    border: 0.5px solid var(--accent-border);
+    background: var(--brand-surface);
+    border: 0.5px solid var(--brand-seafoam);
     border-radius: var(--radius-sm);
     padding: 0.875rem 1rem;
     margin-top: 0.875rem;
   }
-  .cpm-result-title { font-size: 11px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+  .cpm-result-title { font-size: 11px; font-weight: 600; color: var(--brand-seafoam); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
   .cpm-result-main { display: flex; align-items: center; justify-content: space-between; }
-  .cpm-result-val { font-size: 18px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .cpm-result-val { font-size: 18px; font-weight: 700; color: var(--brand-seafoam); font-variant-numeric: tabular-nums; }
   .apply-btn {
     padding: 7px 12px;
-    background: var(--accent);
+    background: var(--brand-blue);
     border: none;
     border-radius: 6px;
     font-size: 12px;
@@ -670,7 +678,7 @@
     transition: opacity 0.15s;
   }
   .apply-btn:active { opacity: 0.8; }
-  .cpm-formula { font-size: 10px; color: var(--accent); opacity: 0.7; margin-top: 5px; }
+  .cpm-formula { font-size: 10px; color: var(--brand-seafoam); opacity: 0.7; margin-top: 5px; }
 
   /* PRODUCTION SHEET GENERATOR */
   .settings-field select {
@@ -714,7 +722,7 @@
     border-bottom: 0.5px solid var(--border);
   }
   .ps-check-row:last-child { border-bottom: none; }
-  .ps-check-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--accent); }
+  .ps-check-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--success); }
   .ps-check-row label { font-size: 14px; flex: 1; }
   .ps-check-row.done label { text-decoration: line-through; color: var(--text-tertiary); }
   .ps-build-fields { font-size: 13px; color: var(--text-secondary); line-height: 1.7; margin: 0.5rem 0 0.75rem; }
@@ -727,7 +735,7 @@
     padding: 0.6rem 0.75rem;
     border-radius: var(--radius-sm);
   }
-  #ps-import-status.ok { background: var(--accent-light); color: var(--accent); }
+  #ps-import-status.ok { background: var(--success-bg); color: var(--success-text); }
   #ps-import-status.warn { background: var(--warning-bg); color: var(--warning-text); }
 
   /* JOB CARDS (Production & Staffing) */
@@ -752,12 +760,12 @@
     font-family: var(--font);
   }
   .ps-status-not_started { background: rgba(153,153,153,0.18); color: var(--text-secondary); }
-  .ps-status-in_progress { background: var(--accent-light); color: var(--accent); }
+  .ps-status-in_progress { background: var(--brand-surface); color: var(--brand-seafoam); }
   .ps-status-waiting { background: var(--warning-bg); color: var(--warning-text); }
-  .ps-status-completed { background: var(--accent); color: #fff; }
+  .ps-status-completed { background: var(--success); color: #fff; }
   .ps-status-optional { background: transparent; color: var(--text-tertiary); border: 0.5px solid var(--border-strong); }
   .ps-staffstatus-open { background: var(--warning-bg); color: var(--warning-text); }
-  .ps-staffstatus-scheduled { background: var(--accent); color: #fff; }
+  .ps-staffstatus-scheduled { background: var(--brand-seafoam); color: #fff; }
 
   /* INVENTORY COLOR LIST — a dense list for potentially 100+ rows, unlike the few-and-larger
      Production job cards, so each row is a thin divider rather than its own margined card. */
@@ -779,7 +787,7 @@
   .inv-color-row.editing { touch-action: none; }
   .inv-color-row.editing .inv-color-row-header { cursor: grab; }
   .inv-color-row.dragging { cursor: grabbing; background: var(--surface); box-shadow: 0 8px 20px rgba(0,0,0,0.18); position: relative; z-index: 10; }
-  .inv-color-row.drop-target .inv-color-row-header { background: var(--accent-light); border-radius: var(--radius-sm); }
+  .inv-color-row.drop-target .inv-color-row-header { background: var(--brand-surface); border-radius: var(--radius-sm); }
 
   /* Type-ahead suggestions for matching a typed color name to a Color Library color. Always
      overlays below its input instead of pushing the rest of the form down — every call site
@@ -798,7 +806,7 @@
     box-shadow: 0 2px 8px rgba(0,0,0,0.12);
   }
   .inv-color-suggest-item { padding: 8px 10px; font-size: 13px; cursor: pointer; }
-  .inv-color-suggest-item:hover, .inv-color-suggest-item:active { background: var(--accent-light); }
+  .inv-color-suggest-item:hover, .inv-color-suggest-item:active { background: var(--brand-surface); }
 
   /* Job Cost Calculator's custom-items table — one dense line per item (item/qty/cost/total),
      since a real job commonly has 8-15 of these and the earlier one-card-per-item layout
@@ -813,7 +821,7 @@
   .jcc-col-del { width: 20px; flex-shrink: 0; text-align: center; color: var(--text-tertiary); cursor: pointer; font-size: 13px; }
   .jcc-row-line input[type="text"] { width: 100%; font-size: 13px; padding: 6px 8px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); -webkit-appearance: none; }
   .jcc-row-line input[type="number"] { width: 100%; font-size: 13px; padding: 6px 4px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: var(--font); text-align: center; -webkit-appearance: none; }
-  .jcc-row-line input:focus { outline: none; border-color: var(--accent); }
+  .jcc-row-line input:focus { outline: none; border-color: var(--brand-blue); }
 
   /* Tap-to-reveal info bubble next to a field label (e.g. clarifying what "employee cost"
      actually means) — keeps the explanation out of sight until someone asks for it. */
@@ -833,7 +841,7 @@
     border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm);
     background: var(--bg); color: var(--text); font-family: var(--font); -webkit-appearance: none;
   }
-  .jcc-inline-input:focus { outline: none; border-color: var(--accent); }
+  .jcc-inline-input:focus { outline: none; border-color: var(--brand-blue); }
 
   /* Sets "employee cost average" apart from the per-job minute fields above it in Labor —
      same card, but a distinct tinted box since this one's a rarely-changed business setting,
@@ -848,7 +856,7 @@
     padding: 0; margin: 0; font-size: 11px; color: var(--text-secondary); font-family: var(--font);
     text-align: left; -webkit-appearance: none;
   }
-  .jcc-plain-input:focus { outline: none; border-bottom-color: var(--accent); }
+  .jcc-plain-input:focus { outline: none; border-bottom-color: var(--brand-blue); }
 
   @media print {
     .topbar, .no-print, #ps-production-empty, #ps-staffing-empty { display: none !important; }
@@ -1224,7 +1232,7 @@
   <!-- AUTH GATE — a full-screen overlay that blocks the app until sign-in succeeds -->
   <div id="auth-gate" style="position:fixed; inset:0; z-index:9999; background:var(--bg); display:flex; align-items:center; justify-content:center; flex-direction:column; padding:2rem; text-align:center;">
     <div id="auth-gate-signin">
-      <i class="fa-solid fa-toolbox" style="font-size:32px; color:var(--accent); margin-bottom:1rem; display:block;"></i>
+      <i class="fa-solid fa-toolbox" style="font-size:32px; color:var(--brand-blue); margin-bottom:1rem; display:block;"></i>
       <div style="font-size:19px; font-weight:700; margin-bottom:0.4rem;">Balloon Business Toolkit</div>
       <div style="font-size:14px; color:var(--text-secondary); margin-bottom:1.5rem;">Sign in to continue</div>
       <button class="save-btn" style="width:auto; padding:12px 28px;" onclick="handleSignInClick()">
@@ -1263,7 +1271,7 @@
     <div class="card" id="bs-home-banner" style="display:none; margin-bottom:1rem; cursor:pointer;" onclick="gateAdminNav(() => showView('businessSetup'))">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
         <div>
-          <div style="font-size:14px; font-weight:700;"><i class="fa-solid fa-list-check" style="color:var(--accent); margin-right:6px;"></i>Finish setting up your business</div>
+          <div style="font-size:14px; font-weight:700;"><i class="fa-solid fa-list-check" style="color:var(--warning-text); margin-right:6px;"></i>Finish setting up your business</div>
           <div id="bs-home-banner-detail" style="font-size:12px; color:var(--text-secondary); margin-top:2px;"></div>
         </div>
         <i class="fa-solid fa-chevron-right" style="color:var(--text-tertiary);"></i>
@@ -1304,7 +1312,7 @@
     <div id="trip-delivery">
       <div class="card">
         <div class="card-title">
-          <i class="fa-solid fa-truck" style="color:var(--accent)"></i> Delivery trip
+          <i class="fa-solid fa-truck" style="color:var(--brand-seafoam)"></i> Delivery trip
         </div>
         <div class="row">
           <div class="field">
@@ -1385,7 +1393,7 @@
     <div id="trip-strike" style="display:none">
       <div class="card">
         <div class="card-title">
-          <i class="fa-solid fa-box-open" style="color:var(--accent)"></i> Strike trip
+          <i class="fa-solid fa-box-open" style="color:var(--brand-seafoam)"></i> Strike trip
         </div>
         <div class="row">
           <div class="field">
@@ -1751,7 +1759,7 @@
     <div id="settings-home-grid">
       <div class="card" style="cursor:pointer; margin-bottom:1rem;" onclick="showView('businessSetup')">
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-          <div style="font-size:14px; font-weight:700;"><i class="fa-solid fa-list-check" style="color:var(--accent); margin-right:6px;"></i>Business Setup</div>
+          <div style="font-size:14px; font-weight:700;"><i class="fa-solid fa-list-check" style="color:var(--warning-text); margin-right:6px;"></i>Business Setup</div>
           <i class="fa-solid fa-chevron-right" style="color:var(--text-tertiary);"></i>
         </div>
         <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">A guided walkthrough of the sections below — see what's configured and what's left.</div>
@@ -1902,7 +1910,7 @@
        display toggling and stays available everywhere. Sits below #auth-gate's z-index:9999, so
        it's naturally hidden until sign-in. No admin gate here — any signed-in user can report
        feedback; only the Settings inbox (see fbInboxRenderShell) is admin-gated. -->
-  <button id="fb-fab" onclick="fbOpenWidget()" aria-label="Send Feedback" title="Send Feedback" style="position:fixed; right:calc(16px + env(safe-area-inset-right)); bottom:calc(16px + env(safe-area-inset-bottom)); z-index:1000; width:52px; height:52px; border-radius:50%; background:var(--accent); color:#fff; border:none; box-shadow:0 2px 8px rgba(0,0,0,0.25); display:flex; align-items:center; justify-content:center; font-size:20px; cursor:pointer;">
+  <button id="fb-fab" onclick="fbOpenWidget()" aria-label="Send Feedback" title="Send Feedback" style="position:fixed; right:calc(16px + env(safe-area-inset-right)); bottom:calc(16px + env(safe-area-inset-bottom)); z-index:1000; width:52px; height:52px; border-radius:50%; background:var(--brand-blue); color:#fff; border:none; box-shadow:0 2px 8px rgba(0,0,0,0.25); display:flex; align-items:center; justify-content:center; font-size:20px; cursor:pointer;">
     <i class="fa-solid fa-comment-dots"></i>
   </button>
   <div id="fb-modal-backdrop" style="display:none; position:fixed; inset:0; z-index:1001; background:rgba(0,0,0,0.4); align-items:center; justify-content:center; padding:1rem;" onclick="if (event.target === this) fbCloseWidget()">
@@ -2362,13 +2370,15 @@ const SETTINGS_GROUPS = [
 
 // ═══════════════════════════════════════ APPEARANCE — ACCENT COLOR ═══════════════════════════════════════
 //
-// One business-wide preset, applied everywhere via the same CSS custom properties every screen
-// already renders through — never per-tile/per-user color picking. A preset only ever touches the
-// accent family of tokens (--accent/--accent-light/--accent-border/--accent-border-rgb), each with
-// its own light- and dark-mode-aware pair; every other token (bg/surface/border/text/warning/info)
-// is untouched. Safe because the whole stylesheet was already confirmed to route through these
-// tokens almost everywhere — the only 2 exceptions (hardcoded focus-ring rgba values) were folded
-// into --accent-border-rgb alongside this feature.
+// A business-wide preset mechanism, applied via the same CSS custom properties (--accent/
+// --accent-light/--accent-border/--accent-border-rgb), each with its own light- and dark-mode-aware
+// pair. As of the Balloon Code visual migration (Step 2), the fixed product shell no longer routes
+// through this family at all — every former call site now points at the new fixed brand tokens
+// (--brand-blue/--brand-seafoam/--brand-surface) or the semantic tokens (--success/--warning/
+// --danger), so Balloon Code's identity no longer depends on a business's accent choice. This
+// mechanism, its Settings UI, and its 6 presets are left fully intact and unused for now, reserved
+// for a future, deliberately-scoped business-personalization surface — never removed, never rewired
+// to the new tokens.
 const ACCENT_PRESETS = {
   green:   { label: 'Green',   light: { accent: '#2d6a4f', accentLight: '#e8f5ee', accentBorder: '#52b788', accentBorderRgb: '82,183,136' },  dark: { accent: '#52b788', accentLight: '#0d2b1e', accentBorder: '#2d6a4f', accentBorderRgb: '45,106,79' } },
   blue:    { label: 'Blue',    light: { accent: '#2f6ca3', accentLight: '#e8f1fb', accentBorder: '#5b9bd9', accentBorderRgb: '91,155,217' },  dark: { accent: '#5b9bd9', accentLight: '#0d1f2e', accentBorder: '#2f6ca3', accentBorderRgb: '47,108,163' } },
@@ -2756,7 +2766,7 @@ function bsRenderShell() {
   <div class="card">
     <div style="font-size:22px; font-weight:700;">${progress.done} of ${progress.total} required areas complete</div>
     <div style="height:8px; border-radius:999px; background:var(--bg); overflow:hidden; margin:10px 0 4px; border:0.5px solid var(--border);">
-      <div style="height:100%; width:${progress.pct}%; background:var(--accent); border-radius:999px;"></div>
+      <div style="height:100%; width:${progress.pct}%; background:var(--brand-blue); border-radius:999px;"></div>
     </div>
     <div style="font-size:12px; color:var(--text-secondary);">${progress.pct}% of required setup — optional areas below don't count against this.</div>
   </div>`;
@@ -4306,7 +4316,7 @@ function irRenderShell() {
     <div class="section-label">Recognized Items</div>
     <div id="ir-recognized">${recognized.length === 0 ? `<div class="card" style="text-align:center; color:var(--text-secondary);">No recognized items.</div>` : recognized.map(i => irItemCardHtml(i)).join('')}</div>
 
-    <div id="ir-save-status" style="text-align:center; font-size:12px; color:var(--accent); min-height:16px; margin-top:0.5rem;"></div>
+    <div id="ir-save-status" style="text-align:center; font-size:12px; color:var(--success-text); min-height:16px; margin-top:0.5rem;"></div>
     <div style="display:flex; gap:8px; margin: 0.5rem 0 1.5rem;">
       <button class="icon-btn" style="flex:1; justify-content:center; padding:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="irSaveDraft()">Save Draft</button>
       <button class="save-btn" style="flex:1;" ${needsReview.length > 0 ? 'disabled' : ''} onclick="irApproveImport()">Approve Import</button>
@@ -4317,7 +4327,7 @@ function irRenderShell() {
 function irStatusBadgeHtml(status) {
   if (status === 'needs_review') return `<span style="background:var(--warning-bg); color:var(--warning-text); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap;">Needs review</span>`;
   if (status === 'ignored') return `<span style="background:var(--bg); color:var(--text-secondary); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap; border:0.5px solid var(--border-strong);">Ignored</span>`;
-  return `<span style="background:var(--accent-light); color:var(--accent); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap;">Mapped</span>`;
+  return `<span style="background:var(--success-bg); color:var(--success-text); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap;">Mapped</span>`;
 }
 
 function irItemCardHtml(item) {
@@ -4450,7 +4460,7 @@ function irColorRowHtml(item, idx, value) {
   if (isNote) {
     statusHtml = `<div style="font-size:11px; color:var(--text-secondary); margin-top:2px;"><i class="fa-solid fa-note-sticky"></i> General note — not inventory-tracked</div>`;
   } else if (resolution.status === 'resolved') {
-    statusHtml = `<div style="font-size:11px; color:var(--accent); margin-top:2px;"><i class="fa-solid fa-check"></i> Matches your Color Library</div>`;
+    statusHtml = `<div style="font-size:11px; color:var(--success-text); margin-top:2px;"><i class="fa-solid fa-check"></i> Matches your Color Library</div>`;
   } else if (text) {
     const suggestions = clSearch(text).slice(0, 4);
     statusHtml = `<div style="font-size:11px; color:var(--warning-text); margin-top:4px;">
@@ -5311,7 +5321,7 @@ function qcRender() {
         <button class="icon-btn" style="align-self:${idx === 0 ? 'flex-end' : 'center'};" onclick="qcRemoveColorRow(${idx})" aria-label="Remove color" ${qcState.colors.length <= 1 ? 'disabled' : ''}><i class="fa-solid fa-trash"></i></button>
       </div>
       <div style="display:flex; align-items:center; gap:10px;">
-        <input type="range" min="0" max="100" step="1" value="${c.pct}" id="qc-color-slider-${idx}" style="flex:1; accent-color: var(--accent);" onpointerdown="qcBeginColorEdit(${idx})" oninput="qcColorPctSlide(${idx}, this.value)" onchange="qcEndColorEdit()">
+        <input type="range" min="0" max="100" step="1" value="${c.pct}" id="qc-color-slider-${idx}" style="flex:1; accent-color: var(--brand-blue);" onpointerdown="qcBeginColorEdit(${idx})" oninput="qcColorPctSlide(${idx}, this.value)" onchange="qcEndColorEdit()">
         <div style="display:flex; align-items:center; gap:2px; flex-shrink:0;">
           <input type="number" min="0" max="100" value="${c.pct}" id="qc-color-num-${idx}" style="width:56px; text-align:right;" onfocus="qcBeginColorEdit(${idx})" oninput="qcColorPctInput(${idx}, this.value)" onblur="qcEndColorEdit()">
           <span style="font-size:13px; color:var(--text-secondary);">%</span>
@@ -6510,11 +6520,11 @@ const INV_SIZE_SHORT = { '5"/7"': '5"', '11"': '11"', '17"/18"': '18"', '24"': '
 // Maps a Production balloon size to the inventory size group it belongs to.
 const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '18"': '17"/18"', '24"': '24"', '36"': '30"/36"' };
 const INV_OPEN_STATUSES = ['Full', 'Partial', 'Empty'];
-// Compact letter + color chip for the quick-view glance — same green/blue convention as the
-// backstock number boxes right above it: green draws the eye on purpose (it means "needs
-// refilling," not "good to go"), blue means fully stocked, gold/yellow sits between the two.
+// Compact letter + color chip for the quick-view glance — same warning/info convention as the
+// backstock number boxes right above it: Empty is a solid warning fill (needs refilling, most
+// urgent), Partial a lighter warning tint, Full uses the calm info-blue (fully stocked).
 const INV_OPEN_STATUS_BADGE = {
-  Empty: { letter: 'E', bg: 'var(--accent-light)', color: 'var(--accent)' },
+  Empty: { letter: 'E', bg: 'var(--warning-text)', color: '#fff' },
   Partial: { letter: 'P', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
   Full: { letter: 'F', bg: 'var(--info-bg)', color: 'var(--info-text)' },
 };
@@ -7869,7 +7879,7 @@ function impRender() {
     html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">Found ${s.parsedRows.length} row${s.parsedRows.length === 1 ? '' : 's'} and ${s.headers.length} column${s.headers.length === 1 ? '' : 's'}. Match each field to a column:</div>`;
     s.spec.fields.forEach(f => {
       html += `<div class="row" style="align-items:center; margin-bottom:0.4rem;">
-        <div style="flex:1; font-size:13px;">${psEscape(f.label)}${f.required ? ' <span style="color:#c0392b;">*</span>' : ''}</div>
+        <div style="flex:1; font-size:13px;">${psEscape(f.label)}${f.required ? ' <span style="color:var(--danger-text);">*</span>' : ''}</div>
         <select style="flex:1;" onchange="impSetMapping('${f.key}', this.value)">
           <option value="-1" ${s.mapping[f.key] === -1 ? 'selected' : ''}>— not mapped —</option>
           ${s.headers.map((h, i) => `<option value="${i}" ${s.mapping[f.key] === i ? 'selected' : ''}>${psEscape(h)}</option>`).join('')}
@@ -7902,7 +7912,7 @@ function impRender() {
       const extraHtml = extra ? `<div style="margin-top:2px;">${extra}</div>` : '';
       let statusCell;
       if (!r.valid) {
-        statusCell = `<td style="padding:5px 8px; color:#c0392b; white-space:nowrap;">${psEscape(r.reason)}</td>`;
+        statusCell = `<td style="padding:5px 8px; color:var(--danger-text); white-space:nowrap;">${psEscape(r.reason)}</td>`;
       } else if (r.dupeInBatch) {
         statusCell = `<td style="padding:5px 8px; white-space:nowrap;"><span style="font-size:11px; color:var(--text-tertiary);">duplicate of an earlier row in this import — will skip</span></td>`;
       } else if (r.existing) {
@@ -7916,7 +7926,7 @@ function impRender() {
           ${extraHtml}
         </td>`;
       } else {
-        statusCell = `<td style="padding:5px 8px; color:var(--accent); white-space:nowrap;">New${extraHtml}</td>`;
+        statusCell = `<td style="padding:5px 8px; color:var(--success-text); white-space:nowrap;">New${extraHtml}</td>`;
       }
       html += `<tr style="border-top:0.5px solid var(--border);">${cells}${statusCell}</tr>`;
     });
@@ -7928,10 +7938,10 @@ function impRender() {
   } else if (s.step === 'results') {
     const r = s.results;
     html += `<div style="font-size:13px; line-height:1.8;">
-      <div><i class="fa-solid fa-circle-check" style="color:var(--accent);"></i> ${r.created} created</div>
-      ${r.updated ? `<div><i class="fa-solid fa-pen" style="color:var(--accent);"></i> ${r.updated} updated</div>` : ''}
+      <div><i class="fa-solid fa-circle-check" style="color:var(--success-text);"></i> ${r.created} created</div>
+      ${r.updated ? `<div><i class="fa-solid fa-pen" style="color:var(--success-text);"></i> ${r.updated} updated</div>` : ''}
       ${r.skipped ? `<div><i class="fa-solid fa-forward" style="color:var(--text-secondary);"></i> ${r.skipped} skipped</div>` : ''}
-      ${r.failed ? `<div><i class="fa-solid fa-triangle-exclamation" style="color:#c0392b;"></i> ${r.failed} failed</div>` : ''}
+      ${r.failed ? `<div><i class="fa-solid fa-triangle-exclamation" style="color:var(--danger-text);"></i> ${r.failed} failed</div>` : ''}
     </div>
     <button class="save-btn" style="margin-top:0.8rem;" onclick="impClose()">Done</button>`;
   }
@@ -8136,12 +8146,12 @@ function invCsvRenderImport() {
       if (r.status === 'error' || r.status === 'unmatched') {
         costCell = `<td style="padding:5px 8px;">${psEscape(r.costRaw)}</td>`;
         perBagCell = `<td style="padding:5px 8px;">${psEscape(r.perBagRaw)}</td>`;
-        statusCell = `<td style="padding:5px 8px; color:${r.status === 'error' ? '#c0392b' : 'var(--text-tertiary)'};">${psEscape(r.reason)}</td>`;
+        statusCell = `<td style="padding:5px 8px; color:${r.status === 'error' ? 'var(--danger-text)' : 'var(--text-tertiary)'};">${psEscape(r.reason)}</td>`;
       } else {
         costCell = `<td style="padding:5px 8px;">${r.oldCost !== r.newCost ? `${r.oldCost} → <strong>${r.newCost}</strong>` : r.oldCost}</td>`;
         perBagCell = `<td style="padding:5px 8px;">${r.oldPerBag !== r.newPerBag ? `${r.oldPerBag} → <strong>${r.newPerBag}</strong>` : r.oldPerBag}</td>`;
         statusCell = r.status === 'changed'
-          ? `<td style="padding:5px 8px; color:var(--accent); font-weight:600;">Changed</td>`
+          ? `<td style="padding:5px 8px; color:var(--success-text); font-weight:600;">Changed</td>`
           : `<td style="padding:5px 8px; color:var(--text-tertiary);">Unchanged</td>`;
       }
       html += `<tr style="border-top:0.5px solid var(--border);"><td style="padding:5px 8px;">${itemCell}</td><td style="padding:5px 8px;">${psEscape(r.size)}</td>${costCell}${perBagCell}${statusCell}</tr>`;
@@ -8152,7 +8162,7 @@ function invCsvRenderImport() {
       <button class="save-btn" id="inv-csv-commit-btn" style="flex:1;" ${changed === 0 ? 'disabled' : ''} onclick="invCsvCommit()">Apply ${changed} change${changed === 1 ? '' : 's'}</button>
     </div>`;
   } else if (s.step === 'results') {
-    html += `<div style="font-size:13px;"><i class="fa-solid fa-circle-check" style="color:var(--accent);"></i> ${s.results.updated} size${s.results.updated === 1 ? '' : 's'} updated across ${s.results.items} color${s.results.items === 1 ? '' : 's'}.</div>
+    html += `<div style="font-size:13px;"><i class="fa-solid fa-circle-check" style="color:var(--success-text);"></i> ${s.results.updated} size${s.results.updated === 1 ? '' : 's'} updated across ${s.results.items} color${s.results.items === 1 ? '' : 's'}.</div>
     <button class="save-btn" style="margin-top:0.8rem;" onclick="invCsvCloseImport()">Done</button>`;
   }
   html += `</div>`;
@@ -9234,8 +9244,8 @@ function invRenderBatchRoot() {
             <button class="icon-btn" style="padding:4px;" onclick="invBatchRemoveRow('${r.itemId}','${invAttr(r.size)}')"><i class="fa-solid fa-xmark"></i></button>
           </div>
           <div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
-            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${!inBalloons ? 'var(--accent-border)' : 'var(--border-strong)'}; ${!inBalloons ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','bags')">Bags</button>
-            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${inBalloons ? 'var(--accent-border)' : 'var(--border-strong)'}; ${inBalloons ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','balloons')">Individual Balloons</button>
+            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${!inBalloons ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${!inBalloons ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','bags')">Bags</button>
+            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${inBalloons ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${inBalloons ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="invBatchSetQtyUnit('${r.itemId}','${invAttr(r.size)}','balloons')">Individual Balloons</button>
             ${conversionNote}
           </div>
         </div>`;
@@ -9272,7 +9282,7 @@ function invRenderBatchSearchResults() {
       <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">
         ${INV_SIZES.map(size => {
           const active = invBatch.rows.some(r => r.itemId === item.id && r.size === size);
-          return `<button class="icon-btn" style="width:auto; padding:4px 8px; font-size:11px; border-radius:999px; border:0.5px solid ${active ? 'var(--accent-border)' : 'var(--border-strong)'}; ${active ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invBatchToggleRow('${item.id}','${invAttr(size)}','${invAttr(item.color)}','${invAttr(item.brand || '')}')">${INV_SIZE_SHORT[size]}</button>`;
+          return `<button class="icon-btn" style="width:auto; padding:4px 8px; font-size:11px; border-radius:999px; border:0.5px solid ${active ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${active ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="invBatchToggleRow('${item.id}','${invAttr(size)}','${invAttr(item.color)}','${invAttr(item.brand || '')}')">${INV_SIZE_SHORT[size]}</button>`;
         }).join('')}
       </div>
     </div>`).join('');
@@ -9416,8 +9426,8 @@ function invRenderAdjustRoot() {
       <div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.6rem;">${psEscape(item.color)} ${psEscape(item.brand || '')} — ${psEscape(size)}</div>
       <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.4rem;">BBT currently says: <b style="color:var(--text);">${invFmtQty(current)} ${invUnitLabel()}</b>${currentLoose ? ` + <b style="color:var(--text);">${currentLoose} loose balloon${currentLoose === 1 ? '' : 's'}</b>` : ''}</div>
       <div style="display:flex; align-items:center; gap:8px; margin-bottom:0.4rem;">
-        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${unit !== 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${unit !== 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invAdjustSetQtyUnit('bags')">Bags</button>
-        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${unit === 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${unit === 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invAdjustSetQtyUnit('balloons')">Individual Balloons</button>
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${unit !== 'balloons' ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${unit !== 'balloons' ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="invAdjustSetQtyUnit('bags')">Bags</button>
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${unit === 'balloons' ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${unit === 'balloons' ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="invAdjustSetQtyUnit('balloons')">Individual Balloons</button>
       </div>
       <div class="settings-field" style="margin-bottom:0.4rem;"><label>${unit === 'balloons' ? 'Actual balloons counted (total)' : 'Actual quantity counted'}</label><input type="number" step="0.01" min="0" id="inv-adjust-actual" placeholder="e.g. ${current}" oninput="invAdjustPreview(this.value)"></div>
       <div id="inv-adjust-preview" style="font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;"></div>
@@ -9767,10 +9777,10 @@ function invRenderLatex() {
   // the first thing on the screen, and visually different per mode, so nobody is ever unsure
   // which one they're in before they start tapping around.
   const editing = invMode === 'edit';
-  html += `<div class="card" style="background:${editing ? 'var(--accent-light)' : 'var(--surface)'}; border-color:${editing ? 'var(--accent-border)' : 'var(--border)'};">
+  html += `<div class="card" style="background:${editing ? 'var(--brand-surface)' : 'var(--surface)'}; border-color:${editing ? 'var(--brand-seafoam)' : 'var(--border)'};">
     <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
       <div>
-        <div style="font-size:15px; font-weight:700; color:${editing ? 'var(--accent)' : 'var(--text)'};">${editing ? 'Editing mode' : 'Viewing stock'}</div>
+        <div style="font-size:15px; font-weight:700; color:${editing ? 'var(--brand-seafoam)' : 'var(--text)'};">${editing ? 'Editing mode' : 'Viewing stock'}</div>
         <div style="font-size:12px; color:var(--text-secondary);">${editing ? "Counts you enter save right away — everyone's screen updates too." : 'Switch to Editing to record a count.'}</div>
       </div>
       <button class="save-btn" style="width:auto; padding:9px 16px; flex-shrink:0; ${editing ? 'background:var(--text-secondary);' : ''}" onclick="invSetMode('${editing ? 'view' : 'edit'}')">${editing ? 'Done counting' : 'Start Editing'}</button>
@@ -10461,8 +10471,8 @@ function rcClassifyEntry(entry) {
 }
 const RC_STATUS_META = {
   linked: { label: 'Already linked', bg: 'transparent', color: 'var(--text-tertiary)' },
-  'auto-exact': { label: 'Will auto-link — exact match', bg: 'var(--accent-light)', color: 'var(--accent)' },
-  'auto-alias': { label: 'Will auto-link — Master alias match', bg: 'var(--accent-light)', color: 'var(--accent)' },
+  'auto-exact': { label: 'Will auto-link — exact match', bg: 'var(--success-bg)', color: 'var(--success-text)' },
+  'auto-alias': { label: 'Will auto-link — Master alias match', bg: 'var(--success-bg)', color: 'var(--success-text)' },
   'review-business-alias': { label: 'Needs review — your alias only', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
   'review-fuzzy': { label: 'Needs review — close match', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
   'review-multiple': { label: 'Needs review — multiple candidates', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
@@ -10620,7 +10630,7 @@ function rcRowHtml(row) {
     const master = MASTER_COLORS.find(c => c.id === row.chosenMasterColorId);
     const mfr = master && mstFindManufacturer(master.manufacturerId);
     const willLink = row.reviewAction === 'link';
-    html += `<div style="font-size:12px; color:${willLink ? 'var(--accent)' : 'var(--text-tertiary)'}; margin-top:4px;">${willLink ? '✓ Would link to' : 'Turned off — would stay unlinked from'} ${mfr ? psEscape(mfr.name) + ' ' : ''}${master ? psEscape(master.colorName) : ''}</div>`;
+    html += `<div style="font-size:12px; color:${willLink ? 'var(--success-text)' : 'var(--text-tertiary)'}; margin-top:4px;">${willLink ? '✓ Would link to' : 'Turned off — would stay unlinked from'} ${mfr ? psEscape(mfr.name) + ' ' : ''}${master ? psEscape(master.colorName) : ''}</div>`;
     html += `<button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; margin-top:6px;" onclick="rcSetReviewAction('${entry.id}','${willLink ? 'keep-separate' : 'link'}')">${willLink ? "Don't link this one" : 'Link after all'}</button>`;
   } else if (rcIsReviewStatus(row.status)) {
     const candidateLabels = row.candidates.map(id => {
@@ -10632,7 +10642,7 @@ function rcRowHtml(row) {
     if (row.reviewAction === 'link') {
       const chosen = MASTER_COLORS.find(c => c.id === row.chosenMasterColorId);
       const chosenMfr = chosen && mstFindManufacturer(chosen.manufacturerId);
-      html += `<div style="font-size:12px; color:var(--accent); margin-top:4px;">✓ Would link to ${chosenMfr ? psEscape(chosenMfr.name) + ' ' : ''}${chosen ? psEscape(chosen.colorName) : ''}</div>`;
+      html += `<div style="font-size:12px; color:var(--success-text); margin-top:4px;">✓ Would link to ${chosenMfr ? psEscape(chosenMfr.name) + ' ' : ''}${chosen ? psEscape(chosen.colorName) : ''}</div>`;
     } else if (row.reviewAction === 'keep-separate') {
       html += `<div style="font-size:12px; color:var(--text-tertiary); margin-top:4px;">Kept separate — would remain an unlinked custom color.</div>`;
     }
@@ -10674,7 +10684,7 @@ function rcRenderPreview() {
       ['Needs review', counts.needsReview, 'needs-review'],
       ['Unmatched / custom', counts.unmatched, 'unmatched'],
       ['Already linked', counts.linked, 'linked'],
-    ].map(([label, n, filterKey]) => `<button class="icon-btn" style="text-align:left; padding:8px; border:0.5px solid ${rcPreviewFilter === filterKey ? 'var(--accent)' : 'var(--border-strong)'};" onclick="rcSetPreviewFilter('${filterKey}')">
+    ].map(([label, n, filterKey]) => `<button class="icon-btn" style="text-align:left; padding:8px; border:0.5px solid ${rcPreviewFilter === filterKey ? 'var(--brand-seafoam)' : 'var(--border-strong)'};" onclick="rcSetPreviewFilter('${filterKey}')">
       <div style="font-size:18px; font-weight:700;">${n}</div>
       <div style="font-size:10px; color:var(--text-secondary);">${label}</div>
     </button>`).join('')}
@@ -11042,10 +11052,10 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
     ${INV_SIZES.map(size => `<div style="text-align:center; font-size:9px; font-weight:600; color:var(--text-tertiary);">${INV_SIZE_SHORT[size]}</div>`).join('')}
     ${INV_SIZES.map(size => {
       const sd = item.sizes[size];
-      // Green draws the eye on purpose — it means "needs ordering" here, not "good to go."
+      // Warning-colored on purpose when zero — it means "needs ordering," not "good to go."
       const needsOrder = (sd.backstock || 0) === 0;
-      const bg = needsOrder ? 'var(--accent-light)' : 'var(--info-bg)';
-      const color = needsOrder ? 'var(--accent)' : 'var(--info-text)';
+      const bg = needsOrder ? 'var(--warning-bg)' : 'var(--info-bg)';
+      const color = needsOrder ? 'var(--warning-text)' : 'var(--info-text)';
       return `<div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:1px 2px; background:${bg}; color:${color};">${sd.backstock || 0}</div>`;
     }).join('')}
     ${INV_SIZES.map(size => {
@@ -11084,8 +11094,8 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
     if (invAdminUnlocked) {
       html += `<div style="display:flex; align-items:center; gap:8px; margin:0.75rem 0 0; flex-wrap:wrap;">
         <span style="font-size:11px; color:var(--text-secondary);">Category:</span>
-        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border-radius:999px; border:0.5px solid ${tier === 'main' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${tier === 'main' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invSetTier('${item.id}','main')">Main</button>
-        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border-radius:999px; border:0.5px solid ${tier === 'misc' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${tier === 'misc' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="invSetTier('${item.id}','misc')">Misc</button>
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border-radius:999px; border:0.5px solid ${tier === 'main' ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${tier === 'main' ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="invSetTier('${item.id}','main')">Main</button>
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border-radius:999px; border:0.5px solid ${tier === 'misc' ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${tier === 'misc' ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="invSetTier('${item.id}','misc')">Misc</button>
         <span style="flex:1;"></span>
         <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invToggleActive('${item.id}')">${isActive ? 'Deactivate' : 'Reactivate'}</button>
         <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
@@ -11144,7 +11154,7 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
         // way to be marked counted, since no change event fires when nothing was typed.
         if (invBaseline.status === 'in_progress') {
           html += invSizeCountedThisSession(item.id, size)
-            ? `<div style="margin-top:0.4rem; font-size:11px; color:var(--accent); font-weight:600;"><i class="fa-solid fa-circle-check"></i> Counted</div>`
+            ? `<div style="margin-top:0.4rem; font-size:11px; color:var(--success-text); font-weight:600;"><i class="fa-solid fa-circle-check"></i> Counted</div>`
             : `<div style="margin-top:0.4rem;"><button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invConfirmBaselineCount('${item.id}','${invAttr(size)}')">Confirm count as shown</button></div>`;
         }
       } else {
@@ -12155,8 +12165,8 @@ function spAddFormHtml() {
       </div>
     </div>
     <div style="display:flex; align-items:center; gap:8px; margin:-0.4rem 0 0.75rem;">
-      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${d.backstockUnit !== 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${d.backstockUnit !== 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="spSetDraftField('backstockUnit','bags')">Bags</button>
-      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${d.backstockUnit === 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${d.backstockUnit === 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="spSetDraftField('backstockUnit','balloons')">Individual Balloons</button>
+      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${d.backstockUnit !== 'balloons' ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${d.backstockUnit !== 'balloons' ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="spSetDraftField('backstockUnit','bags')">Bags</button>
+      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${d.backstockUnit === 'balloons' ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${d.backstockUnit === 'balloons' ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="spSetDraftField('backstockUnit','balloons')">Individual Balloons</button>
     </div>
     <button class="save-btn" onclick="spSubmitAdd()">Save item</button>
   </div>`;
@@ -12171,7 +12181,7 @@ function spItemCardHtml(item) {
       <div class="inv-color-row-name">${psEscape(item.color || '(no color)')}${subtitle ? ` <span style="font-size:12px; font-weight:400; color:var(--text-secondary);">${psEscape(subtitle)}</span>` : ''}</div>
       <div class="inv-color-row-brand">${psEscape(item.brand || 'Generic/Unknown')}</div>
     </div>
-    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.backstock || 0) === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${(item.backstock || 0) === 0 ? 'var(--accent)' : 'var(--info-text)'};">${item.backstock || 0}</div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.backstock || 0) === 0 ? 'var(--warning-bg)' : 'var(--info-bg)'}; color:${(item.backstock || 0) === 0 ? 'var(--warning-text)' : 'var(--info-text)'};">${item.backstock || 0}</div>
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
   </div>`;
   if (expanded) {
@@ -12197,8 +12207,8 @@ function spItemCardHtml(item) {
         <div class="settings-field" style="margin-bottom:0"><label>Balloons/bag</label><input type="number" min="1" value="${item.perBag || 100}" onchange="spUpdateField('${item.id}','perBag',this.value)"></div>
       </div>`;
       html += `<div style="display:flex; align-items:center; gap:8px; margin:-0.4rem 0 0.6rem;">
-        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${qtyUnit !== 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${qtyUnit !== 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="spSetQtyUnitFor('${item.id}','bags')">Bags</button>
-        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${qtyUnit === 'balloons' ? 'var(--accent-border)' : 'var(--border-strong)'}; ${qtyUnit === 'balloons' ? 'background:var(--accent-light); color:var(--accent);' : ''}" onclick="spSetQtyUnitFor('${item.id}','balloons')">Individual Balloons</button>
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${qtyUnit !== 'balloons' ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${qtyUnit !== 'balloons' ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="spSetQtyUnitFor('${item.id}','bags')">Bags</button>
+        <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:10px; border-radius:999px; border:0.5px solid ${qtyUnit === 'balloons' ? 'var(--brand-seafoam)' : 'var(--border-strong)'}; ${qtyUnit === 'balloons' ? 'background:var(--brand-surface); color:var(--brand-seafoam);' : ''}" onclick="spSetQtyUnitFor('${item.id}','balloons')">Individual Balloons</button>
       </div>`;
       if (item.looseBalloons) html += `<div style="font-size:11px; color:var(--text-secondary); margin-bottom:0.5rem;"><i class="fa-solid fa-circle-half-stroke"></i> ${item.looseBalloons} loose balloon${item.looseBalloons === 1 ? '' : 's'} on hand (partial bag)</div>`;
     }
@@ -13091,7 +13101,7 @@ function foilItemCardHtml(item) {
   let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
   html += `<div class="ps-job-body" style="padding-top:0.6rem;">`;
   html += `<div style="display:flex; justify-content:flex-end; margin-bottom:0.5rem;">
-    <div style="font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${total === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${total === 0 ? 'var(--accent)' : 'var(--info-text)'};">Total: ${total}</div>
+    <div style="font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${total === 0 ? 'var(--warning-bg)' : 'var(--info-bg)'}; color:${total === 0 ? 'var(--warning-text)' : 'var(--info-text)'};">Total: ${total}</div>
   </div>`;
   html += `<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(52px, 1fr)); gap:6px; margin-bottom:0.75rem;">
     ${chars.map(c => `<div style="text-align:center;">
@@ -13386,7 +13396,7 @@ function foilPhraseVariantCardHtml(item) {
       <div class="inv-color-row-name">${psEscape(summary || '(no size/color/brand yet)')}</div>
       ${item.styleNotes ? `<div class="inv-color-row-brand">${psEscape(item.styleNotes)}</div>` : ''}
     </div>
-    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.quantity || 0) === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${(item.quantity || 0) === 0 ? 'var(--accent)' : 'var(--info-text)'};">${item.quantity || 0}</div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.quantity || 0) === 0 ? 'var(--warning-bg)' : 'var(--info-bg)'}; color:${(item.quantity || 0) === 0 ? 'var(--warning-text)' : 'var(--info-text)'};">${item.quantity || 0}</div>
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
   </div>`;
   if (expanded) {
@@ -14021,7 +14031,7 @@ function foilDecoratorItemCardHtml(item) {
       <div class="inv-color-row-name">${psEscape(item.color)} ${item.condition === 'inflated' ? '<span style="font-size:11px; font-weight:600; color:var(--info-text);">(Inflated)</span>' : ''}</div>
       <div class="inv-color-row-brand">${psEscape(item.brand || 'Generic/Unknown')}${item.storageLocation ? ' · ' + psEscape(item.storageLocation) : ''}</div>
     </div>
-    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${isZero ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${isZero ? 'var(--accent)' : 'var(--info-text)'};">${displayQty}</div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${isZero ? 'var(--warning-bg)' : 'var(--info-bg)'}; color:${isZero ? 'var(--warning-text)' : 'var(--info-text)'};">${displayQty}</div>
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
   </div>`;
   if (expanded) {
@@ -14794,7 +14804,7 @@ function invxItemCardHtml(item) {
       <div class="inv-color-row-name">${psEscape(headerName)}</div>
       ${subtitle ? `<div class="inv-color-row-brand">${psEscape(subtitle)}</div>` : ''}
     </div>
-    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${isZero ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${isZero ? 'var(--accent)' : 'var(--info-text)'};">${psEscape(String(displayQty))}</div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${isZero ? 'var(--warning-bg)' : 'var(--info-bg)'}; color:${isZero ? 'var(--warning-text)' : 'var(--info-text)'};">${psEscape(String(displayQty))}</div>
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
   </div>`;
   if (expanded) {
@@ -15271,7 +15281,7 @@ function assetsItemCardHtml(item) {
       <div class="inv-color-row-name">${psEscape(item.name)}</div>
       ${subtitle ? `<div class="inv-color-row-brand">${psEscape(subtitle)}</div>` : ''}
     </div>
-    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.quantity || 0) === 0 ? 'var(--accent-light)' : 'var(--info-bg)'}; color:${(item.quantity || 0) === 0 ? 'var(--accent)' : 'var(--info-text)'};">${item.quantity || 0}</div>
+    <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${(item.quantity || 0) === 0 ? 'var(--warning-bg)' : 'var(--info-bg)'}; color:${(item.quantity || 0) === 0 ? 'var(--warning-text)' : 'var(--info-text)'};">${item.quantity || 0}</div>
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
   </div>`;
   if (expanded) {
@@ -15755,7 +15765,7 @@ function fbTypeLabel(type) { return (FEEDBACK_TYPES.find(t => t.value === type) 
 const FEEDBACK_STATUS_BADGE = {
   new: { label: 'New', bg: 'var(--warning-bg)', color: 'var(--warning-text)' },
   reviewed: { label: 'Reviewed', bg: 'var(--info-bg)', color: 'var(--info-text)' },
-  resolved: { label: 'Resolved', bg: 'var(--accent-light)', color: 'var(--accent)' },
+  resolved: { label: 'Resolved', bg: 'var(--success-bg)', color: 'var(--success-text)' },
 };
 function psNewFeedbackId() { return 'feedback_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 function fbStartListeners() {
@@ -15898,7 +15908,7 @@ function fbRenderWidget() {
   backdrop.style.display = 'flex';
   if (fbShowingSuccess) {
     root.innerHTML = `<div class="card" style="text-align:center; padding:2rem 1.5rem;">
-      <i class="fa-solid fa-circle-check" style="font-size:32px; color:var(--accent); margin-bottom:0.75rem; display:block;"></i>
+      <i class="fa-solid fa-circle-check" style="font-size:32px; color:var(--success-text); margin-bottom:0.75rem; display:block;"></i>
       <strong>Thanks — feedback sent!</strong>
     </div>`;
     return;
@@ -16602,7 +16612,7 @@ function letStyleCardHtml(title, r, noteHtml) {
   html += `<div style="font-size:12px; color:var(--text-secondary); border-top:0.5px solid var(--border); padding-top:6px;">
     <div>Min sale price (no foil): <b style="color:var(--text);">${letFmtMoney(r.minSale)}</b></div>
     <div>Additional foil price: <b style="color:var(--text);">${letFmtMoney(r.foilPrice)}</b></div>
-    <div>Sale price with foil: <b style="color:var(--accent);">${letFmtMoney(r.withFoil)}</b></div>
+    <div>Sale price with foil: <b style="color:var(--brand-seafoam);">${letFmtMoney(r.withFoil)}</b></div>
   </div>`;
   if (noteHtml) html += `<div style="font-size:11px; color:var(--text-tertiary); margin-top:6px; font-style:italic;">${noteHtml}</div>`;
   html += `</div>`;
@@ -16890,7 +16900,7 @@ function jccRenderShell() {
       </div>
 
       <div class="jcc-summary-row"><span>Total labor time</span><b id="jcc-labor-time">0 min</b></div>
-      <div class="jcc-summary-row" style="font-size:15px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total labor cost</span><b id="jcc-labor-cost" style="color:var(--accent);">$0.00</b></div>
+      <div class="jcc-summary-row" style="font-size:15px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total labor cost</span><b id="jcc-labor-cost" style="color:var(--brand-seafoam);">$0.00</b></div>
     </div>
 
     <div class="section-label">Calculation totals</div>
@@ -16902,15 +16912,15 @@ function jccRenderShell() {
       </div>
       <div class="jcc-summary-row" style="font-size:14px; border-top:0.5px solid var(--border); padding-top:8px;">
         <span>Retail — Core <span style="font-size:11px; color:var(--text-secondary);">×<input type="text" inputmode="decimal" class="jcc-plain-input" value="${s.coreMultiplier}" onchange="jccUpdateMultiplier('coreMultiplier', this.value)"></span></span>
-        <b id="jcc-retail-core" style="color:var(--accent);">$0.00</b>
+        <b id="jcc-retail-core" style="color:var(--brand-seafoam);">$0.00</b>
       </div>
       <div class="jcc-summary-row" style="font-size:14px;">
         <span>Retail — Complex <span style="font-size:11px; color:var(--text-secondary);">×<input type="text" inputmode="decimal" class="jcc-plain-input" value="${s.complexMultiplier}" onchange="jccUpdateMultiplier('complexMultiplier', this.value)"></span></span>
-        <b id="jcc-retail-complex" style="color:var(--accent);">$0.00</b>
+        <b id="jcc-retail-complex" style="color:var(--brand-seafoam);">$0.00</b>
       </div>
       <div class="jcc-summary-row" style="font-size:14px;">
         <span>Retail — Premium <span style="font-size:11px; color:var(--text-secondary);">×<input type="text" inputmode="decimal" class="jcc-plain-input" value="${s.premiumMultiplier}" onchange="jccUpdateMultiplier('premiumMultiplier', this.value)"></span></span>
-        <b id="jcc-retail-premium" style="color:var(--accent);">$0.00</b>
+        <b id="jcc-retail-premium" style="color:var(--brand-seafoam);">$0.00</b>
       </div>
     </div>
 
@@ -17029,7 +17039,7 @@ function jccToggleCsvImportSection() {
 // sample materials, or clear them out and import a real list instead. Shown above the collapsed
 // header itself, not nested inside it, so it's impossible to miss on a first visit.
 function jccSetupChoiceHtml() {
-  return `<div class="card" style="margin-bottom:0.75rem; border:0.5px solid var(--accent-border);">
+  return `<div class="card" style="margin-bottom:0.75rem; border:0.5px solid var(--brand-seafoam);">
     <div style="font-size:13px; font-weight:600; margin-bottom:4px;">Materials: use the built-in list, or your own?</div>
     <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px;">This catalog starts with 55 common balloon-business materials and sample costs already in it. Use those as a starting point, or clear them out and import your own from a CSV/spreadsheet instead.</div>
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -17082,7 +17092,7 @@ function jccRenderRows() {
     </div>
     <div class="jcc-summary-row" style="border-top:0.5px solid var(--border); margin-top:6px; padding-top:8px;"><span>Material cost</span><b id="jcc-material-cost">$0.00</b></div>
     <div class="jcc-summary-row" style="color:var(--text-secondary);"><span>Consumables / waste <input type="number" step="0.1" min="0" class="jcc-inline-input" value="${jccState.consumablesPct}" onchange="jccUpdateConsumablesPct(this.value)">%</span><b id="jcc-consumables-amt">$0.00</b></div>
-    <div class="jcc-summary-row" style="font-size:14px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total material cost</span><b id="jcc-total-material-cost" style="color:var(--accent);">$0.00</b></div>
+    <div class="jcc-summary-row" style="font-size:14px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total material cost</span><b id="jcc-total-material-cost" style="color:var(--brand-seafoam);">$0.00</b></div>
   </div>`;
   jccRecalcTotals();
 }
@@ -17599,7 +17609,7 @@ function heRenderShell() {
   root.innerHTML = `
     <div class="section-label" style="margin-top:0">Cost per cubic foot</div>
     <div class="card">
-      <div class="jcc-summary-row" style="font-size:15px;"><span>Current rate</span><b style="color:var(--accent);">${jccFmtMoney(t.costPerCuFt)}</b></div>
+      <div class="jcc-summary-row" style="font-size:15px;"><span>Current rate</span><b style="color:var(--brand-seafoam);">${jccFmtMoney(t.costPerCuFt)}</b></div>
     </div>
 
     <div class="section-label">Latex Balloon Sizes</div>
@@ -17635,7 +17645,7 @@ function heRenderSettingsSection() {
       <div class="jcc-summary-row" style="color:var(--text-secondary);"><span>Tax</span><b>${jccFmtMoney(t.tax)}</b></div>
       <div class="jcc-summary-row" style="color:var(--text-secondary);"><span>+ Rental</span><b>${jccFmtMoney(HE_STATE.rentalPerMonth)}</b></div>
       <div class="jcc-summary-row" style="font-size:14px; border-top:0.5px solid var(--border); padding-top:8px;"><span>Total</span><b>${jccFmtMoney(t.total)}</b></div>
-      <div class="jcc-summary-row" style="font-size:15px;"><span>Cost per cu ft</span><b style="color:var(--accent);">${jccFmtMoney(t.costPerCuFt)}</b></div>
+      <div class="jcc-summary-row" style="font-size:15px;"><span>Cost per cu ft</span><b style="color:var(--brand-seafoam);">${jccFmtMoney(t.costPerCuFt)}</b></div>
       <div style="display:flex; align-items:center; justify-content:space-between; margin-top:8px; padding-top:8px; border-top:0.5px solid var(--border);">
         <div style="font-size:12px; color:var(--text-secondary);"><i class="fa-solid fa-${invAdminUnlocked ? 'lock-open' : 'lock'}"></i> ${invAdminUnlocked ? 'Costs unlocked' : 'Costs locked'}</div>
         ${invAdminUnlocked
