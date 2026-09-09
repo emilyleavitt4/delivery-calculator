@@ -3279,6 +3279,28 @@ function psLineBalloonColors(line) {
   return (line.colors || []).filter(c => !notes.has(c.trim().toLowerCase()));
 }
 
+// A job-only override of one or more sizes' calculated balloon count — e.g. this specific column
+// should use fewer 18"s and a few extra 5" accents than the template's formula would otherwise
+// produce, without touching the shared template or any other job using it. Deliberately a direct
+// per-size count override (not a percentage/proportional split like colorDist) — the calculated
+// number stays the real design requirement per size, and a business only ever types the one
+// number that actually needs to change, matching how customLinear already lets a job override one
+// number without disturbing the rest of the formula. Applied AFTER the formula computes totals,
+// BEFORE colorDist splits each size's count across colors, so an overridden size still divides by
+// color normally. A size can be overridden to 0 (removed entirely for this job) or added even if
+// the template's formula wouldn't otherwise produce that size at all (e.g. accent balloons).
+function psApplySizeOverride(totals, line) {
+  if (!line.sizeOverride) return totals;
+  const out = Object.assign({}, totals);
+  Object.keys(line.sizeOverride).forEach(size => {
+    const v = line.sizeOverride[size];
+    if (!Number.isFinite(v)) return;
+    if (v > 0) out[size] = v;
+    else delete out[size];
+  });
+  return out;
+}
+
 // The known calculation families. Deliberately a small, code-level registry rather than a
 // free-text or user-authored formula — each kind corresponds to a real branch in psComputeTotals
 // below, so a value here without matching calculation logic would just be a fake-looking option
@@ -4915,6 +4937,15 @@ function psRenderProductionJobs() {
 function psLineRecipe(line) {
   return line.customRecipe || RECIPES.find(x => x.id === line.recipeId);
 }
+// A job-specific display name for one production line, overriding the template's own name
+// wherever THIS item is shown (Production's Pull section and Inflate & Build, and the
+// formulaInvalid row it can generate in Review & Pull) — never the template's own name itself,
+// so renaming one job's "Classic Column" to "Ceremony Arch Backdrop" never touches the shared
+// template or any other job using it. Blank/unset falls back to the template's display name
+// exactly as every job already showed before this field existed.
+function psLineLabel(line, recipe) {
+  return (line.itemLabel && line.itemLabel.trim()) || recipe.display;
+}
 // The actual footage typed in for this line — never a static per-template string, since size
 // is entered per job now, not stored on the template. Checks line.customLinear first (how
 // Production's "Add an item" and Import Review both store it); Quantity Calculator's "Custom
@@ -4937,11 +4968,31 @@ function psLineFootageText(line, r) {
 // location/topper — see psStartEditItem below).
 let psColorDraftStore = {};
 let psEditingItemKey = null;
+// Parallel to psColorDraftStore, aligned 1:1 by index with the SAME key's color draft array
+// (never keyed by name — a color can be mid-rename while its percentage is being dragged, so
+// position is the only stable link during an edit). Each entry is {pct} — the color's own name
+// comes from psColorDraftStore at render/save time, never duplicated here. Only meaningful once a
+// line has 2+ colors (see psColorDistEditorHtml); reuses the exact proportional-rescale algorithm
+// the Quantity Calculator's own color sliders use (distScaleToSum/distApplyPct/
+// distDistributeEvenly) rather than a second, independently-maintained copy of that math.
+let psDistDraftStore = {};
+let psDistDragBaseline = null;
 
 function psColorDraftKey(jobId, idx) { return jobId + '|' + (idx === undefined ? 'new' : idx); }
 function psGetColorDraft(key, fallback) {
   if (!psColorDraftStore[key]) psColorDraftStore[key] = (fallback && fallback.length) ? [...fallback] : [''];
   return psColorDraftStore[key];
+}
+// Seeds a fresh dist draft for a line entering edit mode: carries over its existing colorDist
+// percentages when they still line up 1:1 with its current colors (the normal case), otherwise
+// starts even — matching qcState.colors' own "reset to even" default for a newly added color.
+function psInitDistDraft(line) {
+  if (line.colorDist && line.colorDist.length === line.colors.length) {
+    return line.colorDist.map(cd => ({ pct: cd.pct }));
+  }
+  const draft = line.colors.map(() => ({ pct: 0 }));
+  distDistributeEvenly(draft);
+  return draft;
 }
 // Adding/removing a color row triggers a full psRenderProductionJobs(), which would otherwise
 // reset the rest of the still-open "Add an item" form (item/qty/design/location) back to
@@ -4965,16 +5016,116 @@ function psWithFormPreserved(key, renderFn) {
 }
 function psAddColorDraftRow(key) {
   psGetColorDraft(key).push('');
+  // Only keep the dist draft in step if it's actually in play (2+ colors already, i.e. the
+  // distribution editor is visible) — the "Add an item" form's brand-new-item color picker never
+  // has one, and doesn't need one until the item exists to edit.
+  if (psDistDraftStore[key]) {
+    psDistDraftStore[key].push({ pct: 0 });
+    distDistributeEvenly(psDistDraftStore[key]);
+  }
   psWithFormPreserved(key, psRenderProductionJobs);
 }
 function psRemoveColorDraftRow(key, idx) {
   const draft = psGetColorDraft(key);
   draft.splice(idx, 1);
   if (draft.length === 0) draft.push('');
+  const dist = psDistDraftStore[key];
+  if (dist) {
+    dist.splice(idx, 1);
+    if (dist.length > 0) distScaleToSum(dist, 100);
+  }
   psWithFormPreserved(key, psRenderProductionJobs);
 }
 function psUpdateColorDraftRow(key, idx, value) {
   psGetColorDraft(key)[idx] = value; // no re-render — keeps focus/suggestions working while typing
+}
+// ─── Per-job color-distribution editor (Production's own line-item Edit mode) ───
+//
+// Reuses the exact slider mechanics the Quantity Calculator built (distApplyPct/distScaleToSum/
+// distDistributeEvenly, drag-baseline anti-drift and all) rather than a second implementation —
+// only the storage differs, since Production can have several items each mid-edit-key rather than
+// one singleton qcState.
+function psDistBeginEdit(key, idx) {
+  const items = psDistDraftStore[key];
+  if (!items) return;
+  psDistDragBaseline = { key, idx, items: items.map(c => ({ pct: c.pct })) };
+}
+function psDistEndEdit() { psDistDragBaseline = null; }
+function psDistApplyPct(key, idx, rawVal) {
+  const items = psDistDraftStore[key];
+  if (!items) return;
+  if (!psDistDragBaseline || psDistDragBaseline.key !== key || psDistDragBaseline.idx !== idx) psDistBeginEdit(key, idx);
+  distApplyPct(items, psDistDragBaseline.items, idx, rawVal);
+  psDistSyncInputs(key);
+}
+// Writes current percentages straight into the slider/number DOM (no re-render), matching
+// qcSyncColorInputs — keeps a drag smooth and keeps focus in the field being typed into.
+function psDistSyncInputs(key) {
+  const sanitizedKey = key.replace(/\|/g, '-');
+  const items = psDistDraftStore[key] || [];
+  items.forEach((c, idx) => {
+    const slider = document.getElementById('pi-dist-slider-' + sanitizedKey + '-' + idx);
+    const num = document.getElementById('pi-dist-num-' + sanitizedKey + '-' + idx);
+    if (slider) slider.value = c.pct;
+    if (num) num.value = c.pct;
+  });
+  const totalEl = document.getElementById('pi-dist-total-' + sanitizedKey);
+  if (totalEl) {
+    const sum = items.reduce((s, c) => s + (c.pct || 0), 0);
+    totalEl.textContent = sum + '%';
+    totalEl.style.color = sum === 100 ? 'var(--text-secondary)' : 'var(--warning-text)';
+  }
+}
+function psDistDistributeEvenly(key) {
+  const items = psDistDraftStore[key];
+  if (!items) return;
+  distDistributeEvenly(items);
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
+// Only meaningful with 2+ colors — a single color always gets 100% of every size, exactly like
+// Production's default (no colorDist) behavior already assumes.
+function psColorDistEditorHtml(key) {
+  const draft = psColorDraftStore[key] || [];
+  const dist = psDistDraftStore[key];
+  if (draft.length <= 1 || !dist || dist.length !== draft.length) return '';
+  const sanitizedKey = key.replace(/\|/g, '-');
+  let html = `<div class="settings-field"><label>Color distribution <span style="font-weight:400;">(optional — overrides the default equal split for this job only)</span></label>`;
+  draft.forEach((name, idx) => {
+    const pct = dist[idx] ? dist[idx].pct : 0;
+    html += `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+      <div style="flex:0 0 100px; font-size:12px; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${invAttr(name)}">${psEscape(name || 'Color ' + (idx + 1))}</div>
+      <input type="range" min="0" max="100" step="1" value="${pct}" id="pi-dist-slider-${sanitizedKey}-${idx}" style="flex:1; accent-color: var(--brand-blue);" onpointerdown="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onchange="psDistEndEdit()">
+      <div style="display:flex; align-items:center; gap:2px; flex-shrink:0;">
+        <input type="number" min="0" max="100" value="${pct}" id="pi-dist-num-${sanitizedKey}-${idx}" style="width:52px; text-align:right;" onfocus="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onblur="psDistEndEdit()">
+        <span style="font-size:12px; color:var(--text-secondary);">%</span>
+      </div>
+    </div>`;
+  });
+  html += `<div style="display:flex; justify-content:space-between; align-items:center;">
+    <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px;" onclick="psDistDistributeEvenly('${key}')"><i class="fa-solid fa-scale-balanced"></i> Distribute evenly</button>
+    <span style="font-size:12px; color:var(--text-secondary);">Total: <span id="pi-dist-total-${sanitizedKey}">${dist.reduce((s, c) => s + (c.pct || 0), 0)}%</span></span>
+  </div></div>`;
+  return html;
+}
+// A job-only override for one or more of this line's calculated sizes (see psApplySizeOverride).
+// Always shows all 5 balloon sizes, not just the ones the formula currently produces — a job can
+// add a size the template wouldn't otherwise include (e.g. a few 5" accents on a Classic Column)
+// as well as reduce/zero one out. Blank = use the calculated default shown as the placeholder.
+function psSizeOverrideEditorHtml(line, r, sanitizedKey) {
+  const totalsResult = psComputeTotals(r, line.qty, line.customLinear);
+  if (!totalsResult.valid) return '';
+  let html = `<div class="settings-field"><label>Size mix <span style="font-weight:400;">(optional — overrides the calculated count for this job only; blank uses the calculated default)</span></label>`;
+  SIZE_ORDER.forEach(size => {
+    const defaultVal = totalsResult.sizes[size] || 0;
+    const overrideVal = line.sizeOverride && Number.isFinite(line.sizeOverride[size]) ? line.sizeOverride[size] : '';
+    const safeSize = size.replace(/"/g, 'in');
+    html += `<div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+      <div style="flex:0 0 32px; font-size:12px;">${psEscape(size)}</div>
+      <input type="number" min="0" step="1" placeholder="${defaultVal}" value="${overrideVal}" id="pi-sizeov-${sanitizedKey}-${safeSize}" style="width:80px;">
+    </div>`;
+  });
+  html += `</div>`;
+  return html;
 }
 function psColorRowHtml(key, idx, value, canRemove) {
   const inputId = 'pi-color-' + key.replace(/[|]/g, '-') + '-' + idx;
@@ -4999,13 +5150,15 @@ function psColorPickerHtml(key, draft) {
 function psStartEditItem(jobId, idx) {
   const job = psFindJob(jobId);
   if (!job) return;
+  const line = job.productionItems[idx];
   const key = psColorDraftKey(jobId, idx);
-  psColorDraftStore[key] = [...job.productionItems[idx].colors];
+  psColorDraftStore[key] = [...line.colors];
+  psDistDraftStore[key] = psInitDistDraft(line);
   psEditingItemKey = key;
   psRenderProductionJobs();
 }
 function psCancelEditItem() {
-  if (psEditingItemKey) delete psColorDraftStore[psEditingItemKey];
+  if (psEditingItemKey) { delete psColorDraftStore[psEditingItemKey]; delete psDistDraftStore[psEditingItemKey]; }
   psEditingItemKey = null;
   psRenderProductionJobs();
 }
@@ -5017,9 +5170,17 @@ function psSaveEditItem(jobId, idx) {
   const key = psColorDraftKey(jobId, idx);
   const sanitizedKey = key.replace(/\|/g, '-');
 
-  const colors = (psColorDraftStore[key] || []).map(c => c.trim()).filter(Boolean);
-  if (colors.length === 0) { alert('Enter at least one color.'); return; }
+  // Zipped positionally with the dist draft (not filtered independently) — a blank color row
+  // typed mid-edit must drop its own percentage along with it, never shift some OTHER color's
+  // percentage into its slot.
+  const rawColors = psColorDraftStore[key] || [];
+  const rawDist = psDistDraftStore[key] || [];
+  const pairs = rawColors.map((c, i) => ({ name: c.trim(), pct: rawDist[i] ? rawDist[i].pct : null })).filter(p => p.name);
+  if (pairs.length === 0) { alert('Enter at least one color.'); return; }
+  const colors = pairs.map(p => p.name);
   const qty = parseFloat(document.getElementById('pi-edit-qty-' + sanitizedKey).value) || 1;
+  const itemLabelEl = document.getElementById('pi-edit-label-' + sanitizedKey);
+  const itemLabel = itemLabelEl ? itemLabelEl.value.trim() : (line.itemLabel || '');
   const design = document.getElementById('pi-edit-design-' + sanitizedKey).value.trim();
   const location = document.getElementById('pi-edit-location-' + sanitizedKey).value.trim();
   const topperEl = document.getElementById('pi-edit-topper-' + sanitizedKey);
@@ -5027,13 +5188,37 @@ function psSaveEditItem(jobId, idx) {
 
   line.qty = qty;
   line.colors = colors;
+  if (itemLabel) line.itemLabel = itemLabel; else delete line.itemLabel;
   line.design = design;
   line.location = location;
   line.indoorOutdoor = psDetectIndoorOutdoor(location);
   line.topperNote = topperNote;
-  delete line.colorDist; // percentages would no longer line up with the edited color list
+  // Only a real, fully-numbered split is trusted — if colors.length is 1 there's nothing to
+  // distribute, and if any paired percentage came back non-numeric (shouldn't happen given
+  // psInitDistDraft/psAddColorDraftRow/psRemoveColorDraftRow keep the two arrays in lockstep, but
+  // this is the same "never let a bad number reach a saved job" discipline used everywhere else in
+  // this file) it falls back to the existing equal-split default rather than saving garbage.
+  if (colors.length > 1 && pairs.every(p => Number.isFinite(p.pct))) {
+    line.colorDist = pairs.map(p => ({ name: p.name, pct: p.pct }));
+  } else {
+    delete line.colorDist;
+  }
+
+  const sizeOverride = {};
+  if (r) {
+    SIZE_ORDER.forEach(size => {
+      const el = document.getElementById('pi-sizeov-' + sanitizedKey + '-' + size.replace(/"/g, 'in'));
+      if (!el) return;
+      const v = el.value.trim();
+      if (v === '') return;
+      const n = parseFloat(v);
+      if (Number.isFinite(n) && n >= 0) sizeOverride[size] = n;
+    });
+  }
+  if (Object.keys(sizeOverride).length > 0) line.sizeOverride = sizeOverride; else delete line.sizeOverride;
 
   delete psColorDraftStore[key];
+  delete psDistDraftStore[key];
   psEditingItemKey = null;
   psSaveJob(job);
 }
@@ -5067,11 +5252,14 @@ function psProductionBodyHtml(job) {
       const r = psLineRecipe(line);
       if (!r) return;
       const totalsResult = psComputeTotals(r, line.qty, line.customLinear);
-      const totals = totalsResult.sizes;
+      const totals = totalsResult.valid ? psApplySizeOverride(totalsResult.sizes, line) : totalsResult.sizes;
       const balloonColors = psLineBalloonColors(line);
       const nColors = balloonColors.length || line.colors.length; // guard: if every color was flagged as a note, fall back rather than divide by zero
-      html += `<div style="font-size:14px; font-weight:700; margin-bottom:2px;">${psEscape(r.display)} <span style="font-weight:400; color:var(--text-secondary);">× ${line.qty}</span></div>`;
-      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.3rem;">Colors: ${psEscape(line.colors.join(' / '))}</div>`;
+      const distByName = {};
+      (line.colorDist || []).forEach(cd => { distByName[cd.name] = cd.pct; });
+      const colorsText = line.colors.map(c => Number.isFinite(distByName[c]) ? `${c} (${distByName[c]}%)` : c).join(' / ');
+      html += `<div style="font-size:14px; font-weight:700; margin-bottom:2px;">${psEscape(psLineLabel(line, r))} <span style="font-weight:400; color:var(--text-secondary);">× ${line.qty}</span></div>`;
+      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.3rem;">Colors: ${psEscape(colorsText)}</div>`;
       if (!totalsResult.valid) {
         html += `<div style="font-size:12px; color:var(--warning-text); margin:4px 0;">
           <i class="fa-solid fa-triangle-exclamation"></i> ${psEscape(psInvalidFormulaMessage(totalsResult.reason))}
@@ -5147,7 +5335,7 @@ function psProductionBodyHtml(job) {
 
       html += `<div class="ps-item-block">`;
       html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
-        <div style="font-size:14px; font-weight:700;">${psEscape(r.display)}</div>
+        <div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))}</div>
         <div style="display:flex; gap:2px;">
           ${!editing ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx})">Edit</button>` : ''}
           <button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>
@@ -5157,11 +5345,14 @@ function psProductionBodyHtml(job) {
       if (editing) {
         html += `<div class="no-print">
           <div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;"><b>Size:</b> ${psEscape(psLineFootageText(line, r))} <span style="font-style:italic;">(delete and re-add to change size)</span></div>
+          <div class="settings-field"><label>Item label <span style="font-weight:400;">(optional — shown here and in Review &amp; Pull instead of the template name)</span></label><input type="text" id="pi-edit-label-${sanitizedEditKey}" placeholder="${psEscape(r.display)}" value="${psEscape(line.itemLabel || '')}"></div>
           <div class="settings-field"><label>Quantity</label><input type="number" id="pi-edit-qty-${sanitizedEditKey}" value="${line.qty}" min="1" inputmode="numeric"></div>
           <div class="settings-field">
             <label>Colors</label>
             ${psColorPickerHtml(editKey, psGetColorDraft(editKey, line.colors))}
           </div>
+          ${psColorDistEditorHtml(editKey)}
+          ${psSizeOverrideEditorHtml(line, r, sanitizedEditKey)}
           <div class="row">
             <div class="settings-field" style="margin-bottom:0"><label>Design (optional)</label><input type="text" id="pi-edit-design-${sanitizedEditKey}" value="${psEscape(line.design || '')}"></div>
             <div class="settings-field" style="margin-bottom:0"><label>Location (optional)</label><input type="text" id="pi-edit-location-${sanitizedEditKey}" value="${psEscape(line.location || '')}"></div>
@@ -5180,6 +5371,7 @@ function psProductionBodyHtml(job) {
         if (line.indoorOutdoor) html += `<b>${psEscape(line.indoorOutdoor)}</b><br>`;
         if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
         html += `<b>Colors:</b> ${psEscape(line.colors.join(' / '))}<br>`;
+        if (line.sizeOverride && Object.keys(line.sizeOverride).length) html += `<b>Size mix:</b> custom for this job<br>`;
         html += `</div>`;
 
         // Template-owned build details, carried on whatever this line's recipe/customRecipe
@@ -5396,12 +5588,14 @@ function qcSetQty(val) {
   qcState.qty = parseFloat(val) || 0;
   qcRenderResults();
 }
-// Scales `items` (color objects, mutated in place) so their .pct values sum to exactly
-// `target`, preserving their existing relative proportions. Falls back to an even split if
-// they're all currently at 0 (nothing to preserve a ratio from). Rounds to whole percents and
+// Scales `items` (objects with a .pct field, mutated in place) so their .pct values sum to
+// exactly `target`, preserving their existing relative proportions. Falls back to an even split
+// if they're all currently at 0 (nothing to preserve a ratio from). Rounds to whole percents and
 // nudges the single largest share to absorb any rounding drift, so the sum lands on `target`
-// exactly rather than drifting by a point or two.
-function qcScaleToSum(items, target) {
+// exactly rather than drifting by a point or two. Shared by the Quantity Calculator's color
+// sliders and Production's per-job color-distribution editor (see psColorDistEditorHtml) — one
+// proportional-rescale algorithm, not two independently-maintained copies of the same math.
+function distScaleToSum(items, target) {
   if (items.length === 0) return;
   target = Math.max(0, target);
   if (target === 0) { items.forEach(c => { c.pct = 0; }); return; }
@@ -5422,14 +5616,18 @@ function qcScaleToSum(items, target) {
   items.forEach((c, k) => { c.pct = Math.max(0, rounded[k]); });
 }
 
-// Splits 100% evenly across every current color — the "reset to even" behavior, used both
-// as the default for a freshly-added color and as its own button.
-function qcDistributeEvenly() {
-  const n = qcState.colors.length;
+// Splits 100% evenly across `items` — the "reset to even" behavior, used both as the default for
+// a freshly-added color/row and as its own button. Shared with Production's per-job color-split
+// editor (see distScaleToSum's own comment on why this lives outside qcState).
+function distDistributeEvenly(items) {
+  const n = items.length;
   if (n === 0) return;
   const base = Math.floor(100 / n);
   let leftover = 100 - base * n;
-  qcState.colors.forEach(c => { c.pct = base + (leftover > 0 ? 1 : 0); if (leftover > 0) leftover--; });
+  items.forEach(c => { c.pct = base + (leftover > 0 ? 1 : 0); if (leftover > 0) leftover--; });
+}
+function qcDistributeEvenly() {
+  distDistributeEvenly(qcState.colors);
   qcRender();
 }
 
@@ -5439,7 +5637,7 @@ function qcAddColorRow() {
 }
 function qcRemoveColorRow(idx) {
   qcState.colors.splice(idx, 1);
-  if (qcState.colors.length > 0) qcScaleToSum(qcState.colors, 100);
+  if (qcState.colors.length > 0) distScaleToSum(qcState.colors, 100);
   qcRender();
 }
 function qcColorNameInput(idx, val) {
@@ -5462,24 +5660,26 @@ function qcEndColorEdit() {
   qcDragBaseline = null;
 }
 
-// Locks the total at 100%: whatever this color is set to, every OTHER color scales down
-// (or up) to fill the rest, keeping their relative shares to EACH OTHER — so increasing one
-// gradually and proportionally reduces all the others together, rather than dumping the
-// whole change onto just one.
-function qcApplyPct(idx, rawVal) {
-  const colors = qcState.colors;
+// Locks the total at 100%: whatever this item is set to, every OTHER item scales down (or up) to
+// fill the rest, keeping their relative shares to EACH OTHER — so increasing one gradually and
+// proportionally reduces all the others together, rather than dumping the whole change onto just
+// one. `baseline` is the fixed starting ratio snapshotted once at the start of this edit (see
+// qcBeginColorEdit's own comment on why) — shared by the Quantity Calculator's color sliders and
+// Production's per-job color-distribution editor, so both scale identically.
+function distApplyPct(items, baseline, idx, rawVal) {
   const newVal = Math.max(0, Math.min(100, Math.round(parseFloat(rawVal) || 0)));
-
-  if (!qcDragBaseline || qcDragBaseline.idx !== idx) qcBeginColorEdit(idx);
-  const baseline = qcDragBaseline.colors;
-
-  colors[idx].pct = newVal;
-  if (colors.length > 1) {
-    const others = colors.filter((_, i) => i !== idx);
+  items[idx].pct = newVal;
+  if (items.length > 1) {
+    const others = items.filter((_, i) => i !== idx);
     const otherBaseline = baseline.filter((_, i) => i !== idx);
     others.forEach((c, k) => { c.pct = otherBaseline[k].pct; }); // reset to the fixed starting ratio before rescaling
-    qcScaleToSum(others, 100 - newVal);
+    distScaleToSum(others, 100 - newVal);
   }
+  return newVal;
+}
+function qcApplyPct(idx, rawVal) {
+  if (!qcDragBaseline || qcDragBaseline.idx !== idx) qcBeginColorEdit(idx);
+  distApplyPct(qcState.colors, qcDragBaseline.colors, idx, rawVal);
   qcSyncColorInputs();
   qcUpdatePctTotal();
   qcRenderResults();
@@ -8676,12 +8876,12 @@ function psComputeJobRequirements(job) {
       requirements.push({
         jobId: job.id, productionItemId, colorId: null, inventoryItemId: null, brand: '',
         color: '', size: '', qty: 0, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
-        source: { jobId: job.id, jobName: job.jobName || '', itemLabel: recipe.display || '' },
+        source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
         unresolved: false, formulaInvalid: true, formulaInvalidReason: totalsResult.reason, templateId: recipe.id || null,
       });
       return;
     }
-    const totals = totalsResult.sizes;
+    const totals = psApplySizeOverride(totalsResult.sizes, line);
     // Colors marked "general note" during import (see irMarkColorGeneralNote) never generate an
     // inventory requirement here — they're not resolvable Standard Latex colors, and treating one
     // as an unresolved color would wrongly invite "add this to your Color Library." They're still
@@ -8732,7 +8932,7 @@ function psComputeJobRequirements(job) {
           unit: 'balloon',
           requiredBy: job.eventDate || '',
           category: 'balloon',
-          source: { jobId: job.id, jobName: job.jobName || '', itemLabel: recipe.display || '' },
+          source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
           unresolved, // multiple brands share this name (or it's not in the Library at all) — can't attribute precisely
           candidates: unresolved ? matches : undefined, // every brand this name matches, for Review & Pull's resolution UI
         });
