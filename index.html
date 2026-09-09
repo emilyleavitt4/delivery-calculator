@@ -4474,6 +4474,7 @@ function psReviewItemFromRaw(pItem) {
     customLinear: psExtractFootage(pItem),
     colors: psParseColorsField(pItem.details['Colors']),
     colorGeneralNotes: [], // colors explicitly confirmed as general/non-inventory notes (lowercased)
+    modifiers: [], // job-instance add-ons — never auto-populated from the invoice, only added here by a person (see irModifiersEditorHtml)
     location: pItem.details['Location'] || '',
     indoorOutdoor: psDetectIndoorOutdoor(pItem.details['Location']), // auto-detected, always editable below
 
@@ -4538,6 +4539,11 @@ function psApplyReviewDraftToEvent(draft) {
         // psLineBalloonColors, which every balloon-count split now reads through instead of
         // line.colors directly.
         colorGeneralNotes: item.colorGeneralNotes && item.colorGeneralNotes.length ? item.colorGeneralNotes.slice() : [],
+        // Job-instance add-ons configured during Import Review (see irModifiersEditorHtml) —
+        // carried straight onto the real production line unchanged; psSyncSyntheticPrepTasks just
+        // below already knows how to turn a generatesTask modifier into a real Prep task (see its
+        // own psSyntheticPrepTasksFor), so nothing extra is needed here for that to work.
+        modifiers: item.modifiers && item.modifiers.length ? item.modifiers.slice() : [],
         customLinear: item.customLinear || null,
         design: '',
         location: item.location || '',
@@ -4803,6 +4809,10 @@ function irItemCardHtml(item) {
             </select>
           </div>
         </div>`;
+        // Same job-instance modifier model Production edits later (line.modifiers, carried
+        // through unchanged at Approve — see psApplyReviewDraftToEvent) — Import Review is just
+        // the earliest place to configure it, never a second system.
+        html += irModifiersEditorHtml(item);
       } else {
         html += `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Classification</label><select onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select></div>`;
       }
@@ -4981,6 +4991,54 @@ function irResolveColorToBusinessInventory(itemId, idx, system, invItemId) {
   event.colorResolutions[text.toLowerCase()] = { system, itemId: invItemId, size: null };
   irRecomputeItemStatus(item);
   irRenderShell();
+}
+
+// ─── Job-instance add-ons / modifiers, editable from Import Review ───
+//
+// The exact same line.modifiers[] model Production edits later (see psModifierEditorHtml/
+// psAddModifier and friends) — Import Review is only ever the earliest place to configure it.
+// item.modifiers carries straight through to the real production line's own modifiers at Approve
+// (see psApplyReviewDraftToEvent), so a modifier added here needs no separate storage or sync:
+// it's already sitting on the exact field Production reads.
+function irAddModifier(itemId) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  if (!item.modifiers) item.modifiers = [];
+  item.modifiers.push({ id: psNewModifierId(), label: '', inventoryRef: null, qty: 1, generatesTask: false, note: '' });
+  irRenderShell();
+}
+function irFindModifier(item, modId) { return item && (item.modifiers || []).find(m => m.id === modId); }
+function irUpdateModifierField(itemId, modId, field, value) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  const mod = irFindModifier(item, modId);
+  if (!mod) return;
+  if (field === 'qty') mod.qty = parseFloat(value) || 0;
+  else if (field === 'generatesTask') mod.generatesTask = !!value;
+  else mod[field] = value; // 'label' | 'note'
+  irRenderShell();
+}
+function irSetModifierInventoryRef(itemId, modId, value) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  const mod = irFindModifier(item, modId);
+  if (!mod) return;
+  mod.inventoryRef = psParseInventoryRefValue(value);
+  irRenderShell();
+}
+function irRemoveModifier(itemId, modId) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  item.modifiers = (item.modifiers || []).filter(m => m.id !== modId);
+  irRenderShell();
+}
+function irModifiersEditorHtml(item) {
+  return psModifierListHtml(item.modifiers || [], 'Add-ons / modifiers <span style="font-weight:400;">(optional — job-specific extras like "+ Red Starbursts")</span>', mod => psModifierRowHtml(mod,
+    `irUpdateModifierField('${item.id}','${mod.id}','label', this.value)`,
+    `irUpdateModifierField('${item.id}','${mod.id}','qty', this.value)`,
+    `irSetModifierInventoryRef('${item.id}','${mod.id}', this.value)`,
+    `irUpdateModifierField('${item.id}','${mod.id}','note', this.value)`,
+    `irUpdateModifierField('${item.id}','${mod.id}','generatesTask', this.checked)`,
+    `irRemoveModifier('${item.id}','${mod.id}')`
+  ), `irAddModifier('${item.id}')`);
 }
 // The "these are always the same" answer to a suggested match — same mechanism Review & Pull's
 // own Always Match already uses (clAddAlias, already audited there): adds this exact raw text as
@@ -5856,17 +5914,20 @@ function psUpdateModifierField(jobId, idx, modId, field, value) {
   psSyncSyntheticPrepTasks(job, line.id, line, psLineRecipe(line));
   psSaveJob(job);
 }
-// value is '' (not inventory-backed) or 'system|itemId' from invGenericItemOptionsHtml.
+// value is '' (not inventory-backed) or 'system|itemId' from invGenericItemOptionsHtml — shared by
+// both Production's and Import Review's own modifier editors so the two can never disagree about
+// what a select's value actually means.
+function psParseInventoryRefValue(value) {
+  if (!value) return null;
+  const sepIdx = value.indexOf('|');
+  return { system: value.slice(0, sepIdx), itemId: value.slice(sepIdx + 1), size: null };
+}
 function psSetModifierInventoryRef(jobId, idx, modId, value) {
   const job = psFindJob(jobId);
   if (!job) return;
   const mod = psFindModifier(job, idx, modId);
   if (!mod) return;
-  if (!value) { mod.inventoryRef = null; }
-  else {
-    const sepIdx = value.indexOf('|');
-    mod.inventoryRef = { system: value.slice(0, sepIdx), itemId: value.slice(sepIdx + 1), size: null };
-  }
+  mod.inventoryRef = psParseInventoryRefValue(value);
   psSaveJob(job);
   psRenderProductionJobs();
 }
@@ -5903,29 +5964,45 @@ function invGenericItemOptionsHtml(selectedSystem, selectedItemId) {
   });
   return html;
 }
-function psModifierEditorHtml(job, idx, line) {
-  const mods = line.modifiers || [];
-  let html = `<div class="settings-field"><label>Add-ons / modifiers <span style="font-weight:400;">(job-specific extras — never saved to the master template)</span></label>`;
-  mods.forEach(mod => {
-    html += `<div style="border:0.5px solid var(--border); border-radius:var(--radius-sm); padding:8px; margin-bottom:6px;">
-      <div class="row" style="margin-bottom:6px;">
-        <input type="text" placeholder="Label, e.g. Red Starbursts" value="${invAttr(mod.label)}" onchange="psUpdateModifierField('${job.id}',${idx},'${mod.id}','label', this.value)">
-        <input type="number" min="0" step="1" style="max-width:80px;" value="${mod.qty}" onchange="psUpdateModifierField('${job.id}',${idx},'${mod.id}','qty', this.value)">
-      </div>
-      <select style="width:100%; margin-bottom:6px;" onchange="psSetModifierInventoryRef('${job.id}',${idx},'${mod.id}', this.value)">
-        ${invGenericItemOptionsHtml(mod.inventoryRef && mod.inventoryRef.system, mod.inventoryRef && mod.inventoryRef.itemId)}
-      </select>
-      <input type="text" placeholder="Note (optional)" style="width:100%; margin-bottom:6px;" value="${invAttr(mod.note)}" onchange="psUpdateModifierField('${job.id}',${idx},'${mod.id}','note', this.value)">
-      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary);">
-        <input type="checkbox" ${mod.generatesTask ? 'checked' : ''} onchange="psUpdateModifierField('${job.id}',${idx},'${mod.id}','generatesTask', this.checked)">
-        Add a Prep task to gather this
-      </label>
-      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; margin-top:6px;" onclick="psRemoveModifier('${job.id}',${idx},'${mod.id}')"><i class="fa-solid fa-trash"></i> Remove</button>
-    </div>`;
-  });
-  html += `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="psAddModifier('${job.id}',${idx})"><i class="fa-solid fa-plus"></i> Add an add-on</button>`;
+// Shared markup for ONE job-instance modifier row — used by both Production's edit panel and
+// Import Review's own modifier editor (irModifiersEditorHtml), so the exact same line.modifiers[]
+// model reads and behaves identically wherever it's edited, per "Import Review is just the
+// earliest place to configure it, never a second system." Callers supply their own onclick/
+// onchange handler strings, since addressing genuinely differs (job+lineIndex+modId in
+// Production, reviewItemId+modId in Import Review) — only the markup/field layout is shared.
+function psModifierRowHtml(mod, onLabelChange, onQtyChange, onRefChange, onNoteChange, onTaskChange, onRemove) {
+  return `<div style="border:0.5px solid var(--border); border-radius:var(--radius-sm); padding:8px; margin-bottom:6px;">
+    <div class="row" style="margin-bottom:6px;">
+      <input type="text" placeholder="Label, e.g. Red Starbursts" value="${invAttr(mod.label)}" onchange="${onLabelChange}">
+      <input type="number" min="0" step="1" style="max-width:80px;" value="${mod.qty}" onchange="${onQtyChange}">
+    </div>
+    <select style="width:100%; margin-bottom:6px;" onchange="${onRefChange}">
+      ${invGenericItemOptionsHtml(mod.inventoryRef && mod.inventoryRef.system, mod.inventoryRef && mod.inventoryRef.itemId)}
+    </select>
+    <input type="text" placeholder="Note (optional)" style="width:100%; margin-bottom:6px;" value="${invAttr(mod.note)}" onchange="${onNoteChange}">
+    <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary);">
+      <input type="checkbox" ${mod.generatesTask ? 'checked' : ''} onchange="${onTaskChange}">
+      Add a Prep task to gather this
+    </label>
+    <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; margin-top:6px;" onclick="${onRemove}"><i class="fa-solid fa-trash"></i> Remove</button>
+  </div>`;
+}
+function psModifierListHtml(mods, labelHtml, rowFn, addOnClick) {
+  let html = `<div class="settings-field"><label>${labelHtml}</label>`;
+  mods.forEach(mod => { html += rowFn(mod); });
+  html += `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="${addOnClick}"><i class="fa-solid fa-plus"></i> Add an add-on</button>`;
   html += `</div>`;
   return html;
+}
+function psModifierEditorHtml(job, idx, line) {
+  return psModifierListHtml(line.modifiers || [], 'Add-ons / modifiers <span style="font-weight:400;">(job-specific extras — never saved to the master template)</span>', mod => psModifierRowHtml(mod,
+    `psUpdateModifierField('${job.id}',${idx},'${mod.id}','label', this.value)`,
+    `psUpdateModifierField('${job.id}',${idx},'${mod.id}','qty', this.value)`,
+    `psSetModifierInventoryRef('${job.id}',${idx},'${mod.id}', this.value)`,
+    `psUpdateModifierField('${job.id}',${idx},'${mod.id}','note', this.value)`,
+    `psUpdateModifierField('${job.id}',${idx},'${mod.id}','generatesTask', this.checked)`,
+    `psRemoveModifier('${job.id}',${idx},'${mod.id}')`
+  ), `psAddModifier('${job.id}',${idx})`);
 }
 
 // ═══════════════════════════════════════ QUANTITY CALCULATOR VIEW ═══════════════════════════════════════
@@ -8235,8 +8312,30 @@ const INV_SYSTEMS = {
   },
   specialtyLatex: {
     label: 'Specialty Latex', viewId: 'inventory-specialty', itemRef: (itemId) => window.fbSpecialtyLatexItemRef(itemId),
-    getQty: (item) => item.backstock || 0,
-    setQty: (item, size, qty) => { item.backstock = qty; },
+    // Specialty Latex already has exactly the same package-size model Standard Latex does —
+    // `backstock` is always whole PACKAGES (bags), never fractional, regardless of how it was
+    // entered (spSubmitBackstockEntry/spSubmitAdd's "Individual Balloons" entry mode already
+    // splits a typed total into backstock + a loose remainder at entry time, the same floor/
+    // modulo convention as Standard Latex's own Adjust flow). A Production requirement here is
+    // always expressed in individual balloons (the same unit the balloon-count formula math
+    // already uses everywhere else), so this MUST convert through perBag before comparing —
+    // exactly like invAvailableBalloons does for Standard Latex — never compare bags against
+    // balloons directly. Returns null (never a guessed package size) when perBag isn't set; the
+    // caller (psReviewPullRows/invApplyInventoryTransactions) is responsible for treating null as
+    // "needs configuration" and failing closed, not for inventing a default.
+    getQty: (item) => {
+      if (!item.perBag || item.perBag <= 0) return null;
+      return (item.backstock || 0) * item.perBag + (item.looseBalloons || 0);
+    },
+    // qty arrives already in individual balloons (see getQty) — split back into whole packages +
+    // an exact loose remainder, the same convention spSubmitBackstockEntry already uses, so a
+    // pull can never leave backstock fractional. Never called with a missing perBag in practice —
+    // both callers fail closed on a null getQty before any pull/receive reaches here.
+    setQty: (item, size, qty) => {
+      const perBag = item.perBag || 0;
+      item.backstock = Math.floor(qty / perBag);
+      item.looseBalloons = qty - item.backstock * perBag;
+    },
     findItem: (itemId) => SPECIALTY_ITEMS.find(i => i.id === itemId),
     displayLabel: (item) => [item.color, item.pattern].filter(Boolean).join(' — ') || item.brand || '(unnamed)',
   },
@@ -8312,13 +8411,23 @@ function invApplyInventoryTransactions(entries) {
       const system = e.system || 'standardLatex';
 
       if (system !== 'standardLatex') {
-        // Generic path for every non-Standard-Latex system: a plain quantity (flat, or one level
-        // of sub-key for Foil Letters & Numbers) with no packaging/bag/loose-balloon concepts —
-        // those are genuinely Standard-Latex-specific bookkeeping, not generalized here just to
-        // look symmetrical. A generic entry supplies `delta` directly; balloonsUsed/
-        // looseBalloonsReceived remain Standard-Latex-only conveniences.
+        // Generic path for every non-Standard-Latex system: entries.delta is always in whatever
+        // unit that system's own getQty/setQty resolve to (Add-Ons/Framework/most of Foil: a flat
+        // piece count with no conversion at all; Specialty Latex: individual balloons, converted
+        // through its own perBag/looseBalloons exactly like Standard Latex's own package model —
+        // see INV_SYSTEMS.specialtyLatex's own comment). balloonsUsed/looseBalloonsReceived
+        // remain Standard-Latex-only conveniences; a generic entry always supplies `delta` directly,
+        // already in the correct unit for whichever system it's addressing.
         const sys = invSystemFor(system);
         const previousBalance = sys.getQty(item, e.size);
+        // A system whose getQty needs configuration it doesn't have (Specialty Latex with no
+        // Balloons/bag set) returns null rather than guessing a package size — this is the
+        // ledger-level backstop for that: even if some future caller skips psReviewPullRows' own
+        // UI-level configMissing check, the actual deduction still can never happen against an
+        // unknown conversion.
+        if (previousBalance === null) {
+          throw Object.assign(new Error('Missing package-size configuration for this item — set it before this can be pulled or received.'), { code: 'MISSING_STANDARD_QTY', itemId: e.itemId, size: e.size || null });
+        }
         const delta = e.delta;
         if (!Number.isFinite(delta)) {
           throw Object.assign(new Error('Invalid quantity — this transaction was not applied.'), { code: 'INVALID_QUANTITY', itemId: e.itemId, size: e.size || null });
@@ -9681,16 +9790,22 @@ function psReviewPullRows(job) {
     if (!Number.isFinite(row.qty)) return Object.assign({}, row, { alreadyPulled: 0, stillNeeded: NaN, status: 'formulaInvalid' });
 
     if (row.system && row.system !== 'standardLatex') {
-      // Generic path: a plain quantity comparison, no bag/balloon conversion — see the report's
-      // own note on why that stays out of scope here (a business's Specialty Latex item can
-      // itself be tracked in bags or individual balloons via its own backstockUnit field; this
-      // compares the requirement's qty directly against whatever unit that item's own quantity is
-      // already in, rather than attempting a conversion nothing has asked for yet).
+      // Generic path: the requirement's qty is always in the same unit invSystemFor(...).getQty
+      // resolves to for that system — a flat piece count for Add-Ons/Framework/most of Foil (no
+      // conversion needed at all), or individual balloons for Specialty Latex, converted through
+      // its own perBag/looseBalloons exactly like Standard Latex's package model (see
+      // INV_SYSTEMS.specialtyLatex's own comment) — never a raw bags-vs-balloons comparison.
       const item = invFindItemGeneric(row.system, row.inventoryItemId);
       if (!item) return Object.assign({}, row, { kind: 'noItem' }); // item was deleted since the requirement was computed
       const alreadyPulled = invQtyPulledForJob(job.id, row.system, row.inventoryItemId, row.size);
       const stillNeeded = Math.max(0, row.qty - alreadyPulled);
       const available = invSystemFor(row.system).getQty(item, row.size);
+      // null means "this system needs configuration it doesn't have" (e.g. Specialty Latex with
+      // no Balloons/bag set) — never a guessed package size. Fails closed: never Ready, never a
+      // Pull button, same guarantee Standard Latex's own configMissing state already gives.
+      if (available === null) {
+        return Object.assign({}, row, { alreadyPulled, stillNeeded, status: 'configMissing' });
+      }
       if (!Number.isFinite(stillNeeded) || !Number.isFinite(available)) {
         return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'formulaInvalid' });
       }
@@ -9937,17 +10052,33 @@ function psReviewPullRowHtml(job, row, readOnly) {
   }
 
   if (row.status === 'configMissing') {
-    const inputId = 'rp-perbag-' + job.id + '-' + row.inventoryItemId + '-' + row.size.replace(/[^a-zA-Z0-9]/g, '');
+    const isStandard = !row.system || row.system === 'standardLatex';
+    if (isStandard) {
+      const inputId = 'rp-perbag-' + job.id + '-' + row.inventoryItemId + '-' + row.size.replace(/[^a-zA-Z0-9]/g, '');
+      return `<div class="rp-row">
+        <div class="rp-row-head">
+          <div style="font-size:13px; font-weight:700;">${psEscape(rpItemLabel(row))} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
+          ${rpBadge('Setup Needed')}
+        </div>
+        <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">Standard Package Qty isn't set for this size${readOnly ? ' (job is Completed — left unpulled)' : ' — set it before it can be pulled'}.</div>
+        ${readOnly ? '' : `<div class="rp-actions" style="display:flex; gap:6px; align-items:center;">
+          <input type="number" id="${inputId}" min="1" placeholder="e.g. 100" style="width:100px;">
+          <button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invUpdateSizeField('${row.inventoryItemId}','${invAttr(row.size)}','perBag', document.getElementById('${inputId}').value); psRenderProductionJobs();">Save</button>
+        </div>`}
+      </div>`;
+    }
+    // Generic systems don't have a per-row inline editor (a Specialty Latex item's own
+    // Balloons/bag field lives on its own expand-and-edit card, a different screen entirely) —
+    // surfacing the exact gap in human language and a direct link there is the safe, honest
+    // option rather than guessing a package size or building a duplicate inline editor here.
+    const sys = invSystemFor(row.system);
     return `<div class="rp-row">
       <div class="rp-row-head">
-        <div style="font-size:13px; font-weight:700;">${psEscape(row.brand || '')} ${psEscape(row.color)} — ${psEscape(row.size)} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
+        <div style="font-size:13px; font-weight:700;">${psEscape(rpItemLabel(row))} <span style="font-weight:400; color:var(--text-secondary);">(need ${row.qty})</span></div>
         ${rpBadge('Setup Needed')}
       </div>
-      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">Standard Package Qty isn't set for this size${readOnly ? ' (job is Completed — left unpulled)' : ' — set it before it can be pulled'}.</div>
-      ${readOnly ? '' : `<div class="rp-actions" style="display:flex; gap:6px; align-items:center;">
-        <input type="number" id="${inputId}" min="1" placeholder="e.g. 100" style="width:100px;">
-        <button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="invUpdateSizeField('${row.inventoryItemId}','${invAttr(row.size)}','perBag', document.getElementById('${inputId}').value); psRenderProductionJobs();">Save</button>
-      </div>`}
+      <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">Balloons per bag isn't set for this ${psEscape(sys.label)} item${readOnly ? ' (job is Completed — left unpulled)' : ' — set it before this can be pulled, since balloons and bags can\'t be safely compared without it'}.</div>
+      ${readOnly ? '' : `<div class="rp-actions"><button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="showView('${sys.viewId}')">Go to ${psEscape(sys.label)}</button></div>`}
     </div>`;
   }
 
@@ -12632,12 +12763,22 @@ const SP_SIZE_OPTIONS = {
   printed: ['5"', '11"', '18"', '24"'],
   shapes: ['5"', '12"', '14"', '16"', '18"'],
 };
-// Business-owned inventory resolution (Import Review's "Cow Print" case) — exact match only
-// (never fuzzy), against whichever field a business is more likely to have actually named the
-// print in: `pattern` (the common case — spAddFormHtml's own placeholder for a printed item is
-// literally "e.g. Cow Print") or `color`, if a business used that field for the print's name
-// instead. Scoped to 'printed' only — Twisting/Linking/Shapes aren't balloon "colors" in this
-// app's own vocabulary, so a color-resolution search has no reason to consider them.
+// ONE SPECIFIC RESOLVER, not the general architecture: this is Import Review's "does this
+// imported COLOR TEXT match a Printed Latex item I already own" check (the "Cow Print" case) —
+// exact match only (never fuzzy), against whichever field a business is more likely to have
+// actually named the print in: `pattern` (the common case — spAddFormHtml's own placeholder for a
+// printed item is literally "e.g. Cow Print") or `color`, if a business used that field for the
+// print's name instead. Deliberately scoped to kind:'printed' only, because a raw invoice COLOR
+// token can only ever mean a printed balloon color — Twisting/Linking/Shapes aren't colors in this
+// app's vocabulary, so there's nothing for a color search to match there.
+//
+// This is NOT the general "Production can reference business-owned inventory" architecture — that
+// is INV_SYSTEMS/invFindItemGeneric/invGenericItemLabel/invGenericItemOptionsHtml, which already
+// spans Specialty Latex (every kind), Add-Ons, Framework, and Foil, and is what job-instance
+// modifiers (psModifierEditorHtml) are built on. A future automatic resolver for a different raw
+// invoice field (e.g. matching an imported "Add-On" line item to an Add-Ons record) would be its
+// own new function, shaped for whatever that field actually means — never a change to this one,
+// and never routed through this one's kind:'printed' assumption.
 function spFindByExactColorText(text) {
   const key = (text || '').trim().toLowerCase();
   if (!key) return [];
