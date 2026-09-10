@@ -810,7 +810,11 @@
   .ps-check-row.done label { text-decoration: line-through; color: var(--text-tertiary); }
   .ps-build-fields { font-size: 13px; color: var(--text-secondary); line-height: 1.7; margin: 0.5rem 0 0.75rem; }
   .ps-build-fields b { color: var(--text); font-weight: 600; }
-  .ps-pack-note { font-size: 12px; color: var(--text-tertiary); font-style: italic; margin-top: 0.5rem; }
+  /* Modest visual hierarchy: the decor-item title visibly "owns" its own immediate info (colors,
+     size/count groups, pull checkboxes in Prep; size/qty/style/location/colors in Build) without
+     turning into a nested card — content that returns to normal flow (build steps, notes,
+     feedback controls) simply isn't wrapped in this. */
+  .ps-item-indent { padding-left: 12px; border-left: 2px solid var(--border); margin: 4px 0 8px; }
   #ps-import-status {
     font-size: 12.5px;
     line-height: 1.5;
@@ -3530,17 +3534,21 @@ function psSnapshotTasksForItem(recipe, productionItemId) {
 function psSyntheticTaskId(productionItemId, kind) {
   return productionItemId + ':synthetic:' + kind;
 }
+// Each entry carries its own `phase` now (defaulting to 'prep' in the sync below when omitted) —
+// generalized from a prep-only helper so the one existing synthetic-task mechanism can also cover
+// real Finish & Pack work (see the 'packextras' entry), instead of that work living as
+// disconnected static prose outside the task system.
 function psSyntheticPrepTasksFor(line, recipe) {
   const tasks = [];
   if (line.topperNote && line.topperNote.trim()) {
-    tasks.push({ kind: 'topper', text: `Pull topper: ${line.topperNote.trim()}` });
+    tasks.push({ kind: 'topper', phase: 'prep', text: `Pull topper: ${line.topperNote.trim()}` });
   }
   if (recipe && recipe.pullListNotes) {
-    tasks.push({ kind: 'pullnote', text: recipe.pullListNotes });
+    tasks.push({ kind: 'pullnote', phase: 'prep', text: recipe.pullListNotes });
   }
   (line.colorGeneralNotes || []).forEach(noteKey => {
     const original = (line.colors || []).find(c => c.trim().toLowerCase() === noteKey) || noteKey;
-    tasks.push({ kind: 'note:' + noteKey, text: `${original} — not a Standard Latex color; pull manually (Specialty Latex, Foil, or elsewhere)` });
+    tasks.push({ kind: 'note:' + noteKey, phase: 'prep', text: `${original} — not a Standard Latex color; pull manually (Specialty Latex, Foil, or elsewhere)` });
   });
   // A job-instance add-on/modifier (see psAddModifier) only generates a task when its own
   // generatesTask flag is on — most modifiers are purely inventory requirements (already visible
@@ -3548,9 +3556,14 @@ function psSyntheticPrepTasksFor(line, recipe) {
   (line.modifiers || []).forEach(mod => {
     if (mod.generatesTask && mod.label && mod.label.trim()) {
       const qtyText = mod.qty > 1 ? ` × ${mod.qty}` : '';
-      tasks.push({ kind: 'modifier:' + mod.id, text: `Gather: ${mod.label.trim()}${qtyText}${mod.note ? ' — ' + mod.note.trim() : ''}` });
+      tasks.push({ kind: 'modifier:' + mod.id, phase: 'prep', text: `Gather: ${mod.label.trim()}${qtyText}${mod.note ? ' — ' + mod.note.trim() : ''}` });
     }
   });
+  // Was static italic prose ("Pack extras of each size/color.") floating outside the task system
+  // entirely — now real Finish & Pack work, checkable/cross-out/counted like everything else in
+  // that phase, per the batch instruction that this should behave like other real Production tasks
+  // rather than a special hardcoded checkbox.
+  tasks.push({ kind: 'packextras', phase: 'finish', text: 'Pack extras of each size/color.' });
   return tasks;
 }
 // Called at item creation AND whenever an edit could change what this item's synthetic tasks
@@ -3567,7 +3580,7 @@ function psSyncSyntheticPrepTasks(job, productionItemId, line, recipe) {
     const id = psSyntheticTaskId(productionItemId, d.kind);
     const existing = job.tasks.find(t => t.id === id);
     if (existing) existing.text = d.text;
-    else job.tasks.push({ id, productionItemId, phase: 'prep', text: d.text, dueOffsetDays: null, status: 'ready', priority: false, synthetic: true });
+    else job.tasks.push({ id, productionItemId, phase: d.phase || 'prep', text: d.text, dueOffsetDays: null, status: 'ready', priority: false, synthetic: true });
   });
 }
 
@@ -3695,13 +3708,17 @@ function psAddFeedback(jobId, scope, scopeId, kind, text) {
   if (!trimmed) return;
   const actor = invResolveActor(); // honest fallback to bare email or 'Unknown' — never invents a person
   if (!job.feedback) job.feedback = [];
-  job.feedback.push({
+  const entry = {
     id: psNewJobFeedbackId(), scope, scopeId: scope === 'job' ? null : scopeId,
     kind, text: trimmed,
     who: actor.who, whoEmail: actor.whoEmail, createdAt: Date.now(),
     status: kind === 'needsClarification' ? 'open' : null,
     resolutionNote: '', resolvedAt: null, resolvedBy: null,
-  });
+  };
+  job.feedback.push(entry);
+  // A submitted Needs Clarification alerts in-app — reusing the same small notification
+  // foundation Staffing already built rather than a second mechanism (see the batch instruction).
+  if (kind === 'needsClarification') psPushClarificationNotification(job, entry);
   psSaveJob(job);
   psRenderAllJobViews();
 }
@@ -4072,7 +4089,11 @@ function psAttachmentIcon(fileType) {
 // job.attachments[] array as a normal upload (kind:'file', the default for every record saved
 // before this existed, via `|| 'file'` at every read site) rather than a second array, since the
 // only real difference is "does this have a file behind it."
-function psAddLinkAttachment(jobId, context, url, title) {
+// `productionItemId` (optional) scopes this attachment to one specific decor item — the same
+// job.attachments[] array, no second file-storage architecture, just one more nullable field,
+// exactly the same pattern feedback's own scope/scopeId already established. Null/omitted means
+// "generic job/event attachment," unchanged from before this field existed.
+function psAddLinkAttachment(jobId, context, url, title, productionItemId) {
   const job = psFindJob(jobId);
   // Backstop matching every other completed-job guard added this pass — psAttachmentsSectionHtml
   // already hides the add controls once a job is Completed.
@@ -4087,7 +4108,8 @@ function psAddLinkAttachment(jobId, context, url, title) {
     title: (title || '').trim() || trimmedUrl,
     category: ATTACHMENT_CATEGORIES[0],
     visibility: 'team',
-    displayLocations: ['production', 'event'],
+    displayLocations: productionItemId ? ['production'] : ['production', 'event'],
+    productionItemId: productionItemId || null,
     url: fullUrl,
     uploadedAt: new Date().toISOString(),
   });
@@ -4098,12 +4120,13 @@ function psAddLinkAttachment(jobId, context, url, title) {
 
 // Uploads the file to Storage, then appends the metadata record to the Job and saves — the
 // Job document itself never holds the file bytes, only this lightweight reference to them.
-async function psHandleAttachmentUpload(jobId, context, fileInput) {
+async function psHandleAttachmentUpload(jobId, context, fileInput, productionItemId) {
   const file = fileInput.files[0];
   if (!file) return;
   const job = psFindJob(jobId);
   if (!job || job.status === 'completed') return;
-  const statusEl = document.getElementById('att-upload-status-' + jobId + '-' + context);
+  const statusElId = 'att-upload-status-' + jobId + '-' + (productionItemId || context);
+  const statusEl = document.getElementById(statusElId);
   if (statusEl) { statusEl.textContent = 'Uploading…'; statusEl.style.display = 'block'; statusEl.className = ''; }
 
   const attachmentId = psNewAttachmentId();
@@ -4116,7 +4139,8 @@ async function psHandleAttachmentUpload(jobId, context, fileInput) {
       title: file.name.replace(/\.[^.]+$/, ''),
       category: ATTACHMENT_CATEGORIES[0],
       visibility: 'team',
-      displayLocations: ['production', 'event'],
+      displayLocations: productionItemId ? ['production'] : ['production', 'event'],
+      productionItemId: productionItemId || null,
       fileName: file.name,
       fileType: file.type,
       storagePath,
@@ -4172,7 +4196,9 @@ function psDeleteAttachment(jobId, attId) {
 function psAttachmentsSectionHtml(job, context) {
   const readOnly = job.status === 'completed';
   const all = job.attachments || [];
-  const visible = all.filter(a => (a.displayLocations || []).includes(context) && (a.visibility !== 'admin' || invAdminUnlocked));
+  // Item-scoped references (see psItemReferenceHtml) live with their decor item, never here too —
+  // otherwise the same reference photo would double-appear in the generic job/event list.
+  const visible = all.filter(a => !a.productionItemId && (a.displayLocations || []).includes(context) && (a.visibility !== 'admin' || invAdminUnlocked));
   let html = `<div class="section-label">Attachments</div>`;
 
   if (visible.length === 0) {
@@ -4256,6 +4282,66 @@ function psSubmitAddLink(jobId, context) {
   if (!urlEl || !urlEl.value.trim()) return;
   psAddLinkAttachment(jobId, context, urlEl.value, titleEl ? titleEl.value : '');
   psAddLinkOpenFor = null;
+}
+
+// ─── Item-scoped reference attachments (Production per-item, e.g. a mockup photo for THIS
+// decor item) — the same job.attachments[] records as everything else, just addressed by
+// productionItemId instead of displayLocations. Deliberately compact: a small clickable
+// thumbnail/icon (or "+N" once more than one exists) near the item header, never a full
+// attachment-management box repeated on every item — that full editor already exists
+// (psAttachmentsSectionHtml's expand/edit panel) and isn't duplicated here; this is reference
+// information, not another workflow stage.
+let psItemRefOpenFor = null; // which item's compact reference area is showing its add-controls / expanded list
+function psToggleItemRefOpen(lineId) {
+  psItemRefOpenFor = psItemRefOpenFor === lineId ? null : lineId;
+  psRenderProductionJobs();
+}
+function psSubmitItemRefLink(jobId, lineId) {
+  const urlEl = document.getElementById(`item-ref-link-url-${lineId}`);
+  const titleEl = document.getElementById(`item-ref-link-title-${lineId}`);
+  if (!urlEl || !urlEl.value.trim()) return;
+  psAddLinkAttachment(jobId, 'production', urlEl.value, titleEl ? titleEl.value : '', lineId);
+}
+function psItemReferenceHtml(job, line) {
+  const readOnly = job.status === 'completed';
+  const refs = (job.attachments || []).filter(a => a.productionItemId === line.id);
+  const first = refs[0];
+  let html = `<div class="no-print" style="flex-shrink:0; text-align:right;">`;
+  if (first) {
+    const isImage = first.kind !== 'link' && (first.fileType || '').startsWith('image/');
+    html += `<a href="${invAttr(first.url)}" target="_blank" rel="noopener" style="display:inline-block; position:relative;" aria-label="Open reference">
+      ${isImage
+        ? `<img src="${invAttr(first.url)}" style="width:36px; height:36px; object-fit:cover; border-radius:var(--radius-sm); border:0.5px solid var(--border-strong);">`
+        : `<span style="display:flex; width:36px; height:36px; align-items:center; justify-content:center; background:var(--bg); border-radius:var(--radius-sm); border:0.5px solid var(--border-strong);"><i class="fa-solid ${first.kind === 'link' ? 'fa-link' : psAttachmentIcon(first.fileType)}" style="color:var(--text-secondary); font-size:14px;"></i></span>`}
+      ${refs.length > 1 ? `<span style="position:absolute; bottom:-4px; right:-4px; background:var(--text); color:var(--bg); font-size:9px; font-weight:700; padding:1px 4px; border-radius:999px;">+${refs.length - 1}</span>` : ''}
+    </a>`;
+    if (!readOnly && invAdminUnlocked) {
+      html += `<div><button class="icon-btn" style="width:auto; padding:1px 4px; font-size:9px; color:var(--text-tertiary);" onclick="psToggleItemRefOpen('${line.id}')">manage</button></div>`;
+    }
+  } else if (!readOnly && invAdminUnlocked) {
+    html += `<button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary);" onclick="psToggleItemRefOpen('${line.id}')"><i class="fa-solid fa-plus"></i> Add reference</button>`;
+  }
+  html += `</div>`;
+  if (!readOnly && invAdminUnlocked && psItemRefOpenFor === line.id) {
+    html += `<div class="no-print" style="width:100%; margin-top:4px;">`;
+    if (refs.length) {
+      html += refs.map(a => `<div style="display:flex; align-items:center; gap:6px; font-size:11px; padding:2px 0;">
+        <a href="${invAttr(a.url)}" target="_blank" rel="noopener" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${psEscape(a.title || a.fileName)}</a>
+        <button class="icon-btn" style="width:auto; padding:1px 6px; font-size:10px;" onclick="psDeleteAttachment('${job.id}','${a.id}')">Remove</button>
+      </div>`).join('');
+    }
+    html += `<div class="row" style="margin-top:4px;">
+      <input type="file" id="item-ref-upload-${line.id}" style="display:none" onchange="psHandleAttachmentUpload('${job.id}', 'production', this, '${line.id}')" accept="image/*,application/pdf,.doc,.docx,.txt">
+      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px;" onclick="document.getElementById('item-ref-upload-${line.id}').click()"><i class="fa-solid fa-paperclip"></i> Add photo/file</button>
+    </div>
+    <div class="row" style="margin-top:4px;">
+      <input type="text" id="item-ref-link-url-${line.id}" placeholder="https://...">
+      <input type="text" id="item-ref-link-title-${line.id}" placeholder="Label (optional)" style="max-width:110px;">
+      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px;" onclick="psSubmitItemRefLink('${job.id}','${line.id}')">Add link</button>
+    </div>`;
+    html += `</div>`;
+  }
+  return html;
 }
 
 // Combined Notes & Attachments section — execution/reference info, as distinct from the Event
@@ -6113,12 +6199,26 @@ function psTaskRowHtml(job, task, itemLabel) {
     ${!done ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psSetTaskStatus('${job.id}','${task.id}', '${held ? 'ready' : 'hold'}')">${held ? 'Resume' : 'Hold'}</button>` : ''}`}
   </div>`;
 }
-// { [jobId|phase]: true } — expand state only, never persisted (matches every other in-memory
-// expand/collapse map in this file, e.g. ptExpandedTemplates) — collapsed by default per phase.
+// { [jobId|phase]: true|false } — expand state only, never persisted (matches every other
+// in-memory expand/collapse map in this file, e.g. ptExpandedTemplates). No explicit entry means
+// "use the phase's own sensible default" (see psPhaseDefaultExpanded) rather than always
+// collapsed — Prep, being the active first step on a new job, defaults open; Inflate & Build and
+// Finish & Pack default closed, matching this app's general collapsed-unless-needed preference.
+// Shared by all three workflow-stage sections (Prep/Build/Finish), so there is exactly one
+// collapse mechanism for the whole Production workflow, not three.
 let psExpandedTaskPhases = {};
+function psPhaseDefaultExpanded(phase) {
+  return phase === 'prep';
+}
+function psPhaseExpanded(jobId, phase) {
+  const key = jobId + '|' + phase;
+  return psExpandedTaskPhases.hasOwnProperty(key) ? psExpandedTaskPhases[key] : psPhaseDefaultExpanded(phase);
+}
 function psToggleTaskPhase(jobId, phase) {
   const key = jobId + '|' + phase;
-  psExpandedTaskPhases[key] = !psExpandedTaskPhases[key];
+  // Toggle from the EFFECTIVE (possibly defaulted) current state, not the raw stored value —
+  // otherwise a phase that's open only via its default would need two clicks to visibly close.
+  psExpandedTaskPhases[key] = !psPhaseExpanded(jobId, phase);
   psRenderProductionJobs();
 }
 // One stage's task list across every item on the job — a task's own itemLabel is only shown when
@@ -6128,8 +6228,7 @@ function psToggleTaskPhase(jobId, phase) {
 function psPhaseSectionHtml(job, phase) {
   const tasks = (job.tasks || []).filter(t => t.phase === phase);
   const done = tasks.filter(t => t.status === 'done').length;
-  const key = job.id + '|' + phase;
-  const expanded = !!psExpandedTaskPhases[key];
+  const expanded = psPhaseExpanded(job.id, phase);
   const label = TASK_PHASE_LABELS[phase];
   if (tasks.length === 0) {
     return `<div class="section-label">${psEscape(label)}</div><div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">No ${psEscape(label.toLowerCase())} tasks for this job yet.</div>`;
@@ -6225,6 +6324,366 @@ function psCompletedQtyControlHtml(job, idx, line) {
     ${readOnly ? '' : `<button class="icon-btn" style="width:auto; padding:2px 8px;" ${completed >= bookedQty ? 'disabled' : ''} onclick="psSetCompletedQty('${job.id}',${idx}, ${completed + 1})" aria-label="Increase completed count">+</button>`}
   </div>`;
 }
+// ═══════════════════════════════════════ PREP (unified pull + Review & Pull employee-facing view) ═══════════════════════════════════════
+//
+// Reconciles what used to be three separate employee-facing concepts (a plain per-item balloon
+// count, a "Pull" heading, and a distinct "Review & Pull — Standard Latex" section) into one
+// coherent Prep stage. The underlying architecture is completely unchanged and untouched: this
+// still reads psComputeJobRequirements/psReviewPullRows and still deducts through
+// invApplyInventoryTransactions via psPrepCheckPull/psPrepReturnPull (thin wrappers around the
+// existing psReviewPullConfirmRow) — Prep is a presentation and control layer on top of the same
+// ledger-backed engine, never a second one. Backend distinctions like "Standard Latex" vs.
+// "Specialty Latex" never appear in this employee-facing text; they still exist underneath.
+
+// Combines pull-row completion (the real ledger state) with this job's own prep-phase tasks
+// (synthetic topper/pull-note/general-color-note/modifier tasks) and any open "missing" note into
+// one derived complete/remaining figure — nothing here is a separate stored completion flag.
+function psPrepStatusInfo(job) {
+  const rows = psReviewPullRows(job).filter(r => r.kind === 'item');
+  const total = rows.length;
+  const done = rows.filter(r => r.status === 'done').length;
+  const prepTasks = (job.tasks || []).filter(t => t.phase === 'prep');
+  const tasksComplete = prepTasks.every(t => t.status === 'done');
+  const openMissing = (job.productionItems || []).some(l => psOpenClarifications(job, 'productionItem', l.id).length > 0);
+  return { done, total, complete: done === total && tasksComplete && !openMissing, remaining: Math.max(0, total - done) };
+}
+
+// A single color+size checkbox row — the employee-facing control for the real ledger Pull/Return.
+// `hideOwnQty` suppresses the per-row quantity when the group header above it already states
+// "N of each color" for every row in the group, so the number isn't shown twice.
+function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
+  if (row.status === 'configMissing' || row.status === 'formulaInvalid') return psReviewPullRowHtml(job, row, readOnly);
+  const busyKey = job.id + '|' + row.key;
+  const busy = !!psReviewPullBusyKeys[busyKey];
+  const label = row.color || rpItemLabel(row);
+  const checked = row.status === 'done';
+  let html = `<div class="ps-check-row${checked ? ' done' : ''}">`;
+  if (row.status === 'short') {
+    const missing = Math.max(0, row.stillNeeded - row.available);
+    html += `<input type="checkbox" disabled>`;
+    html += `<label>${psEscape(label)}${hideOwnQty ? '' : ` — need ${row.stillNeeded}`}</label>`;
+    html += `<span style="font-size:11px; color:var(--warning-text); white-space:nowrap; flex-shrink:0;">${missing} missing</span>`;
+    if (!readOnly && invAdminUnlocked) {
+      html += `<button class="icon-btn no-print" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" ${busy ? 'disabled' : ''} onclick="psReviewPullConfirmRow('${job.id}','${psJsKeyAttr(row.key)}', ${row.available})">${busy ? '…' : `Pull ${row.available}`}</button>`;
+    }
+  } else {
+    html += `<input type="checkbox" ${checked ? 'checked' : ''} ${(readOnly || busy) ? 'disabled' : ''} onchange="this.checked ? psPrepCheckPull('${job.id}','${psJsKeyAttr(row.key)}') : psPrepReturnPull('${job.id}','${psJsKeyAttr(row.key)}')">`;
+    html += `<label>${psEscape(label)}${hideOwnQty ? '' : ` — ${row.stillNeeded}`}${(!checked && row.alreadyPulled > 0) ? ` <span style="font-size:11px; color:var(--text-secondary);">(${row.alreadyPulled} already pulled)</span>` : ''}</label>`;
+    if (!checked && row.alreadyPulled > 0 && !readOnly) {
+      html += `<button class="icon-btn no-print" style="width:auto; padding:1px 6px; font-size:10px; flex-shrink:0;" ${busy ? 'disabled' : ''} onclick="psPrepReturnPull('${job.id}','${psJsKeyAttr(row.key)}')">Return ${row.alreadyPulled}</button>`;
+    }
+  }
+  html += `</div>`;
+  return html;
+}
+// Groups this item's own 'item'-kind rows by size — "SIZE — N of each color" when every color in
+// that size group needs the same amount (the common case), otherwise each row states its own
+// quantity. Never merges the underlying inventory identities themselves — every color keeps its
+// own independent checkbox/status regardless of how the header reads (see the batch instruction:
+// "do not collapse multiple inventory records into one ledger action for visual convenience").
+// Non-'item' rows (excluded/unresolved/noItem/etc.) render via the existing, unmodified
+// psReviewPullRowHtml — Prep reuses their real messaging/actions rather than reinventing them.
+function psPrepItemChecklistHtml(job, rows, readOnly) {
+  const itemRows = rows.filter(r => r.kind === 'item');
+  const edgeRows = rows.filter(r => r.kind !== 'item');
+  let html = '';
+  const bySize = {};
+  itemRows.forEach(r => { (bySize[r.size] = bySize[r.size] || []).push(r); });
+  Object.keys(bySize).sort((a, b) => INV_SIZES.indexOf(a) - INV_SIZES.indexOf(b)).forEach(size => {
+    const group = bySize[size];
+    // "of each color" reflects the underlying NEED being uniform, regardless of ready/short/done
+    // status — matches the batch instruction's own worked example exactly (Deluxe Black/Fashion
+    // White ready, Gray short, all three still needed the same 36 — the header stays, only Gray's
+    // own row adds its "missing" annotation).
+    const uniform = group.length > 1 && group.every(r => r.stillNeeded === group[0].stillNeeded);
+    html += `<div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin:6px 0 2px;">${psEscape(size)}${uniform ? ` — ${group[0].stillNeeded} of each color` : ''}</div>`;
+    group.forEach(r => { html += psPrepCheckboxRowHtml(job, r, readOnly, uniform); });
+  });
+  edgeRows.forEach(r => { html += psReviewPullRowHtml(job, r, readOnly); });
+  return html;
+}
+// Lightweight, contextual "something's missing" note — reuses the exact same job.feedback[]
+// Needs Clarification architecture already built (psAddFeedback/psOpenClarifications), scoped to
+// this production item, rather than a second notes system living only in Prep.
+let psPrepMissingOpenFor = null;
+function psPrepToggleMissingNote(lineId) {
+  psPrepMissingOpenFor = psPrepMissingOpenFor === lineId ? null : lineId;
+  psRenderProductionJobs();
+}
+function psPrepSubmitMissingNote(jobId, lineId) {
+  const el = document.getElementById('prep-missing-input-' + lineId);
+  if (!el || !el.value.trim()) return;
+  psAddFeedback(jobId, 'productionItem', lineId, 'needsClarification', el.value);
+  psPrepMissingOpenFor = null;
+}
+function psPrepMissingNoteHtml(job, line, readOnly) {
+  const open = psOpenClarifications(job, 'productionItem', line.id);
+  let html = open.map(item => psFeedbackEntryHtml(job, item, readOnly)).join('');
+  if (readOnly) return html;
+  if (psPrepMissingOpenFor === line.id) {
+    html += `<div class="no-print row" style="margin-top:4px;">
+      <input type="text" id="prep-missing-input-${line.id}" placeholder="e.g. Missing 16 black 11-inch balloons.">
+      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psPrepSubmitMissingNote('${job.id}','${line.id}')">Add</button>
+    </div>`;
+  } else {
+    html += `<button class="icon-btn no-print" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary); margin-top:2px;" onclick="psPrepToggleMissingNote('${line.id}')"><i class="fa-solid fa-plus"></i> Note something missing</button>`;
+  }
+  return html;
+}
+function psPrepSectionHtml(job) {
+  const readOnly = job.status === 'completed';
+  const expanded = psPhaseExpanded(job.id, 'prep');
+  const info = psPrepStatusInfo(job);
+  const hasItems = job.productionItems.length > 0;
+  const statusText = !hasItems ? '' : (info.complete ? '✓ Complete' : `${info.done}/${info.total} pulled · ${info.remaining} remaining`);
+  let html = `<div class="section-label" style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; margin-top:0.9rem;" onclick="psToggleTaskPhase('${job.id}','prep')">
+    <span>Prep</span>
+    <span style="font-size:12px; font-weight:400; color:var(--text-secondary); display:flex; align-items:center; gap:6px;">
+      ${psEscape(statusText)}
+      <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'}" style="font-size:11px;"></i>
+    </span>
+  </div>`;
+  if (!expanded) return html;
+  if (!hasItems) {
+    html += `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.5rem;">No items yet — add one below.</div>`;
+    return html;
+  }
+
+  html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Pull the following balloons and note anything that is missing.</div>`;
+
+  const allRows = psReviewPullRows(job);
+  const readyCount = allRows.filter(r => r.status === 'ready').length;
+  if (!readOnly && readyCount > 1) {
+    html += `<button class="save-btn" style="margin-bottom:0.5rem;" onclick="psReviewPullConfirmAllReady('${job.id}')">Pull all ready (${readyCount})</button>`;
+  }
+
+  const claimedKeys = new Set();
+  job.productionItems.forEach(line => {
+    const r = psLineRecipe(line);
+    if (!r) return;
+    const reqs = psComputeJobRequirements(job).filter(req => req.productionItemId === line.id);
+    const rows = [];
+    const seenInItem = new Set();
+    reqs.forEach(req => {
+      const { key: rk } = psPullRowKeyAndInfo(req);
+      if (seenInItem.has(rk)) return;
+      seenInItem.add(rk);
+      const row = allRows.find(x => x.key === rk);
+      if (row) { rows.push(row); claimedKeys.add(rk); }
+    });
+    const prepTasks = (job.tasks || []).filter(t => t.productionItemId === line.id && t.phase === 'prep');
+
+    html += `<div style="margin-bottom:0.75rem;">`;
+    html += `<div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))} <span style="font-weight:400; color:var(--text-secondary);">× ${line.qty}</span></div>`;
+    html += `<div class="ps-item-indent">`;
+    html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Colors: ${psEscape(line.colors.join(' / '))}</div>`;
+    // Add-ons/modifiers stay visible here too, even the non-inventory-backed ones with no pull
+    // row of their own (an inventory-backed one still gets its own real checkbox below via `rows`).
+    (line.modifiers || []).forEach(mod => {
+      if (!mod.label || !mod.label.trim()) return;
+      const qtyText = mod.qty > 1 ? ` × ${mod.qty}` : '';
+      const trackedNote = mod.inventoryRef ? '' : ' <span style="color:var(--text-tertiary);">(not inventory-tracked)</span>';
+      html += `<div style="font-size:12px; color:var(--text-secondary); padding:1px 0;">${psEscape(mod.label)}${qtyText}${trackedNote}</div>`;
+    });
+    html += psPrepItemChecklistHtml(job, rows, readOnly);
+    prepTasks.forEach(t => { html += psTaskRowHtml(job, t, null); });
+    html += `</div>`;
+    if (!readOnly) html += psItemInventoryExclusionEditorHtml(job, line);
+    html += psPrepMissingNoteHtml(job, line, readOnly);
+    html += `</div>`;
+  });
+
+  // A requirement whose productionItemId no longer matches any current line (e.g. a color was
+  // removed after already being computed once this render) — never silently dropped, shown under
+  // a small catch-all instead so nothing about inventory need ever vanishes unexplained.
+  const orphanRows = allRows.filter(r => !claimedKeys.has(r.key));
+  if (orphanRows.length) {
+    html += `<div style="font-size:11px; font-weight:700; color:var(--text-secondary); text-transform:uppercase; margin:6px 0 2px;">Other requirements</div>`;
+    orphanRows.forEach(r => { html += r.kind === 'item' ? psPrepCheckboxRowHtml(job, r, readOnly, false) : psReviewPullRowHtml(job, r, readOnly); });
+  }
+
+  return html;
+}
+
+// ═══════════════════════════════════════ INFLATE & BUILD (per-item: what to build, reference info, real checkable steps) ═══════════════════════════════════════
+function psBuildStatusInfo(job) {
+  const items = job.productionItems || [];
+  const total = items.length;
+  const done = items.filter(l => psItemFullyFinished(job, l.id)).length;
+  return { done, total, complete: total > 0 && done === total };
+}
+// One decor item's block: header (title + physical-completion control + Edit/Trash), a modestly
+// indented compact metadata reference block (Size/Qty/Style/Location/Colors) with the item's own
+// reference thumbnail alongside it, then full-width real content — checkable build tasks (never a
+// second build-step system; see the batch instruction on job.tasks), template-owned reference
+// text, Additional Notes, lightweight feedback triggers. Only the metadata returns to an indented
+// treatment; everything else sits at normal item-content alignment.
+function psBuildItemBlockHtml(job, line, idx, readOnly) {
+  const r = psLineRecipe(line);
+  if (!r) return '';
+  const editKey = psColorDraftKey(job.id, idx);
+  const sanitizedEditKey = editKey.replace(/\|/g, '-');
+  const editing = psEditingItemKey === editKey;
+
+  let html = `<div class="ps-item-block">`;
+  html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem; gap:8px;">
+    <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap;">
+      <div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))}</div>
+      ${psCompletedQtyControlHtml(job, idx, line)}
+      ${psItemProgressBadgeHtml(job, line.id)}
+    </div>
+    <div style="display:flex; gap:2px; flex-shrink:0;">
+      ${(!editing && !readOnly) ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx})">Edit</button>` : ''}
+      ${readOnly ? '' : `<button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>`}
+    </div>
+  </div>`;
+
+  if (editing && !readOnly) {
+    html += `<div class="no-print">
+      ${psFootageEditorHtml(line, r, sanitizedEditKey)}
+      <div class="settings-field"><label>Item label <span style="font-weight:400;">(optional — shown here and in Prep instead of the template name)</span></label><input type="text" id="pi-edit-label-${sanitizedEditKey}" placeholder="${psEscape(r.display)}" value="${psEscape(line.itemLabel || '')}"></div>
+      <div class="settings-field"><label>Quantity</label><input type="number" id="pi-edit-qty-${sanitizedEditKey}" value="${line.qty}" min="1" inputmode="numeric"></div>
+      <div class="settings-field">
+        <label>Colors</label>
+        ${psColorPickerHtml(editKey, psGetColorDraft(editKey, line.colors))}
+      </div>
+      ${psColorDistEditorHtml(editKey)}
+      ${psSizeOverrideEditorHtml(line, r, sanitizedEditKey)}
+      <div class="row">
+        <div class="settings-field" style="margin-bottom:0"><label>Design (optional)</label><input type="text" id="pi-edit-design-${sanitizedEditKey}" value="${psEscape(line.design || '')}"></div>
+        <div class="settings-field" style="margin-bottom:0"><label>Location (optional)</label><input type="text" id="pi-edit-location-${sanitizedEditKey}" value="${psEscape(line.location || '')}"></div>
+      </div>
+      ${psTopperFt(r) ? `<div class="settings-field"><label>Topper balloons (optional note)</label><input type="text" id="pi-edit-topper-${sanitizedEditKey}" value="${psEscape(line.topperNote || '')}"></div>` : ''}
+      ${psModifierEditorHtml(job, idx, line)}
+      <div style="display:flex; gap:8px; margin-bottom:0.75rem;">
+        <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="psSaveEditItem('${job.id}', ${idx})">Save changes</button>
+        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="psCancelEditItem()">Cancel</button>
+      </div>
+    </div>`;
+  } else {
+    html += `<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">`;
+    html += `<div class="ps-item-indent ps-build-fields" style="flex:1; min-width:0;">`;
+    html += `<b>Size:</b> ${psEscape(psLineFootageText(line, r))}<br><b>Qty:</b> ${line.qty}<br><b>Style:</b> ${psEscape(r.style || r.category)}<br>`;
+    if (psTopperFt(r)) html += `<b>Topper:</b> ~${psTopperFt(r)} ft included${line.topperNote ? ' (' + psEscape(line.topperNote) + ')' : ''}<br>`;
+    if (line.design) html += `<b>Design:</b> ${psEscape(line.design)}<br>`;
+    if (line.indoorOutdoor) html += `<b>${psEscape(line.indoorOutdoor)}</b><br>`;
+    if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
+    html += `<b>Colors:</b> ${psEscape(line.colors.join(' / '))}<br>`;
+    if (line.sizeOverride && Object.keys(line.sizeOverride).length) html += `<b>Size mix:</b> custom for this job<br>`;
+    html += `</div>`;
+    html += psItemReferenceHtml(job, line);
+    html += `</div>`;
+  }
+
+  // Real, checkable build steps — job.tasks, the one existing task/progress system, never a
+  // second one. A template's tasks[] are deliberately milestone-only by default (see PS_BUILTIN_TASKS'
+  // own comment); buildInstructions (if a business has written one) stays separate, plain reference
+  // prose below rather than being guessed/split into fake steps.
+  const buildTasks = (job.tasks || []).filter(t => t.productionItemId === line.id && t.phase === 'build');
+  if (buildTasks.length) {
+    buildTasks.forEach(t => { html += psTaskRowHtml(job, t, null); });
+  }
+  if (r.buildInstructions) html += `<div class="ps-build-fields"><b>Reference instructions:</b> ${psEscape(r.buildInstructions)}</div>`;
+  if (r.equipmentList && r.equipmentList.length) html += `<div class="ps-build-fields"><b>Equipment:</b> ${r.equipmentList.map(psEscape).join(', ')}</div>`;
+  if (r.packList && r.packList.length) html += `<div class="ps-build-fields"><b>Pack list:</b> ${r.packList.map(psEscape).join(', ')}</div>`;
+  if (r.installNotes) html += `<div class="ps-build-fields"><b>Install notes:</b> ${psEscape(r.installNotes)}</div>`;
+  if (r.staffingRecommendation) html += `<div class="ps-build-fields"><b>Staffing:</b> ${psEscape(r.staffingRecommendation)}</div>`;
+
+  // Additional Notes — the existing job-specific Build Notes field, relabeled and de-emphasized
+  // (a subtle "+ Add note" when empty) so it no longer visually competes with the real
+  // instructions/tasks above it.
+  html += psAdditionalNotesHtml(job, idx, line, readOnly);
+
+  // Lightweight feedback triggers instead of a permanently-open large form — the same underlying
+  // psFeedbackSectionHtml/psAddFeedback architecture, just revealed on demand (see
+  // psItemFeedbackTriggersHtml).
+  html += psItemFeedbackTriggersHtml(job, line, readOnly);
+
+  html += `</div>`;
+  return html;
+}
+let psAdditionalNotesOpenFor = null;
+function psToggleAdditionalNotes(lineId) {
+  psAdditionalNotesOpenFor = psAdditionalNotesOpenFor === lineId ? null : lineId;
+  psRenderProductionJobs();
+}
+function psAdditionalNotesHtml(job, idx, line, readOnly) {
+  const hasNote = line.notes && line.notes.trim();
+  if (readOnly) {
+    if (!hasNote) return '';
+    return `<div class="settings-field" style="margin-top:0.5rem;"><label>Additional notes</label><div style="font-size:13px; white-space:pre-wrap;">${psEscape(line.notes)}</div></div>`;
+  }
+  if (hasNote || psAdditionalNotesOpenFor === line.id) {
+    return `<div class="settings-field no-print" style="margin-top:0.5rem;">
+      <label>Additional notes</label>
+      <textarea rows="2" placeholder="Anything job-specific worth noting..." onchange="psUpdateItemNotes('${job.id}', ${idx}, this.value)">${hasNote ? psEscape(line.notes) : ''}</textarea>
+    </div>`;
+  }
+  return `<button class="icon-btn no-print" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary); margin-top:0.4rem;" onclick="psToggleAdditionalNotes('${line.id}')"><i class="fa-solid fa-plus"></i> Add note</button>`;
+}
+// Two small triggers instead of the full always-visible Needs Clarification / Team Feedback /
+// Note for Next Time form — clicking one reveals just that kind's input. Existing entries for
+// this item always remain visible above the triggers regardless. Same underlying architecture
+// (psFeedbackSectionHtml's own entries/resolve/reopen rendering, psAddFeedback) — only the
+// add-affordance is more contextual.
+let psItemFeedbackOpenFor = null; // `${lineId}|${kind}` currently revealed, or null
+function psToggleItemFeedback(lineId, kind) {
+  const key = lineId + '|' + kind;
+  psItemFeedbackOpenFor = psItemFeedbackOpenFor === key ? null : key;
+  psRenderProductionJobs();
+}
+function psSubmitItemFeedback(jobId, lineId, kind) {
+  const el = document.getElementById(`item-feedback-input-${lineId}-${kind}`);
+  if (!el || !el.value.trim()) return;
+  psAddFeedback(jobId, 'productionItem', lineId, kind, el.value);
+  psItemFeedbackOpenFor = null;
+}
+function psItemFeedbackTriggersHtml(job, line, readOnly) {
+  // Reads the same job.feedback[] records psPrepMissingNoteHtml also shows in Prep (stable ids,
+  // never duplicated storage) — showing them here too keeps them visible from wherever someone is
+  // actually working, whether that's Prep or Build.
+  const entries = psJobFeedback(job, 'productionItem', line.id);
+  let html = '';
+  if (entries.length) html += entries.map(item => psFeedbackEntryHtml(job, item, readOnly)).join('');
+  if (readOnly) return html;
+  html += `<div class="no-print" style="display:flex; gap:12px; margin-top:4px;">`;
+  [['needsClarification', 'Ask a question / Needs clarification'], ['noteForNextTime', 'Note for next time']].forEach(([kind, label]) => {
+    const key = line.id + '|' + kind;
+    html += psItemFeedbackOpenFor === key
+      ? `<div class="row" style="flex:1;"><input type="text" id="item-feedback-input-${line.id}-${kind}" placeholder="${psEscape(label)}"><button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psSubmitItemFeedback('${job.id}','${line.id}','${kind}')">Add</button></div>`
+      : `<button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary);" onclick="psToggleItemFeedback('${line.id}','${kind}')"><i class="fa-solid fa-plus"></i> ${psEscape(label)}</button>`;
+  });
+  html += `</div>`;
+  return html;
+}
+function psBuildSectionHtml(job) {
+  const readOnly = job.status === 'completed';
+  const expanded = psPhaseExpanded(job.id, 'build');
+  const info = psBuildStatusInfo(job);
+  const hasItems = job.productionItems.length > 0;
+  const statusText = !hasItems ? '' : `${info.done}/${info.total} items complete`;
+  let html = `<div class="section-label" style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; margin-top:0.9rem;" onclick="psToggleTaskPhase('${job.id}','build')">
+    <span>Inflate &amp; Build</span>
+    <span style="font-size:12px; font-weight:400; color:var(--text-secondary); display:flex; align-items:center; gap:6px;">
+      ${psEscape(statusText)}
+      <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'}" style="font-size:11px;"></i>
+    </span>
+  </div>`;
+  if (!expanded) return html;
+  if (!hasItems) {
+    html += `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.5rem;">No items yet — add one below.</div>`;
+    return html;
+  }
+  job.productionItems.forEach((line, idx) => { html += psBuildItemBlockHtml(job, line, idx, readOnly); });
+  return html;
+}
+
+function psGoToEditEventDetails(jobId) {
+  showView('staffing');
+  psExpandedStaffing = jobId;
+  psEventEditOpen = jobId;
+  psRenderStaffingJobs();
+}
 function psProductionBodyHtml(job) {
   // Completed jobs stay a fully readable historical record (configuration, tasks, completedQty,
   // notes) but must never accept new operational mutation — caught during the Batch 2 regression
@@ -6234,70 +6693,18 @@ function psProductionBodyHtml(job) {
   const readOnly = job.status === 'completed';
   let html = '';
 
-  html += `<div class="section-label" style="margin-top:0.75rem;">Pull</div>`;
-  if (job.productionItems.length === 0) {
-    html += `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.5rem;">No items yet — add one below.</div>`;
-  } else {
-    job.productionItems.forEach(line => {
-      const r = psLineRecipe(line);
-      if (!r) return;
-      const totalsResult = psComputeTotals(r, line.qty, line.customLinear);
-      const totals = totalsResult.valid ? psApplySizeOverride(totalsResult.sizes, line) : totalsResult.sizes;
-      const balloonColors = psLineBalloonColors(line);
-      const nColors = balloonColors.length || line.colors.length; // guard: if every color was flagged as a note, fall back rather than divide by zero
-      const distByName = {};
-      (line.colorDist || []).forEach(cd => { distByName[cd.name] = cd.pct; });
-      const colorsText = line.colors.map(c => Number.isFinite(distByName[c]) ? `${c} (${distByName[c]}%)` : c).join(' / ');
-      html += `<div style="font-size:14px; font-weight:700; margin-bottom:2px;">${psEscape(psLineLabel(line, r))} <span style="font-weight:400; color:var(--text-secondary);">× ${line.qty}</span></div>`;
-      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.3rem;">Colors: ${psEscape(colorsText)}</div>`;
-      if (!totalsResult.valid) {
-        html += `<div style="font-size:12px; color:var(--warning-text); margin:4px 0;">
-          <i class="fa-solid fa-triangle-exclamation"></i> ${psEscape(psInvalidFormulaMessage(totalsResult.reason))}
-          ${r.id ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; margin-left:4px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psGoToProductionTemplate('${r.id}')">Fix template</button>` : ''}
-        </div>`;
-      }
-      // Plain, informational counts — never a checkbox. Review & Pull just below is the one real,
-      // ledger-backed record of whether a balloon pull actually happened; this is purely a quick
-      // per-item read (Review & Pull itself aggregates across every item on the job by color+size,
-      // so it can't show "which specific column needs how many" the way this can).
-      SIZE_ORDER.forEach(size => {
-        if (!totals[size]) return;
-        if (line.colorDist && line.colorDist.length) {
-          // Carries the exact percentage split dialed in on the Quantity Calculator,
-          // rather than Production's usual equal-per-color rule.
-          line.colorDist.forEach(cd => {
-            const n = Math.round(totals[size] * (cd.pct / 100));
-            if (n <= 0) return;
-            const text = nColors > 1 ? `${n} – ${size} (${psEscape(cd.name)})` : `${n} – ${size}`;
-            html += `<div style="font-size:13px; padding:2px 0;">${text}</div>`;
-          });
-        } else {
-          const perColor = psColorCount(totals[size], nColors);
-          const text = nColors > 1 ? `${perColor} – ${size} of each color` : `${perColor} – ${size}`;
-          html += `<div style="font-size:13px; padding:2px 0;">${text}</div>`;
-        }
-      });
-      // Add-ons/modifiers are shown here too (so "it's required" is visible at a glance) even when
-      // not inventory-backed — an inventory-backed one is additionally tracked and deducted via
-      // Review & Pull just below; one with no inventoryRef is informational only, nothing to pull.
-      (line.modifiers || []).forEach(mod => {
-        if (!mod.label || !mod.label.trim()) return;
-        const qtyText = mod.qty > 1 ? ` × ${mod.qty}` : '';
-        const trackedNote = mod.inventoryRef ? '' : ' <span style="color:var(--text-tertiary);">(not inventory-tracked)</span>';
-        html += `<div style="font-size:13px; padding:2px 0;">${psEscape(mod.label)}${qtyText}${trackedNote}</div>`;
-      });
-      html += psItemInventoryExclusionEditorHtml(job, line);
-    });
-    html += `<div class="ps-pack-note">Pack extras of each size/color.</div>`;
+  // Client/Event name + date are already shown once, in the shared job header above this body —
+  // no second editable copy down here (see the batch instruction). An admin who needs to correct
+  // them gets an intentional shortcut into the ONE real edit form (Staffing's Event section,
+  // psUpdateJobField/psUpdateStaffingField) rather than a duplicate.
+  if (!readOnly && invAdminUnlocked) {
+    html += `<div class="no-print" style="margin-bottom:0.4rem;"><button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px; color:var(--text-secondary);" onclick="psGoToEditEventDetails('${job.id}')"><i class="fa-solid fa-pen"></i> Edit event details</button></div>`;
   }
 
-  html += psReviewPullSectionHtml(job);
-
-  // Topper notes, a template's own pull-list note, and colors marked "general note — not
-  // inventory-tracked" during import are real, checkable Prep work (see
-  // psSyncSyntheticPrepTasks) — this is where they live now, alongside any template-defined Prep
-  // tasks, instead of the old disconnected pullChecklist checkboxes.
-  if (job.productionItems.length > 0) html += psPhaseSectionHtml(job, 'prep');
+  // PREP -> INFLATE & BUILD -> FINISH & PACK: the three employee-facing workflow stages, each its
+  // own collapsible section with a derived (never separately stored) status.
+  html += psPrepSectionHtml(job);
+  html += psBuildSectionHtml(job);
 
   // Rental-classified import items (see the Mapping Layer / IM_CLASSIFICATIONS) land in
   // job.rentalItems instead of productionItems — they're gear to gather and bring back, not
@@ -6318,83 +6725,7 @@ function psProductionBodyHtml(job) {
     });
   }
 
-  if (job.productionItems.length > 0) {
-    html += psPhaseSectionHtml(job, 'build');
-    job.productionItems.forEach((line, idx) => {
-      const r = psLineRecipe(line);
-      if (!r) return;
-      const editKey = psColorDraftKey(job.id, idx);
-      const sanitizedEditKey = editKey.replace(/\|/g, '-');
-      const editing = psEditingItemKey === editKey;
-
-      html += `<div class="ps-item-block">`;
-      html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem;">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))}</div>
-          ${psItemProgressBadgeHtml(job, line.id)}
-        </div>
-        <div style="display:flex; gap:2px;">
-          ${(!editing && !readOnly) ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx})">Edit</button>` : ''}
-          ${readOnly ? '' : `<button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>`}
-        </div>
-      </div>`;
-      html += psCompletedQtyControlHtml(job, idx, line);
-
-      if (editing && !readOnly) {
-        html += `<div class="no-print">
-          ${psFootageEditorHtml(line, r, sanitizedEditKey)}
-          <div class="settings-field"><label>Item label <span style="font-weight:400;">(optional — shown here and in Review &amp; Pull instead of the template name)</span></label><input type="text" id="pi-edit-label-${sanitizedEditKey}" placeholder="${psEscape(r.display)}" value="${psEscape(line.itemLabel || '')}"></div>
-          <div class="settings-field"><label>Quantity</label><input type="number" id="pi-edit-qty-${sanitizedEditKey}" value="${line.qty}" min="1" inputmode="numeric"></div>
-          <div class="settings-field">
-            <label>Colors</label>
-            ${psColorPickerHtml(editKey, psGetColorDraft(editKey, line.colors))}
-          </div>
-          ${psColorDistEditorHtml(editKey)}
-          ${psSizeOverrideEditorHtml(line, r, sanitizedEditKey)}
-          <div class="row">
-            <div class="settings-field" style="margin-bottom:0"><label>Design (optional)</label><input type="text" id="pi-edit-design-${sanitizedEditKey}" value="${psEscape(line.design || '')}"></div>
-            <div class="settings-field" style="margin-bottom:0"><label>Location (optional)</label><input type="text" id="pi-edit-location-${sanitizedEditKey}" value="${psEscape(line.location || '')}"></div>
-          </div>
-          ${psTopperFt(r) ? `<div class="settings-field"><label>Topper balloons (optional note)</label><input type="text" id="pi-edit-topper-${sanitizedEditKey}" value="${psEscape(line.topperNote || '')}"></div>` : ''}
-          ${psModifierEditorHtml(job, idx, line)}
-          <div style="display:flex; gap:8px; margin-bottom:0.75rem;">
-            <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="psSaveEditItem('${job.id}', ${idx})">Save changes</button>
-            <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="psCancelEditItem()">Cancel</button>
-          </div>
-        </div>`;
-      } else {
-        html += `<div class="ps-build-fields">`;
-        html += `<b>Size:</b> ${psEscape(psLineFootageText(line, r))}<br><b>Qty:</b> ${line.qty}<br><b>Style:</b> ${psEscape(r.style || r.category)}<br>`;
-        if (psTopperFt(r)) html += `<b>Topper:</b> ~${psTopperFt(r)} ft included${line.topperNote ? ' (' + psEscape(line.topperNote) + ')' : ''}<br>`;
-        if (line.design) html += `<b>Design:</b> ${psEscape(line.design)}<br>`;
-        if (line.indoorOutdoor) html += `<b>${psEscape(line.indoorOutdoor)}</b><br>`;
-        if (line.location) html += `<b>Location:</b> ${psEscape(line.location)}<br>`;
-        html += `<b>Colors:</b> ${psEscape(line.colors.join(' / '))}<br>`;
-        if (line.sizeOverride && Object.keys(line.sizeOverride).length) html += `<b>Size mix:</b> custom for this job<br>`;
-        html += `</div>`;
-
-        // Template-owned build details, carried on whatever this line's recipe/customRecipe
-        // snapshot is — set once in Production Templates (Formulas & Recipes), shown here
-        // read-only per job item. Only rendered when the template actually has something.
-        if (r.buildInstructions) html += `<div class="ps-build-fields"><b>Build instructions:</b> ${psEscape(r.buildInstructions)}</div>`;
-        if (r.equipmentList && r.equipmentList.length) html += `<div class="ps-build-fields"><b>Equipment:</b> ${r.equipmentList.map(psEscape).join(', ')}</div>`;
-        if (r.packList && r.packList.length) html += `<div class="ps-build-fields"><b>Pack list:</b> ${r.packList.map(psEscape).join(', ')}</div>`;
-        if (r.installNotes) html += `<div class="ps-build-fields"><b>Install notes:</b> ${psEscape(r.installNotes)}</div>`;
-        if (r.staffingRecommendation) html += `<div class="ps-build-fields"><b>Staffing:</b> ${psEscape(r.staffingRecommendation)}</div>`;
-      }
-
-      html += `<div class="settings-field no-print" style="margin-top:0.5rem;">
-        <label>Build notes</label>
-        ${readOnly
-          ? `<div style="font-size:13px; white-space:pre-wrap;">${line.notes ? psEscape(line.notes) : '<span style="color:var(--text-secondary);">None.</span>'}</div>`
-          : `<textarea rows="2" placeholder="Add construction notes..." onchange="psUpdateItemNotes('${job.id}', ${idx}, this.value)">${line.notes ? psEscape(line.notes) : ''}</textarea>`}
-      </div>`;
-      html += `<div style="margin-top:0.4rem;">${psFeedbackSectionHtml(job, 'productionItem', line.id, 'item-fb-' + sanitizedEditKey, 'Notes & Clarification', ['needsClarification', 'teamFeedback', 'noteForNextTime'])}</div>`;
-      html += `</div>`;
-    });
-
-    html += psPhaseSectionHtml(job, 'finish');
-  }
+  if (job.productionItems.length > 0) html += psPhaseSectionHtml(job, 'finish');
 
   html += `<div class="no-print">`;
   if (readOnly) {
@@ -6430,20 +6761,13 @@ function psProductionBodyHtml(job) {
       <button class="icon-btn" style="width:auto; padding:8px 14px; font-size:13px;" onclick="psToggleAddItemForm('${job.id}')">Done</button>
     </div>`;
   }
-
-  html += `<div class="section-label">Job details</div>`;
-  if (readOnly) {
-    html += psEventFieldRowHtml('Client / Event', job.jobName);
-    html += psEventFieldRowHtml('Event date', job.eventDate);
-  } else {
-    html += `<div class="row">
-      <div class="settings-field" style="margin-bottom:0"><label>Client / Event name</label><input type="text" value="${psEscape(job.jobName)}" onchange="psUpdateJobField('${job.id}','jobName',this.value)"></div>
-      <div class="settings-field" style="margin-bottom:0"><label>Event date</label><input type="text" value="${psEscape(job.eventDate)}" onchange="psUpdateJobField('${job.id}','eventDate',this.value)"></div>
-    </div>`;
-  }
   html += `</div>`;
 
-  html += psNotesAttachmentsSectionHtml(job, 'production');
+  // No bottom "Job Details" form (see above) and no generic job/event Attachments management
+  // area here — that already lives, once, on the Event screen (psNotesAttachmentsSectionHtml,
+  // context 'event'); duplicating it under Production added nothing but a second copy of the same
+  // records. Item-specific reference photos/files now live with their own decor item instead (see
+  // psItemReferenceHtml).
 
   if (job.productionItems.length > 0) {
     html += `<button class="save-btn no-print" onclick="window.print()"><i class="fa-solid fa-print"></i> Print / Save as PDF</button>`;
@@ -8909,6 +9233,46 @@ function invBalloonsToStandardUnits(existingRemainder, balloonsUsed, standardQty
   const newRemainder = Math.max(0, totalUsage - unitsConsumed * standardQty);
   return { unitsConsumed, newRemainder };
 }
+// The exact inverse of invBalloonsToStandardUnits' forward consumption — giving back `amount`
+// balloons into the shared pool. Only reopens a whole Standard Package when giving back MORE than
+// the pool's current remainder already owes; a return that stays within the outstanding remainder
+// just reduces that debt and never fabricates a bag-open that never actually happened. Purely
+// additive against whatever the CURRENT remainder is, so it composes safely regardless of what
+// else has happened to this item+size since the original pull (another job's pull, a restock,
+// etc.) — see psPrepReturnPull, which is the one caller and always passes only the POOL portion of
+// what was pulled (the loose-stock portion is restored separately, additively, to looseBalloons).
+function invReturnToStandardUnits(currentRemainder, amount, standardQty) {
+  const R = currentRemainder || 0;
+  if (amount <= R) return { unitsRestored: 0, newRemainder: R - amount };
+  const shortfall = amount - R;
+  const unitsRestored = Math.ceil(shortfall / standardQty);
+  const newRemainder = unitsRestored * standardQty - shortfall;
+  return { unitsRestored, newRemainder };
+}
+// Reconstructs exactly how much of a job's currently-outstanding pull for one Standard Latex
+// item+size came from loose stock vs. the shared remainder/backstock pool at pull time, from each
+// PULL transaction's own already-recorded looseBefore/looseAfter — never a guess, and never the
+// requirement's current (possibly since-edited) qty. A RETURN always reverses the full outstanding
+// amount in one action (see psPrepReturnPull), so only PULL transactions since the most recent
+// RETURN (or since the beginning) are still "outstanding" and worth summing.
+function invStandardLatexOutstandingSplit(jobId, itemId, size) {
+  const txns = INVENTORY_TRANSACTIONS
+    .filter(t => t.jobId === jobId && t.itemId === itemId && t.size === size && (t.type === 'PULL' || t.type === 'RETURN'))
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt);
+  let pending = [];
+  txns.forEach(t => {
+    if (t.type === 'PULL' && typeof t.balloonsUsed === 'number') pending.push(t);
+    else if (t.type === 'RETURN') pending = [];
+  });
+  let fromLoose = 0, fromPool = 0;
+  pending.forEach(t => {
+    const usedFromLoose = (typeof t.looseBefore === 'number' && typeof t.looseAfter === 'number') ? Math.max(0, t.looseBefore - t.looseAfter) : 0;
+    fromLoose += usedFromLoose;
+    fromPool += Math.max(0, (t.balloonsUsed || 0) - usedFromLoose);
+  });
+  return { fromLoose, fromPool };
+}
 
 // Resolves the signed-in user to a display name (via TEAM_MEMBERS) plus the raw email, so history
 // stays legible ("Sheila") while still keeping the real, unspoofable identity for a genuine audit
@@ -9025,13 +9389,16 @@ function invGenericItemLabel(system, item) {
 // Sums one job's already-recorded PULL transactions for a non-Standard-Latex system's item —
 // the generic-system counterpart to invBalloonsPulledForJob, without any bag/balloon conversion
 // (a generic entry's delta is always already in the same unit the requirement itself is in).
+// Net PULL minus RETURN, the generic-system counterpart to invBalloonsPulledForJob's own netting
+// — same reasoning: RETURN is a distinct transaction, never a rewrite of the original PULL.
 function invQtyPulledForJob(jobId, system, itemId, size) {
   let total = 0;
   INVENTORY_TRANSACTIONS.forEach(t => {
-    if (t.jobId !== jobId || (t.system || 'standardLatex') !== system || t.itemId !== itemId || (t.size || null) !== (size || null) || t.type !== 'PULL') return;
-    total += Math.abs(t.delta || 0);
+    if (t.jobId !== jobId || (t.system || 'standardLatex') !== system || t.itemId !== itemId || (t.size || null) !== (size || null)) return;
+    if (t.type === 'PULL') total += Math.abs(t.delta || 0);
+    else if (t.type === 'RETURN') total -= Math.abs(t.delta || 0);
   });
-  return total;
+  return Math.max(0, total);
 }
 
 // entries: [{ system?, itemId, size, type, delta?, balloonsUsed?, ... }] — `system` defaults to
@@ -9103,7 +9470,7 @@ function invApplyInventoryTransactions(entries) {
       const sd = item.sizes[e.size];
       const previousBalance = sd.backstock || 0;
       let delta, balloonsUsed = null, perBagAtTime = null, remainderBefore = null, remainderAfter = null;
-      let looseBefore = null, looseAfter = null;
+      let looseBefore = null, looseAfter = null, balloonsReturned = null;
       if (typeof e.balloonsUsed === 'number') {
         // Loose-first consumption: known loose balloons (a real physical partial bag — see
         // looseBalloons) are used before BBT assumes another sealed Standard Package is being
@@ -9147,6 +9514,33 @@ function invApplyInventoryTransactions(entries) {
         looseAfter = sd.looseBalloons;
         delta = unitsGained;
         perBagAtTime = perBag;
+      } else if (typeof e.returnLoosePortion === 'number' || typeof e.returnPoolPortion === 'number') {
+        // Reversal of a specific job's own pull (see psPrepReturnPull /
+        // invStandardLatexOutstandingSplit) — restores the loose-sourced portion straight to
+        // looseBalloons (a plain additive credit, safe regardless of what's changed since) and the
+        // pool-sourced portion via invReturnToStandardUnits, the exact inverse of the forward
+        // loose-first-consumption math. A naive "just receive N loose balloons" reversal was tried
+        // and rejected during design: it left usageRemainder untouched while also crediting
+        // looseBalloons, net-fabricating balloons that were never physically there (confirmed via
+        // live testing) — this split-and-invert approach is the actual safe fix, not a shortcut.
+        const perBag = sd.perBag;
+        if (!perBag || perBag <= 0) {
+          throw Object.assign(new Error(`Standard Package Qty isn't set for ${item.color} ${e.size} — set it before this can be returned to stock.`), { code: 'MISSING_STANDARD_QTY', itemId: e.itemId, size: e.size });
+        }
+        const loosePortion = e.returnLoosePortion || 0;
+        const poolPortion = e.returnPoolPortion || 0;
+        const existingLoose = sd.looseBalloons || 0;
+        looseBefore = existingLoose;
+        sd.looseBalloons = existingLoose + loosePortion;
+        looseAfter = sd.looseBalloons;
+        const existingRemainder = sd.usageRemainder || 0;
+        const restored = invReturnToStandardUnits(existingRemainder, poolPortion, perBag);
+        remainderBefore = existingRemainder;
+        remainderAfter = restored.newRemainder;
+        sd.usageRemainder = restored.newRemainder;
+        delta = restored.unitsRestored;
+        perBagAtTime = perBag;
+        balloonsReturned = loosePortion + poolPortion;
       } else {
         delta = e.delta;
       }
@@ -9206,7 +9600,7 @@ function invApplyInventoryTransactions(entries) {
       txDocs.push({
         id: psNewInventoryTransactionId(), system: 'standardLatex', itemId: e.itemId, size: e.size, color: item.color, brand: item.brand,
         type, unit: trackingUnit, delta, previousBalance, newBalance,
-        balloonsUsed, perBagAtTime, remainderBefore, remainderAfter, looseBefore, looseAfter,
+        balloonsUsed, perBagAtTime, remainderBefore, remainderAfter, looseBefore, looseAfter, balloonsReturned,
         jobId: e.jobId || null, jobName: e.jobName || null,
         reference: e.reference || '', note: e.note || '',
         who: actor.who, whoEmail: actor.whoEmail,
@@ -10390,7 +10784,6 @@ function invUpcomingFor(item, invSize, upcomingMap) {
 // partial/repeated pulls safe: there is no persisted "requirements" record to go stale, and a
 // transaction that already landed can never be counted twice.
 
-let psReviewPullExpandedJobs = {}; // { [jobId]: true } — a UI toggle only, not persisted
 let psReviewPullBusyKeys = {};     // { [jobId + '|' + rowKey]: true } while that row's pull is in flight — blocks double-submit
 let psReviewPullBrandDraft = {};   // { [jobId + '|' + colorNameLower]: brand } — picked brand for an "add to Library" row, before it's confirmed
 
@@ -10413,59 +10806,69 @@ function invAvailableBalloons(sd) {
 // back to converting delta with whatever perBagAtTime was captured at the time (or the item's
 // current Standard Package Qty if that transaction predates perBagAtTime) — an honest best-effort
 // for that one legacy/manual-overlap case, not a claim of exactness for it.
+// Net PULL minus RETURN for this exact job+item+size — RETURN (see psPrepReturnPull) is a
+// distinct transaction type, never a rewrite/deletion of the original PULL, so history stays
+// honest (both records remain in INVENTORY_TRANSACTIONS forever) while this "how much is
+// currently pulled" read reflects the net effect of both.
 function invBalloonsPulledForJob(jobId, itemId, size) {
   let total = 0;
   INVENTORY_TRANSACTIONS.forEach(t => {
-    if (t.jobId !== jobId || t.itemId !== itemId || t.size !== size || t.type !== 'PULL') return;
-    if (typeof t.balloonsUsed === 'number') { total += t.balloonsUsed; return; }
-    const item = invFindItem(itemId);
-    const perBag = t.perBagAtTime || (item && item.sizes[size] && item.sizes[size].perBag) || 0;
-    if (perBag > 0) total += Math.abs(t.delta || 0) * perBag;
+    if (t.jobId !== jobId || t.itemId !== itemId || t.size !== size) return;
+    if (t.type === 'PULL') {
+      if (typeof t.balloonsUsed === 'number') { total += t.balloonsUsed; return; }
+      const item = invFindItem(itemId);
+      const perBag = t.perBagAtTime || (item && item.sizes[size] && item.sizes[size].perBag) || 0;
+      if (perBag > 0) total += Math.abs(t.delta || 0) * perBag;
+    } else if (t.type === 'RETURN' && typeof t.balloonsReturned === 'number') {
+      total -= t.balloonsReturned;
+    }
   });
-  return total;
-}
-
-function psReviewPullToggle(jobId) {
-  psReviewPullExpandedJobs[jobId] = !psReviewPullExpandedJobs[jobId];
-  psRenderProductionJobs();
+  return Math.max(0, total);
 }
 
 // Groups this job's raw per-line requirement rows by the same inventory identity
 // invComputeUpcoming already groups by across all jobs — colorId+size when resolved, else the
 // unresolved color name+size — so multiple production lines needing the same color/size on one
 // job show as a single pull line instead of several, then attaches this row's actionable status.
+// The grouping key + starting shape for one requirement's Review & Pull row — extracted from
+// psReviewPullRows so the new Prep UI (psPrepSectionHtml) can map a specific production item's
+// own requirements back to the exact same already-computed row, rather than re-deriving or
+// duplicating this grouping logic in a second place. NOT the same as psRequirementKey (used for
+// inventory exclusion) — that one deliberately includes productionItemId so two items excluding
+// the identical color never collide; this one deliberately does NOT, because a Pull row is a
+// per-job, per-inventory-identity total (two items needing the same color share one real-world
+// pull action against one shelf of balloons) — merging here is correct, not a visual convenience.
+function psPullRowKeyAndInfo(req) {
+  const system = req.system || 'standardLatex';
+  if (req.excluded) {
+    // Never merged with anything else, even another occurrence of the exact same item from a
+    // DIFFERENT production item — each exclusion is a decision about one specific item's one
+    // specific requirement, so each gets its own fully-attributable acknowledgment row (see
+    // psRequirementKey's own comment on why productionItemId is part of the key).
+    const reqKey = psRequirementKey(req);
+    return { key: 'excluded:' + reqKey, groupInfo: { kind: 'excluded', system, color: req.color, brand: req.brand, size: req.size, inventoryItemId: req.inventoryItemId, itemLabel: req.source && req.source.itemLabel, requirementKey: reqKey } };
+  }
+  if (req.formulaInvalid) {
+    // One row per broken-config production item — never merged with anything else, since
+    // there's no real color/size to group by. Never Ready, never actionable, by construction.
+    return { key: 'formulaInvalid:' + req.productionItemId, groupInfo: { kind: 'formulaInvalid', itemLabel: req.source && req.source.itemLabel, reason: req.formulaInvalidReason, templateId: req.templateId } };
+  }
+  if (req.unresolved) {
+    return { key: 'unresolved:' + req.color.trim().toLowerCase() + ':' + req.size, groupInfo: { kind: 'unresolved', color: req.color, size: req.size, candidates: req.candidates || [] } };
+  }
+  if (!req.inventoryItemId) {
+    return { key: 'noitem:' + system + ':' + req.colorId + ':' + req.size, groupInfo: { kind: 'noItem', system, color: req.color, brand: req.brand, colorId: req.colorId, size: req.size } };
+  }
+  // Prefixed with `system` so two different collections can never collide on a coincidentally
+  // identical itemId — harmless for Standard Latex (system is always 'standardLatex' there)
+  // but a real safety margin now that itemId can come from any of several collections.
+  return { key: 'item:' + system + ':' + req.inventoryItemId + ':' + (req.size || ''), groupInfo: { kind: 'item', system, category: req.category || 'balloon', color: req.color, brand: req.brand, colorId: req.colorId, inventoryItemId: req.inventoryItemId, size: req.size } };
+}
 function psReviewPullRows(job) {
   const reqs = psComputeJobRequirements(job);
   const groups = {};
   reqs.forEach(req => {
-    let key, groupInfo;
-    const system = req.system || 'standardLatex';
-    if (req.excluded) {
-      // Never merged with anything else, even another occurrence of the exact same item from a
-      // DIFFERENT production item — each exclusion is a decision about one specific item's one
-      // specific requirement, so each gets its own fully-attributable acknowledgment row (see
-      // psRequirementKey's own comment on why productionItemId is part of the key).
-      const reqKey = psRequirementKey(req);
-      key = 'excluded:' + reqKey;
-      groupInfo = { kind: 'excluded', system, color: req.color, brand: req.brand, size: req.size, inventoryItemId: req.inventoryItemId, itemLabel: req.source && req.source.itemLabel, requirementKey: reqKey };
-    } else if (req.formulaInvalid) {
-      // One row per broken-config production item — never merged with anything else, since
-      // there's no real color/size to group by. Never Ready, never actionable, by construction.
-      key = 'formulaInvalid:' + req.productionItemId;
-      groupInfo = { kind: 'formulaInvalid', itemLabel: req.source && req.source.itemLabel, reason: req.formulaInvalidReason, templateId: req.templateId };
-    } else if (req.unresolved) {
-      key = 'unresolved:' + req.color.trim().toLowerCase() + ':' + req.size;
-      groupInfo = { kind: 'unresolved', color: req.color, size: req.size, candidates: req.candidates || [] };
-    } else if (!req.inventoryItemId) {
-      key = 'noitem:' + system + ':' + req.colorId + ':' + req.size;
-      groupInfo = { kind: 'noItem', system, color: req.color, brand: req.brand, colorId: req.colorId, size: req.size };
-    } else {
-      // Prefixed with `system` so two different collections can never collide on a coincidentally
-      // identical itemId — harmless for Standard Latex (system is always 'standardLatex' there)
-      // but a real safety margin now that itemId can come from any of several collections.
-      key = 'item:' + system + ':' + req.inventoryItemId + ':' + (req.size || '');
-      groupInfo = { kind: 'item', system, category: req.category || 'balloon', color: req.color, brand: req.brand, colorId: req.colorId, inventoryItemId: req.inventoryItemId, size: req.size };
-    }
+    const { key, groupInfo } = psPullRowKeyAndInfo(req);
     if (!groups[key]) groups[key] = Object.assign({ key, qty: 0 }, groupInfo);
     groups[key].qty += req.qty;
   });
@@ -10657,6 +11060,62 @@ async function psReviewPullConfirmRow(jobId, rowKey, qty) {
   } catch (err) {
     console.error('Review & Pull failed:', err);
     alert(err.message || "Couldn't record that pull — check your connection and try again.");
+  } finally {
+    delete psReviewPullBusyKeys[busyKey];
+    psRenderProductionJobs();
+  }
+}
+
+// ─── Prep checkbox = the real ledger Pull control (see the batch instruction: "not a cosmetic
+// task checkbox") ───
+//
+// psPrepCheckPull is a thin wrapper reusing psReviewPullConfirmRow's own existing safety
+// (completed-job guard, busy-key no-double-submit, amount clamped to the row's CURRENT
+// stillNeeded at call time) — zero new pull logic, just reads the row fresh and hands off.
+function psPrepCheckPull(jobId, rowKey) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const row = psReviewPullRows(job).find(r => r.key === rowKey);
+  if (!row || row.kind !== 'item') return;
+  return psReviewPullConfirmRow(jobId, rowKey, row.stillNeeded);
+}
+// Uncheck = undo pull / return to stock. Restores EXACTLY row.alreadyPulled — the ledger's own
+// live-computed "how much has actually been pulled for this requirement" — never the
+// requirement's current (possibly since-edited) qty, so a later recipe/color/qty edit can never
+// change what a reversal gives back. Recorded as an explicit, distinct 'RETURN' transaction (never
+// a rewrite or deletion of the original PULL), so history stays honest: both the original pull and
+// its reversal remain visible in this item's transaction History forever.
+//
+// Standard Latex splits the outstanding amount into its loose-sourced and pool-sourced portions
+// (invStandardLatexOutstandingSplit, from the original PULL transactions' own recorded loose
+// before/after) and reverses each correctly (invReturnToStandardUnits for the pool portion) —
+// confirmed by live testing that a naive "just receive N loose balloons" reversal silently
+// fabricated balloons that were never physically there, since it credited looseBalloons while
+// leaving the shared usageRemainder pool completely untouched. Every other system's reversal is a
+// plain positive delta on the same flat quantity a pull already uses — no shared remainder concept
+// to account for there.
+async function psPrepReturnPull(jobId, rowKey) {
+  const job = psFindJob(jobId);
+  if (!job || job.status === 'completed') return;
+  const row = psReviewPullRows(job).find(r => r.key === rowKey);
+  if (!row || row.kind !== 'item' || !(row.alreadyPulled > 0)) return;
+  const amount = row.alreadyPulled;
+  const busyKey = jobId + '|' + rowKey;
+  if (psReviewPullBusyKeys[busyKey]) return; // same in-flight guard as a forward pull -- idempotent
+  psReviewPullBusyKeys[busyKey] = true;
+  psRenderProductionJobs();
+  try {
+    let entry;
+    if (row.system && row.system !== 'standardLatex') {
+      entry = { system: row.system, itemId: row.inventoryItemId, size: row.size, type: 'RETURN', delta: amount, jobId: job.id, jobName: job.jobName || '' };
+    } else {
+      const split = invStandardLatexOutstandingSplit(job.id, row.inventoryItemId, row.size);
+      entry = { itemId: row.inventoryItemId, size: row.size, type: 'RETURN', returnLoosePortion: split.fromLoose, returnPoolPortion: split.fromPool, jobId: job.id, jobName: job.jobName || '' };
+    }
+    await invApplyInventoryTransactions([entry]);
+  } catch (err) {
+    console.error('Return to stock failed:', err);
+    alert(err.message || "Couldn't return that to stock — check your connection and try again.");
   } finally {
     delete psReviewPullBusyKeys[busyKey];
     psRenderProductionJobs();
@@ -10878,28 +11337,6 @@ function psReviewPullRowHtml(job, row, readOnly) {
       ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Not pulled — job is Completed</div>`
       : `<div class="rp-actions"><button class="save-btn" style="width:auto; padding:8px 16px;" ${busy ? 'disabled' : ''} onclick="psReviewPullConfirmRow('${job.id}','${psJsKeyAttr(row.key)}', ${row.stillNeeded})">${busy ? 'Pulling…' : `Pull ${row.stillNeeded}`}</button></div>`}
   </div>`;
-}
-
-function psReviewPullSectionHtml(job) {
-  const expanded = !!psReviewPullExpandedJobs[job.id];
-  const readOnly = job.status === 'completed';
-  let html = `<div class="section-label" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;" onclick="psReviewPullToggle('${job.id}')">
-    <span>Review &amp; Pull — Standard Latex${readOnly ? ' (read-only — Completed)' : ''}</span>
-    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'}" style="color:var(--text-tertiary); font-size:11px;"></i>
-  </div>`;
-  if (!expanded) return html;
-
-  const rows = psReviewPullRows(job);
-  if (rows.length === 0) {
-    html += `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.5rem;">No Standard Latex requirements on this job yet.</div>`;
-    return html;
-  }
-  const readyRows = rows.filter(r => r.status === 'ready');
-  if (!readOnly && readyRows.length > 1) {
-    html += `<button class="save-btn" style="margin-bottom:0.5rem;" onclick="psReviewPullConfirmAllReady('${job.id}')">Pull all ready (${readyRows.length})</button>`;
-  }
-  html += rows.map(row => psReviewPullRowHtml(job, row, readOnly)).join('');
-  return html;
 }
 
 function invPendingOrderedQty(itemId, size) {
@@ -11913,7 +12350,7 @@ function invToggleHistory(itemId, size) {
   invHistoryOpenKey = (invHistoryOpenKey === key) ? null : key;
   invRenderColorsList();
 }
-const INV_TXN_TYPE_LABEL = { INITIAL_COUNT: 'Initial Inventory Count', RECEIVE: 'Received Inventory', PULL: 'Pulled Inventory', ADJUSTMENT: 'Adjustment' };
+const INV_TXN_TYPE_LABEL = { INITIAL_COUNT: 'Initial Inventory Count', RECEIVE: 'Received Inventory', PULL: 'Pulled Inventory', RETURN: 'Returned to Stock', ADJUSTMENT: 'Adjustment' };
 function invFmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(2); }
 // Reverse-chronological, human-readable — "if inventory looks wrong, trace exactly how BBT got
 // there." A Pull with a job attached leads with the job name (matching the mockup), everything
@@ -20516,11 +20953,14 @@ function psOccSetScheduled(jobId, type, email, scheduled) {
 function psNewStaffNotifId() {
   return 'sn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
 }
-// Notifications are snapshotted at creation time (event label + occurrence date/time), the same
-// frozen-provenance philosophy already used for template snapshots — so a notification stays
-// legible even if the job's own details change later. Stored on the job itself (job.
-// staffNotifications[]) rather than a new top-level collection or listener, since JOBS is already
-// the live, fully-synced array every other staffing/production view reads.
+// Notifications are snapshotted at creation time (event label + occurrence date/time, or item/
+// clarification text), the same frozen-provenance philosophy already used for template snapshots
+// — so a notification stays legible even if the job's own details change later. Stored on the job
+// itself (job.staffNotifications[]) rather than a new top-level collection or listener, since JOBS
+// is already the live, fully-synced array every other staffing/production view reads. Despite the
+// field's original staffing-only name (kept to avoid an unnecessary rename/migration), this is now
+// the one shared in-app notification mechanism — see psPushClarificationNotification below, which
+// reuses it rather than building a second one.
 function psOccPushNotification(job, type, toEmail, kind) {
   if (!job.staffNotifications) job.staffNotifications = [];
   const { date, time } = psOccDateTime(job, type);
@@ -20530,13 +20970,38 @@ function psOccPushNotification(job, type, toEmail, kind) {
     kind, createdAt: Date.now(), read: false,
   });
 }
+// toEmail: null means "visible to anyone signed in" — the same V1 policy already established for
+// feedback/clarification records themselves. There's no admin-specific identity to target: admin
+// is a shared passcode unlock (invAdminUnlocked), not a per-user role, so a targeted "notify the
+// admin" recipient doesn't exist as a real identity to address — broadcasting to every signed-in
+// team member is the honest option given that, not an invented admin roster.
+function psPushClarificationNotification(job, item) {
+  if (!job.staffNotifications) job.staffNotifications = [];
+  let itemLabel = null;
+  if (item.scope === 'productionItem') {
+    const line = (job.productionItems || []).find(l => l.id === item.scopeId);
+    const r = line && psLineRecipe(line);
+    itemLabel = (line && r) ? psLineLabel(line, r) : null;
+  } else if (item.scope === 'task') {
+    const task = (job.tasks || []).find(t => t.id === item.scopeId);
+    const line = task && (job.productionItems || []).find(l => l.id === task.productionItemId);
+    const r = line && psLineRecipe(line);
+    itemLabel = (line && r) ? psLineLabel(line, r) : null;
+  }
+  job.staffNotifications.push({
+    id: psNewStaffNotifId(), toEmail: null, jobId: job.id,
+    kind: 'needsClarification', eventLabel: psJobHeading(job),
+    itemLabel, text: item.text, who: item.who, feedbackId: item.id,
+    createdAt: Date.now(), read: false,
+  });
+}
 function psMyStaffNotifications() {
   const email = psMyEmail();
-  if (!email) return [];
   const rows = [];
   JOBS.forEach(job => {
     (job.staffNotifications || []).forEach(n => {
-      if (!n.read && n.toEmail === email) rows.push(n);
+      if (n.read) return;
+      if (n.toEmail === null || (email && n.toEmail === email)) rows.push(n);
     });
   });
   return rows.sort((a, b) => b.createdAt - a.createdAt);
@@ -20556,13 +21021,18 @@ function psGoToJobStaffing(jobId) {
 }
 function psGoToNotification(jobId, notifId) {
   psMarkStaffNotificationRead(jobId, notifId);
-  psGoToJobStaffing(jobId);
+  const job = psFindJob(jobId);
+  const n = job && (job.staffNotifications || []).find(x => x.id === notifId);
+  // A clarification is Production/item-scoped work, not a staffing occurrence — route there
+  // instead, reusing the exact same navigation Work Queue already uses (wqGoToJob).
+  if (n && n.kind === 'needsClarification') wqGoToJob(jobId);
+  else psGoToJobStaffing(jobId);
 }
 // The smallest persistent in-app notification surface: a Home-screen card, exactly like the
 // existing "Finish setting up your business" banner (#bs-home-banner) — shown only while there's
-// something unread, hidden entirely otherwise, one row per notification, tap to open the job's
-// Staffing entry and mark it read. No bell icon/badge system, no separate inbox screen, no SMS/
-// email/push — this is the whole mechanism.
+// something unread, hidden entirely otherwise, one row per notification, tap to open the relevant
+// screen and mark it read. No bell icon/badge system, no separate inbox screen, no SMS/email/push
+// — this is the whole mechanism, now shared by staffing changes and Needs Clarification alike.
 function psRenderStaffNotifBanner() {
   const el = document.getElementById('stf-notif-banner');
   if (!el) return;
@@ -20570,10 +21040,18 @@ function psRenderStaffNotifBanner() {
   if (!rows.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
   el.style.display = 'block';
   el.innerHTML = rows.map(n => {
-    const verb = n.kind === 'scheduled' ? 'You’re scheduled for' : 'You were removed from';
+    let title, detail;
+    if (n.kind === 'needsClarification') {
+      title = `Needs Clarification${n.itemLabel ? ' — ' + psEscape(n.itemLabel) : ''}`;
+      detail = `${psEscape(n.text)} — asked by ${psEscape(n.who || 'Unknown')}`;
+    } else {
+      const verb = n.kind === 'scheduled' ? 'You’re scheduled for' : 'You were removed from';
+      title = `${verb} ${psEscape(STAFF_OCC_LABELS[n.occType] || n.occType)}`;
+      detail = `${psEscape(n.eventLabel)}${n.date ? ' — ' + psEscape(n.date) : ''}${n.time ? ' ' + psEscape(n.time) : ''}`;
+    }
     return `<div class="ps-sub-row" style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 0; cursor:pointer;" onclick="psGoToNotification('${n.jobId}','${n.id}')">
-      <div style="font-size:13px;"><b>${verb} ${psEscape(STAFF_OCC_LABELS[n.occType] || n.occType)}</b><br>
-        <span style="color:var(--text-secondary); font-size:12px;">${psEscape(n.eventLabel)}${n.date ? ' — ' + psEscape(n.date) : ''}${n.time ? ' ' + psEscape(n.time) : ''}</span>
+      <div style="font-size:13px;"><b>${title}</b><br>
+        <span style="color:var(--text-secondary); font-size:12px;">${n.kind === 'needsClarification' ? psEscape(n.eventLabel) + ' — ' : ''}${detail}</span>
       </div>
       <i class="fa-solid fa-chevron-right" style="color:var(--text-tertiary); font-size:12px;"></i>
     </div>`;
