@@ -1368,6 +1368,10 @@
       </div>
     </div>
 
+    <!-- Smallest in-app notification surface: unread staffing scheduled/removed notices for the
+         signed-in user only — hidden entirely when empty, see psRenderStaffNotifBanner(). -->
+    <div class="card" id="stf-notif-banner" style="display:none; margin-bottom:1rem;"></div>
+
     <div style="display:flex; align-items:center; justify-content:space-between; margin-top:0;">
       <div class="section-label" style="margin:0;">Job tools</div>
       <button class="icon-btn" id="home-edit-toggle" style="width:auto; padding:3px 10px; font-size:11px;" onclick="homeToggleEditMode()">Rearrange</button>
@@ -1691,6 +1695,14 @@
   <div class="view" id="view-workQueue">
     <div id="wq-root"></div>
   </div><!-- end view-workQueue -->
+
+  <!-- ═══════════════════════════════════════ OPEN JOBS VIEW -->
+  <!-- Employee-facing view of unmet staffing needs (Install/Strike occurrences short of people
+       needed) — pure aggregation over job.staffing.occurrences, see psRenderOpenJobs. -->
+  <div class="view" id="view-openJobs">
+    <div class="section-label" style="margin-top:0">Needs staffing</div>
+    <div id="stf-openjobs-root"></div>
+  </div><!-- end view-openJobs -->
 
   <!-- ═══════════════════════════════════════ QUANTITY CALCULATOR VIEW -->
   <!-- Guided flow (decor type → style → size → quantity → color distribution), built
@@ -2294,6 +2306,7 @@ const TOOL_META = {
   production: { title: 'Production Sheets',            icon: 'fa-solid fa-clipboard-list',     showBack: true,  showGear: true  },
   staffing:   { title: 'Event Schedule & Staffing',    icon: 'fa-solid fa-calendar-days',      showBack: true,  showGear: true  },
   workQueue:  { title: 'Work Queue',                    icon: 'fa-solid fa-bars-staggered',      showBack: true,  showGear: false },
+  openJobs:   { title: 'Open Jobs',                     icon: 'fa-solid fa-hand',                showBack: true,  showGear: false },
   quantity:   { title: 'Quantity Calculator',           icon: 'fa-solid fa-ruler',               showBack: true,  showGear: true  },
   formulas:   { title: 'Reference Notes',               icon: 'fa-solid fa-flask',               showBack: true,  showGear: true  },
   inventory:  { title: 'Inventory',                     icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
@@ -2330,6 +2343,7 @@ const HOME_TOOLS = [
   { id: 'production', view: 'production', icon: 'fa-solid fa-clipboard-list', title: 'Production Sheets', group: 'job' },
   { id: 'staffing', view: 'staffing', icon: 'fa-solid fa-calendar-days', title: 'Event Schedule &amp; Staffing', group: 'job' },
   { id: 'workQueue', view: 'workQueue', icon: 'fa-solid fa-bars-staggered', title: 'Work Queue', group: 'job' },
+  { id: 'openJobs', view: 'openJobs', icon: 'fa-solid fa-hand', title: 'Open Jobs', group: 'job' },
   { id: 'quantity', view: 'quantity', icon: 'fa-solid fa-ruler', title: 'Quantity Calculator', group: 'job' },
   { id: 'jobcost', view: 'jobcost', icon: 'fa-solid fa-tags', title: 'Job Cost Calculator', group: 'job' },
   { id: 'helium', view: 'helium', icon: 'fa-solid fa-wind', title: 'Helium Cost Calculator', group: 'job' },
@@ -3884,7 +3898,18 @@ function psBlankJob(overrides) {
     status: 'not_started',
     staffingStatus: 'open',
     createdAt: Date.now(),
-    staffing: { setupTime: '', eventStartTime: '', eventTakeDown: '', eventLocation: '', dayOfContact: '', notes: '' },
+    staffing: {
+      setupTime: '', eventStartTime: '', eventTakeDown: '', eventLocation: '', dayOfContact: '', notes: '',
+      // { install: {...}, strike: {...} } — see psOccOf/psOccEnsure. Sparse: an occurrence key
+      // only appears once something about it is actually set (people needed, an override, an
+      // availability/schedule entry). Old jobs simply have no `occurrences` key at all, read the
+      // same shape-safe defaults, and need no migration.
+      occurrences: {},
+    },
+    // { id, toEmail, jobId, occType, eventLabel, date, time, kind:'scheduled'|'removed',
+    // createdAt, read } — see psOccPushNotification/psMyStaffNotifications. Frozen at creation
+    // time (event label/date/time), same provenance philosophy as a template snapshot.
+    staffNotifications: [],
     productionItems: [],
     // Non-production classifications from the Mapping Layer land here instead of
     // productionItems — see psMapRawItemToEvent. Old jobs saved before this existed just
@@ -4264,6 +4289,8 @@ function psRenderAllJobViews() {
   psRenderProductionJobs();
   psRenderStaffingJobs();
   wqRenderQueue();
+  psRenderOpenJobs();
+  psRenderStaffNotifBanner();
 }
 
 // ═══════════════════════════════════════ EMPLOYEE WORK QUEUE (pure aggregation over job.tasks) ═══════════════════════════════════════
@@ -5586,6 +5613,16 @@ function irSplitItem(id) {
 // ─── SHARED JOB CARD HEADER (used by both Production and Staffing) ───
 function psStatusBtnHtml(job, view) {
   if (view === 'staffing') {
+    // Compatibility path: once a real staffing occurrence is configured (peopleNeeded > 0), the
+    // header shows the DERIVED status instead of the old manual toggle — legacy job.staffingStatus
+    // data is never deleted, it just stops being what's displayed once real occurrence data
+    // exists. A job with nothing configured yet keeps the original click-to-cycle Open
+    // Availability/Scheduled button exactly as it always worked.
+    const aggregate = psAggregateStaffStatus(job);
+    if (aggregate) {
+      const label = aggregate === 'short' ? 'Short' : (aggregate === 'over' ? 'Overstaffed' : 'Fully staffed');
+      return `<span class="ps-status-btn ps-staffstatus-${aggregate === 'short' ? 'open' : 'scheduled'}" style="cursor:default;" title="Derived from Install/Strike staffing">${label}</span>`;
+    }
     const s = job.staffingStatus || 'open';
     return `<button class="ps-status-btn ps-staffstatus-${s}" onclick="event.stopPropagation(); psCycleStaffStatus('${job.id}')">${STAFF_STATUS_LABELS[s]}</button>`;
   }
@@ -20244,6 +20281,394 @@ function psToggleEventEdit(jobId) {
   psRenderStaffingJobs();
 }
 
+// ═══════════════════════════════════════ STAFFING OCCURRENCES (Install / Strike) ═══════════════════════════════════════
+//
+// EVENT OCCURRENCE -> EMPLOYEES SAY "I'M AVAILABLE" -> OWNER/ADMIN CHOOSES WHO IS SCHEDULED.
+// Availability and scheduling are two separate sparse maps, never derived from one another.
+//
+// Both occurrences live on the SAME job under job.staffing.occurrences = { install: {...},
+// strike: {...} } -- a fixed two-key object (not a general array), since V1 only ever has these
+// two named occurrences. Keeping this under the existing job.staffing object (rather than a new
+// top-level field) matches how every other staffing-related fact already lives there
+// (setupTime/eventStartTime/eventTakeDown/eventLocation/dayOfContact/notes).
+//
+// Each occurrence stores ONLY what can't be derived: { peopleNeeded, dateOverride, timeOverride,
+// available: {[emailLower]: {at}}, scheduled: {[emailLower]: {at, by}} }. Date/time are NEVER
+// duplicated fields -- they're computed live from the job's own real event/staffing data
+// (psOccDateTime) so an install-time correction on the Event form is immediately correct here
+// too, with no second field anyone has to remember to update. dateOverride/timeOverride exist
+// only for the genuine "this occurrence's real time differs from the event record" case (e.g. an
+// admin manually stating strike happens the day after the event) -- an intentional, explicit
+// action, never a silent duplication.
+//
+// Identity: keyed by the signed-in user's own email (invResolveActor().whoEmail, lowercased) --
+// the same real, unspoofable Firebase Auth identity every other attribution in this app already
+// uses (see psAddFeedback). TEAM_MEMBERS itself has no separate numeric id, but sign-in is
+// already gated to a real, known email (ALLOWED_EMAILS), and that email is what's stored -- there
+// is no free-text name path anywhere in this feature. One known, acceptable limitation carried
+// over from the existing identity model: a person with two emails on their TEAM_MEMBERS roster
+// row who signs in from a different email than an admin used to schedule them manually would
+// technically occupy two separate map keys (their display NAME still resolves the same via
+// psTeamMemberName either way) -- flagged in the report rather than papered over with new
+// identity-matching logic this feature doesn't own.
+
+// Resolves any of a team member's known emails to their display name — falls back to the bare
+// email so an unrecognized signed-in user is still shown honestly rather than as "Unknown".
+function psTeamMemberName(email) {
+  if (!email) return 'Unknown';
+  const m = TEAM_MEMBERS.find(x => (x.emails || []).some(e => e && e.toLowerCase() === email.toLowerCase()));
+  return (m && m.name) || email;
+}
+// The current signed-in user's own email, lowercased — '' when not signed in (never a guessed
+// identity). Every availability/scheduling action that needs "me" reads through this one place.
+function psMyEmail() {
+  return ((window.fbAuth && window.fbAuth.currentUser && window.fbAuth.currentUser.email) || '').toLowerCase();
+}
+
+const STAFF_OCC_TYPES = ['install', 'strike'];
+const STAFF_OCC_LABELS = { install: 'Event Install', strike: 'Event Strike' };
+
+// Read-only accessor — never mutates the job, always returns a shape-safe object even when
+// nothing has been configured yet, so every render function can read it unconditionally.
+function psOccOf(job, type) {
+  const occ = job.staffing && job.staffing.occurrences && job.staffing.occurrences[type];
+  return occ || { peopleNeeded: 0, dateOverride: null, timeOverride: null, available: {}, scheduled: {} };
+}
+// Mutation path — lazily creates job.staffing.occurrences[type] the first time something is
+// actually set, matching this file's established sparse-map convention (e.g. colorResolutions).
+function psOccEnsure(job, type) {
+  if (!job.staffing) job.staffing = {};
+  if (!job.staffing.occurrences) job.staffing.occurrences = {};
+  if (!job.staffing.occurrences[type]) {
+    job.staffing.occurrences[type] = { peopleNeeded: 0, dateOverride: null, timeOverride: null, available: {}, scheduled: {} };
+  }
+  return job.staffing.occurrences[type];
+}
+// Install always applies — every event has an install. Strike only shows once it's real: either
+// the job's own data already implies one (a takedown time exists) or someone has deliberately
+// configured it (a people-needed count, an available/scheduled entry, or an explicit override) —
+// so a job with no takedown info at all doesn't grow an empty, confusing Strike card.
+function psOccExists(job, type) {
+  if (type === 'install') return true;
+  const occ = psOccOf(job, 'strike');
+  return !!((job.staffing && job.staffing.eventTakeDown) || occ.peopleNeeded > 0 ||
+    Object.keys(occ.available || {}).length || Object.keys(occ.scheduled || {}).length ||
+    occ.dateOverride || occ.timeOverride);
+}
+// Date/time are always derived, never a second stored source of truth (see the section-header
+// comment) — an explicit override wins when set, otherwise Install reads the job's own setup/
+// start time and Strike reads its own takedown time. Per the explicit date rule: a strike time
+// with no separate date always defaults to the SAME calendar date as the event (job.eventDate) —
+// there is currently no import path that supplies any other, potentially conflicting strike date,
+// so there's no real source of ambiguity to detect; dateOverride is exactly the escape hatch for
+// the day an admin needs to state a genuinely different one.
+function psOccDateTime(job, type) {
+  const occ = psOccOf(job, type);
+  const s = job.staffing || {};
+  const date = occ.dateOverride || job.eventDate || '';
+  let time = occ.timeOverride || '';
+  if (!time) time = type === 'install' ? (s.setupTime || s.eventStartTime || '') : (s.eventTakeDown || '');
+  return { date, time };
+}
+function psOccPeopleNeeded(job, type) {
+  return Math.max(0, Math.round(psOccOf(job, type).peopleNeeded) || 0);
+}
+// The one and only derivation rule: status compares SCHEDULED count against peopleNeeded.
+// Availability is context, shown alongside, never part of this comparison — an event is never
+// "fully staffed" merely because enough people said they're available.
+function psOccCounts(job, type) {
+  const occ = psOccOf(job, type);
+  const needed = psOccPeopleNeeded(job, type);
+  const availableCount = Object.keys(occ.available || {}).length;
+  const scheduledCount = Object.keys(occ.scheduled || {}).length;
+  let status;
+  if (needed <= 0) status = 'unset';
+  else if (scheduledCount < needed) status = 'short';
+  else if (scheduledCount > needed) status = 'over';
+  else status = 'full';
+  return { needed, availableCount, scheduledCount, status, shortBy: Math.max(0, needed - scheduledCount) };
+}
+function psOccStatusLabel(counts) {
+  if (counts.status === 'unset') return 'Not set';
+  if (counts.status === 'short') return `Short ${counts.shortBy}`;
+  if (counts.status === 'over') return 'Overstaffed';
+  return 'Fully staffed';
+}
+function psOccStatusColorVar(status) {
+  if (status === 'short') return 'var(--warning-text)';
+  if (status === 'over') return 'var(--warning-text)';
+  if (status === 'full') return 'var(--success)';
+  return 'var(--text-secondary)';
+}
+// Rolls every EXISTING, CONFIGURED (peopleNeeded > 0) occurrence into one worst-case label for
+// the job header badge — short beats overstaffed beats fully staffed. Returns null when nothing
+// has been configured yet, so a job with no real staffing requirements keeps the original manual
+// Open Availability/Scheduled toggle exactly as it always worked (see psStatusBtnHtml) — this is
+// the compatibility path for legacy job.staffingStatus data rather than a forced migration.
+function psAggregateStaffStatus(job) {
+  const configured = STAFF_OCC_TYPES.filter(t => psOccExists(job, t) && psOccPeopleNeeded(job, t) > 0);
+  if (!configured.length) return null;
+  const statuses = configured.map(t => psOccCounts(job, t).status);
+  if (statuses.includes('short')) return 'short';
+  if (statuses.includes('over')) return 'over';
+  return 'full';
+}
+
+function psOccSetPeopleNeeded(jobId, type, value) {
+  if (!invAdminUnlocked) return;
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const occ = psOccEnsure(job, type);
+  occ.peopleNeeded = Math.max(0, Math.round(parseFloat(value)) || 0);
+  psSaveJob(job);
+  psRenderAllJobViews();
+}
+function psOccSetOverride(jobId, type, field, value) {
+  if (!invAdminUnlocked) return;
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const occ = psOccEnsure(job, type);
+  occ[field] = (value || '').trim() || null;
+  psSaveJob(job);
+  psRenderAllJobViews();
+}
+// The one employee-facing action: mark or unmark MY OWN availability. Keyed by my own signed-in
+// email only — there is no code path here that can write to another key, so one employee's
+// availability action can never overwrite another's. Marking available is never interpreted as
+// "schedule me" — it only ever touches the separate `available` map.
+function psOccToggleMyAvailability(jobId, type) {
+  const email = psMyEmail();
+  if (!email) { alert("Sign in to mark yourself available."); return; }
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const occ = psOccEnsure(job, type);
+  if (occ.available[email]) delete occ.available[email];
+  else occ.available[email] = { at: Date.now() };
+  psSaveJob(job);
+  psRenderAllJobViews();
+}
+// Owner/admin scheduling — deliberately independent of availability (see the batch instruction:
+// scheduling someone does NOT require or mutate their availability response, and removing them
+// from the schedule does NOT touch their availability). A notification only fires on a genuine
+// membership CHANGE (added when not already present, or removed when present) — calling this
+// again with the same target state is a no-op beyond the harmless re-save, so re-rendering or
+// re-saving an unchanged occurrence can never produce a duplicate notification.
+function psOccSetScheduled(jobId, type, email, scheduled) {
+  if (!invAdminUnlocked) return;
+  const job = psFindJob(jobId);
+  if (!job || !email) return;
+  const occ = psOccEnsure(job, type);
+  const key = email.toLowerCase();
+  const wasScheduled = !!occ.scheduled[key];
+  if (scheduled && !wasScheduled) {
+    occ.scheduled[key] = { at: Date.now(), by: invResolveActor().who };
+    psOccPushNotification(job, type, key, 'scheduled');
+  } else if (!scheduled && wasScheduled) {
+    delete occ.scheduled[key];
+    psOccPushNotification(job, type, key, 'removed');
+  }
+  psSaveJob(job);
+  psRenderAllJobViews();
+}
+function psNewStaffNotifId() {
+  return 'sn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+// Notifications are snapshotted at creation time (event label + occurrence date/time), the same
+// frozen-provenance philosophy already used for template snapshots — so a notification stays
+// legible even if the job's own details change later. Stored on the job itself (job.
+// staffNotifications[]) rather than a new top-level collection or listener, since JOBS is already
+// the live, fully-synced array every other staffing/production view reads.
+function psOccPushNotification(job, type, toEmail, kind) {
+  if (!job.staffNotifications) job.staffNotifications = [];
+  const { date, time } = psOccDateTime(job, type);
+  job.staffNotifications.push({
+    id: psNewStaffNotifId(), toEmail, jobId: job.id,
+    occType: type, eventLabel: psJobHeading(job), date, time,
+    kind, createdAt: Date.now(), read: false,
+  });
+}
+function psMyStaffNotifications() {
+  const email = psMyEmail();
+  if (!email) return [];
+  const rows = [];
+  JOBS.forEach(job => {
+    (job.staffNotifications || []).forEach(n => {
+      if (!n.read && n.toEmail === email) rows.push(n);
+    });
+  });
+  return rows.sort((a, b) => b.createdAt - a.createdAt);
+}
+function psMarkStaffNotificationRead(jobId, notifId) {
+  const job = psFindJob(jobId);
+  const n = job && (job.staffNotifications || []).find(x => x.id === notifId);
+  if (!n) return;
+  n.read = true;
+  psSaveJob(job);
+  psRenderStaffNotifBanner();
+}
+function psGoToJobStaffing(jobId) {
+  showView('staffing');
+  psExpandedStaffing = jobId;
+  psRenderStaffingJobs();
+}
+function psGoToNotification(jobId, notifId) {
+  psMarkStaffNotificationRead(jobId, notifId);
+  psGoToJobStaffing(jobId);
+}
+// The smallest persistent in-app notification surface: a Home-screen card, exactly like the
+// existing "Finish setting up your business" banner (#bs-home-banner) — shown only while there's
+// something unread, hidden entirely otherwise, one row per notification, tap to open the job's
+// Staffing entry and mark it read. No bell icon/badge system, no separate inbox screen, no SMS/
+// email/push — this is the whole mechanism.
+function psRenderStaffNotifBanner() {
+  const el = document.getElementById('stf-notif-banner');
+  if (!el) return;
+  const rows = psMyStaffNotifications();
+  if (!rows.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'block';
+  el.innerHTML = rows.map(n => {
+    const verb = n.kind === 'scheduled' ? 'You’re scheduled for' : 'You were removed from';
+    return `<div class="ps-sub-row" style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 0; cursor:pointer;" onclick="psGoToNotification('${n.jobId}','${n.id}')">
+      <div style="font-size:13px;"><b>${verb} ${psEscape(STAFF_OCC_LABELS[n.occType] || n.occType)}</b><br>
+        <span style="color:var(--text-secondary); font-size:12px;">${psEscape(n.eventLabel)}${n.date ? ' — ' + psEscape(n.date) : ''}${n.time ? ' ' + psEscape(n.time) : ''}</span>
+      </div>
+      <i class="fa-solid fa-chevron-right" style="color:var(--text-tertiary); font-size:12px;"></i>
+    </div>`;
+  }).join('');
+}
+
+// ─── Event-screen render: one occurrence card (Install or Strike) ───
+function psOccCardHtml(job, type) {
+  if (!psOccExists(job, type)) return '';
+  const occ = psOccOf(job, type);
+  const { date, time } = psOccDateTime(job, type);
+  const counts = psOccCounts(job, type);
+  const readOnly = job.status === 'completed';
+  const myEmail = psMyEmail();
+  const iAmAvailable = !!(myEmail && occ.available[myEmail]);
+
+  let html = `<div class="card" style="margin-bottom:0.6rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
+      <div style="font-size:14px; font-weight:700;">${psEscape(STAFF_OCC_LABELS[type])}</div>
+      <span style="font-size:11px; font-weight:700; text-transform:uppercase; color:${psOccStatusColorVar(counts.status)};">${psOccStatusLabel(counts)}</span>
+    </div>
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">${psEscape(date) || 'No date set'}${time ? ' · ' + psEscape(time) : ''}</div>
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Need ${counts.needed} · ${counts.availableCount} available · ${counts.scheduledCount} scheduled</div>`;
+
+  // Owner/admin: people-needed + explicit date/time override, gated exactly like every other
+  // Production Template / catalog configuration control in this app.
+  if (!readOnly && invAdminUnlocked) {
+    html += `<div class="no-print row" style="margin-bottom:8px;">
+      <div class="settings-field" style="margin-bottom:0;"><label>People needed</label><input type="number" min="0" step="1" value="${counts.needed}" onchange="psOccSetPeopleNeeded('${job.id}','${type}', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0;"><label>Date override <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(occ.dateOverride || '')}" placeholder="${invAttr(job.eventDate || '')}" onchange="psOccSetOverride('${job.id}','${type}','dateOverride', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0;"><label>Time override <span style="font-weight:400;">(optional)</span></label><input type="text" value="${invAttr(occ.timeOverride || '')}" placeholder="e.g. 9:00 AM" onchange="psOccSetOverride('${job.id}','${type}','timeOverride', this.value)"></div>
+    </div>`;
+  }
+
+  // Available list — read-only context, plus (admin) a one-click promote-to-scheduled action.
+  const availableEmails = Object.keys(occ.available || {});
+  html += `<div style="font-size:12px; margin-bottom:6px;"><b>Available:</b> `;
+  html += availableEmails.length
+    ? availableEmails.map(e => {
+        const already = !!occ.scheduled[e];
+        const name = psEscape(psTeamMemberName(e));
+        if (readOnly || !invAdminUnlocked) return name;
+        return already ? name : `${name} <button class="icon-btn no-print" style="width:auto; padding:1px 6px; font-size:10px;" onclick="psOccSetScheduled('${job.id}','${type}','${e}', true)">Schedule</button>`;
+      }).join(', ')
+    : `<span style="color:var(--text-secondary);">none yet</span>`;
+  html += `</div>`;
+
+  // Scheduled list — the owner's actual decision, with an admin-only Remove action.
+  const scheduledEmails = Object.keys(occ.scheduled || {});
+  html += `<div style="font-size:12px; margin-bottom:8px;"><b>Scheduled:</b> `;
+  html += scheduledEmails.length
+    ? scheduledEmails.map(e => {
+        const name = psEscape(psTeamMemberName(e));
+        if (readOnly || !invAdminUnlocked) return name;
+        return `${name} <button class="icon-btn no-print" style="width:auto; padding:1px 6px; font-size:10px;" onclick="psOccSetScheduled('${job.id}','${type}','${e}', false)">Remove</button>`;
+      }).join(', ')
+    : `<span style="color:var(--text-secondary);">no one yet</span>`;
+  html += `</div>`;
+
+  if (!readOnly) {
+    // Employee's own availability control — always available to any signed-in team member,
+    // regardless of admin lock state (this is not a configuration action).
+    html += `<div class="no-print">
+      <button class="icon-btn" style="width:auto; padding:5px 12px; font-size:12px; ${iAmAvailable ? 'background:var(--accent-light); border-color:var(--accent);' : ''}" onclick="psOccToggleMyAvailability('${job.id}','${type}')">
+        <i class="fa-solid fa-hand"></i> ${iAmAvailable ? "I'm available (tap to undo)" : "I'm available"}
+      </button>
+    </div>`;
+    if (invAdminUnlocked) {
+      // "Schedule someone manually" — availability is never a prerequisite (e.g. Emily already
+      // knows Matthew is working an install before he's clicked anything).
+      const notScheduled = TEAM_MEMBERS.filter(m => !(m.emails || []).some(e => scheduledEmails.includes((e || '').toLowerCase())));
+      if (notScheduled.length) {
+        const selId = `occ-add-${job.id}-${type}`;
+        html += `<div class="no-print row" style="margin-top:6px;">
+          <select id="${selId}" style="flex:1;">${notScheduled.map(m => `<option value="${invAttr((m.emails || [])[0] || '')}">${psEscape(m.name)}</option>`).join('')}</select>
+          <button class="icon-btn" style="width:auto; padding:5px 12px; font-size:12px;" onclick="psOccSetScheduled('${job.id}','${type}', document.getElementById('${selId}').value, true)">Add to schedule</button>
+        </div>`;
+      }
+    }
+  }
+
+  html += `</div>`;
+  return html;
+}
+function psStaffOccurrencesHtml(job) {
+  let html = `<div class="section-label">Staffing</div>`;
+  html += STAFF_OCC_TYPES.map(t => psOccCardHtml(job, t)).join('');
+  return html;
+}
+
+// ═══════════════════════════════════════ OPEN JOBS (employee view of unmet staffing needs) ═══════════════════════════════════════
+//
+// Pure aggregation, same philosophy as the Employee Work Queue — zero new stored state beyond
+// what psOccOf/psOccCounts already read. Eligible: not a completed job, occurrence exists, and
+// scheduled count is short of peopleNeeded. Sorted by the occurrence's own derived date so the
+// soonest unmet need surfaces first; an occurrence with no parseable date sorts last rather than
+// being hidden, matching psSortedJobs' own convention for a job with no usable date.
+function psOpenJobsRows() {
+  const rows = [];
+  JOBS.forEach(job => {
+    if (job.status === 'completed') return;
+    STAFF_OCC_TYPES.forEach(type => {
+      if (!psOccExists(job, type)) return;
+      const counts = psOccCounts(job, type);
+      if (counts.status !== 'short') return;
+      const { date, time } = psOccDateTime(job, type);
+      const dateMs = date ? (() => { const d = new Date(date); return isNaN(d.getTime()) ? null : d.getTime(); })() : null;
+      rows.push({ job, type, counts, date, time, dateMs });
+    });
+  });
+  return rows.sort((a, b) => (a.dateMs ?? Infinity) - (b.dateMs ?? Infinity));
+}
+function psRenderOpenJobs() {
+  const root = document.getElementById('stf-openjobs-root');
+  if (!root) return;
+  const rows = psOpenJobsRows();
+  const myEmail = psMyEmail();
+  if (!rows.length) {
+    root.innerHTML = `<div class="card" style="text-align:center; color:var(--text-secondary);">Nothing needs staffing right now.</div>`;
+    return;
+  }
+  root.innerHTML = rows.map(r => {
+    const occ = psOccOf(r.job, r.type);
+    const iAmAvailable = !!(myEmail && occ.available[myEmail]);
+    return `<div class="card" style="margin-bottom:0.6rem; cursor:pointer;" onclick="psGoToJobStaffing('${r.job.id}')">
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div style="font-size:14px; font-weight:700;">${psEscape(psJobHeading(r.job))}</div>
+        <span style="font-size:11px; font-weight:700; text-transform:uppercase; color:${psOccStatusColorVar(r.counts.status)};">${psOccStatusLabel(r.counts)}</span>
+      </div>
+      <div style="font-size:12px; color:var(--text-secondary); margin:2px 0 6px;">${psEscape(STAFF_OCC_LABELS[r.type])} — ${psEscape(r.date) || 'No date set'}${r.time ? ' · ' + psEscape(r.time) : ''}</div>
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Need ${r.counts.needed} · ${r.counts.scheduledCount} scheduled</div>
+      <button class="icon-btn no-print" style="width:auto; padding:5px 12px; font-size:12px; ${iAmAvailable ? 'background:var(--accent-light); border-color:var(--accent);' : ''}" onclick="event.stopPropagation(); psOccToggleMyAvailability('${r.job.id}','${r.type}')">
+        <i class="fa-solid fa-hand"></i> ${iAmAvailable ? "I'm available (tap to undo)" : "I'm available"}
+      </button>
+    </div>`;
+  }).join('');
+}
+
 // EVENT: clean, read-only operational info by default (identity, date/time, location, day-of
 // contact) -- an owner/admin explicitly opens Edit to reveal the exact same fields as a form.
 // NOTES & ATTACHMENTS: execution/reference info (general notes + the now link-capable
@@ -20278,6 +20703,7 @@ function psStaffingBodyHtml(job) {
     }
   }
 
+  html += psStaffOccurrencesHtml(job);
   html += psNotesAttachmentsSectionHtml(job, 'event');
   html += psFeedbackSectionHtml(job, 'job', null, 'staff-job-feedback', 'Team Feedback', ['teamFeedback', 'noteForNextTime']);
   html += psFeedbackSectionHtml(job, 'job', null, 'staff-job-clarify', 'Needs Clarification', ['needsClarification']);
