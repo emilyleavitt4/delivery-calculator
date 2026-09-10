@@ -1685,6 +1685,13 @@
     </div>
   </div><!-- end view-staffing -->
 
+  <!-- ═══════════════════════════════════════ EMPLOYEE WORK QUEUE VIEW -->
+  <!-- Pure aggregation over job.tasks across every job — no state of its own lives here, see
+       wqRenderQueue. -->
+  <div class="view" id="view-workQueue">
+    <div id="wq-root"></div>
+  </div><!-- end view-workQueue -->
+
   <!-- ═══════════════════════════════════════ QUANTITY CALCULATOR VIEW -->
   <!-- Guided flow (decor type → style → size → quantity → color distribution), built
        entirely in JS from RECIPES + qcState since the steps/options are data-driven. -->
@@ -2284,6 +2291,7 @@ const TOOL_META = {
   import:     { title: 'Import Job',                   icon: 'fa-solid fa-file-arrow-up',      showBack: true,  showGear: true  },
   production: { title: 'Production Sheets',            icon: 'fa-solid fa-clipboard-list',     showBack: true,  showGear: true  },
   staffing:   { title: 'Event Schedule & Staffing',    icon: 'fa-solid fa-calendar-days',      showBack: true,  showGear: true  },
+  workQueue:  { title: 'Work Queue',                    icon: 'fa-solid fa-bars-staggered',      showBack: true,  showGear: false },
   quantity:   { title: 'Quantity Calculator',           icon: 'fa-solid fa-ruler',               showBack: true,  showGear: true  },
   formulas:   { title: 'Custom Recipes',                icon: 'fa-solid fa-flask',               showBack: true,  showGear: true  },
   inventory:  { title: 'Inventory',                     icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
@@ -2319,6 +2327,7 @@ const HOME_TOOLS = [
   { id: 'calc', view: 'calc', icon: 'fa-solid fa-location-dot', title: 'Delivery Calculator', group: 'job' },
   { id: 'production', view: 'production', icon: 'fa-solid fa-clipboard-list', title: 'Production Sheets', group: 'job' },
   { id: 'staffing', view: 'staffing', icon: 'fa-solid fa-calendar-days', title: 'Event Schedule &amp; Staffing', group: 'job' },
+  { id: 'workQueue', view: 'workQueue', icon: 'fa-solid fa-bars-staggered', title: 'Work Queue', group: 'job' },
   { id: 'quantity', view: 'quantity', icon: 'fa-solid fa-ruler', title: 'Quantity Calculator', group: 'job' },
   { id: 'jobcost', view: 'jobcost', icon: 'fa-solid fa-tags', title: 'Job Cost Calculator', group: 'job' },
   { id: 'helium', view: 'helium', icon: 'fa-solid fa-wind', title: 'Helium Cost Calculator', group: 'job' },
@@ -4004,6 +4013,177 @@ function psSortedJobs() {
 function psRenderAllJobViews() {
   psRenderProductionJobs();
   psRenderStaffingJobs();
+  wqRenderQueue();
+}
+
+// ═══════════════════════════════════════ EMPLOYEE WORK QUEUE (pure aggregation over job.tasks) ═══════════════════════════════════════
+//
+// Answers "what should I work on right now" across every job at once — no new task/status
+// system, no new stored state: every row here is job.tasks read fresh through the exact same
+// psSetTaskStatus/psSetTaskPriority mutation functions Production already uses, so checking a
+// task Done here and checking it Done in Production are the SAME write, and either screen shows
+// the other's changes on its very next render. Recomputed from JOBS/job.tasks on every call —
+// nothing about "what's actionable right now" is ever persisted.
+
+// One row per actionable (or, in Hold mode, held) task, with enough job/item context attached
+// that the queue never has to re-derive it while rendering. Skips a completed job entirely (no
+// actionable work should ever surface from a job that's done) and skips an orphaned task whose
+// productionItemId no longer matches any line on the job (normal removal already deletes a line's
+// tasks — see psRemoveItemFromJob — this is just a defensive skip for the rare case something
+// else left one behind, not an active cleanup; the queue only ever reads, never mutates job shape).
+function wqTaskRows(statusFilter) {
+  const rows = [];
+  JOBS.forEach(job => {
+    if (job.status === 'completed') return;
+    (job.tasks || []).forEach(task => {
+      if (task.status !== statusFilter) return;
+      const line = (job.productionItems || []).find(l => l.id === task.productionItemId);
+      if (!line) return;
+      const recipe = psLineRecipe(line);
+      if (!recipe) return;
+      rows.push({
+        task, job, line,
+        itemLabel: psLineLabel(line, recipe),
+        multiItem: (job.productionItems || []).length > 1,
+        dueMs: psTaskDueDate(job, task),
+        eventMs: psJobDateValue(job),
+      });
+    });
+  });
+  return rows;
+}
+// Do Next first; then chronological by derived due date, falling back to the job's own event
+// date, falling back to last (never hidden just for lacking a date); then Prep -> Inflate & Build
+// -> Finish & Pack within the same effective date. Returns 0 for anything still tied, and Array
+//.prototype.sort's guaranteed stability then preserves each task's original job.tasks array
+// order — which already reflects the template's own intended sequence (see
+// psSnapshotTasksForItem) — so this never needs a separate manual ordering field.
+function wqCompareTasks(a, b) {
+  if (!!a.task.priority !== !!b.task.priority) return a.task.priority ? -1 : 1;
+  const aDate = a.dueMs !== null ? a.dueMs : (a.eventMs !== null ? a.eventMs : Infinity);
+  const bDate = b.dueMs !== null ? b.dueMs : (b.eventMs !== null ? b.eventMs : Infinity);
+  if (aDate !== bDate) return aDate - bDate;
+  const aPhase = TASK_PHASES.indexOf(a.task.phase), bPhase = TASK_PHASES.indexOf(b.task.phase);
+  if (aPhase !== bPhase) return aPhase - bPhase;
+  return 0;
+}
+// Grouped by job — "date/job context," not a flat list, per the batch instruction, without a new
+// nested hierarchy: one flat list of job groups, each a flat list of already-sorted tasks. A
+// group's own position is decided by its single most urgent task (index 0 after sorting), using
+// the exact same comparator — so the job with the most pressing work always leads.
+function wqGroupedRows(statusFilter) {
+  const rows = wqTaskRows(statusFilter);
+  const byJob = new Map();
+  rows.forEach(row => {
+    let g = byJob.get(row.job.id);
+    if (!g) { g = { job: row.job, rows: [] }; byJob.set(row.job.id, g); }
+    g.rows.push(row);
+  });
+  const groups = [...byJob.values()];
+  groups.forEach(g => g.rows.sort(wqCompareTasks));
+  groups.sort((ga, gb) => wqCompareTasks(ga.rows[0], gb.rows[0]));
+  return groups;
+}
+function wqFmtDate(ms) {
+  if (ms === null || !Number.isFinite(ms)) return null;
+  return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+// Employees see and act on Ready work by default; Hold is deliberately a separate, lightweight
+// filter (not a second tab hierarchy) so held work stays visible without cluttering the default
+// "what do I do right now" list. Never a stored view — just which statusFilter the same render
+// pass reads.
+let wqShowHold = false;
+function wqSetShowHold(show) {
+  wqShowHold = show;
+  wqRenderQueue();
+}
+function wqToggleTask(jobId, taskId, done) {
+  psSetTaskStatus(jobId, taskId, done ? 'done' : 'ready');
+}
+function wqSetHold(jobId, taskId, hold) {
+  psSetTaskStatus(jobId, taskId, hold ? 'hold' : 'ready');
+}
+function wqTogglePriority(jobId, taskId, priority) {
+  psSetTaskPriority(jobId, taskId, priority);
+}
+// The queue answers "what should I do" — Production stays the detailed answer to "what exactly is
+// this job/item," so every job-context click here just hands off to Production's own existing
+// job-expand state rather than duplicating any of its rendering.
+function wqGoToJob(jobId) {
+  showView('production');
+  psExpandedProduction = jobId;
+  psRenderProductionJobs();
+}
+// Compact task row — task text, item/job context, phase, due date, Do Next star, and either a
+// Done checkbox (Ready mode) or a Resume action (Hold mode). Every mutation goes straight through
+// psSetTaskStatus/psSetTaskPriority, the exact same functions Production's own task rows call.
+function wqTaskRowHtml(row, holdMode) {
+  const task = row.task;
+  const dueText = wqFmtDate(row.dueMs) || wqFmtDate(row.eventMs);
+  const dueLabel = row.dueMs !== null ? dueText : (dueText ? `event ${dueText}` : null);
+  return `<div class="ps-check-row">
+    ${holdMode
+      ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="wqSetHold('${row.job.id}','${task.id}', false)">Resume</button>`
+      : `<input type="checkbox" onchange="wqToggleTask('${row.job.id}','${task.id}', this.checked)">`}
+    <label onclick="wqGoToJob('${row.job.id}')" style="cursor:pointer;">
+      ${row.multiItem ? `<span style="color:var(--text-secondary);">${psEscape(row.itemLabel)}:</span> ` : ''}${psEscape(task.text)}
+      <span style="display:block; font-size:11px; color:var(--text-secondary); margin-top:1px;">
+        ${psEscape(TASK_PHASE_LABELS[task.phase] || task.phase)}${dueLabel ? ' · due ' + psEscape(dueLabel) : ''}
+      </span>
+    </label>
+    <button class="icon-btn" style="width:auto; padding:2px 6px; flex-shrink:0;" title="${task.priority ? 'Do Next — click to unmark' : 'Do Next'}" onclick="wqTogglePriority('${row.job.id}','${task.id}', ${task.priority ? 'false' : 'true'})"><i class="fa-${task.priority ? 'solid' : 'regular'} fa-star" style="color:${task.priority ? 'var(--warning-text)' : 'var(--text-tertiary)'};"></i></button>
+    ${!holdMode ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="wqSetHold('${row.job.id}','${task.id}', true)">Hold</button>` : ''}
+  </div>`;
+}
+// One job group: a compact header (heading + date, reusing the exact same psJobHeading format
+// Production/Staffing already show) plus multi-quantity physical-progress context per item where
+// relevant (never inferred from task completion — see psCompletedQtyControlHtml's own comment on
+// why that stays a separate fact), then its own already-sorted task rows.
+function wqJobGroupHtml(group, holdMode) {
+  const job = group.job;
+  const multiQtyItems = (job.productionItems || [])
+    .filter(l => Math.max(1, Math.round(l.qty) || 1) > 1)
+    .map(l => {
+      const r = psLineRecipe(l);
+      if (!r) return null;
+      const bookedQty = Math.max(1, Math.round(l.qty) || 1);
+      const completedQty = Math.max(0, Math.min(bookedQty, l.completedQty || 0));
+      return { label: psLineLabel(l, r), bookedQty, completedQty };
+    })
+    .filter(Boolean);
+
+  let html = `<div class="card" style="margin-bottom:0.75rem;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem; cursor:pointer;" onclick="wqGoToJob('${job.id}')">
+      <div>
+        <div style="font-size:14px; font-weight:700;">${psEscape(psJobHeading(job))}</div>
+        <div style="font-size:11px; color:var(--text-secondary);">${psEscape(job.eventDate || 'No date set')}</div>
+      </div>
+      <i class="fa-solid fa-chevron-right" style="color:var(--text-tertiary); font-size:12px;"></i>
+    </div>`;
+  if (multiQtyItems.length) {
+    html += multiQtyItems.map(i => `<div style="font-size:11px; color:var(--text-secondary); margin-bottom:2px;">${psEscape(i.label)}: ${i.completedQty} of ${i.bookedQty} built</div>`).join('');
+  }
+  html += group.rows.map(row => wqTaskRowHtml(row, holdMode)).join('');
+  html += `</div>`;
+  return html;
+}
+function wqRenderQueue() {
+  const root = document.getElementById('wq-root');
+  if (!root) return;
+  const groups = wqGroupedRows(wqShowHold ? 'hold' : 'ready');
+  const totalTasks = groups.reduce((sum, g) => sum + g.rows.length, 0);
+
+  let html = `<div class="trip-toggle" style="margin-bottom:0.75rem;">
+    <button class="trip-btn ${!wqShowHold ? 'active' : ''}" onclick="wqSetShowHold(false)">Ready</button>
+    <button class="trip-btn ${wqShowHold ? 'active' : ''}" onclick="wqSetShowHold(true)">On Hold</button>
+  </div>`;
+
+  if (totalTasks === 0) {
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">${wqShowHold ? 'Nothing on Hold right now.' : 'Nothing to work on right now — either everything is done, or the rest is on Hold.'}</div>`;
+  } else {
+    html += groups.map(g => wqJobGroupHtml(g, wqShowHold)).join('');
+  }
+  root.innerHTML = html;
 }
 
 function psCycleStatus(jobId) {
