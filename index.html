@@ -3626,6 +3626,170 @@ function psTaskDueDate(job, task) {
   return eventMs + task.dueOffsetDays * 86400000;
 }
 
+// ═══════════════════════════════════════ FEEDBACK / NOTES (Needs Clarification, Team Feedback, Note for Next Time) ═══════════════════════════════════════
+//
+// ONE shared record shape for three operationally-distinct but structurally-identical needs —
+// deliberately not three separate systems, per the explicit instruction. The real semantic split
+// is just `kind`, plus whether that kind ever has an open/resolved lifecycle:
+//   'needsClarification' — something that may need attention NOW to execute the job correctly.
+//     The only kind that carries a status (open/resolved) — an open one should stay visibly open
+//     until a person resolves it, never auto-resolved by a date or a task/job status change.
+//   'teamFeedback' / 'noteForNextTime' — something learned that may matter LATER. Purely a
+//     historical record once written; there's nothing to "resolve" about an observation.
+// Scope is (scope, scopeId): 'job' (scopeId null), 'productionItem' (scopeId = line.id), or 'task'
+// (scopeId = task.id) — stable ids already used everywhere else in this app, so a note never
+// needs duplicating into more than one array just to appear in more than one place; every reader
+// (job-level, item-level, task-level, Work Queue) just filters this ONE array by scope/scopeId.
+// Internal, never client-facing, never edited by anyone but its own author for V1 (no per-user
+// permission system exists to check anyway — see invResolveActor). Never mutates a master
+// Production Template, a Color Library/inventory record, or any other "master data" — promoting a
+// piece of feedback into reusable business knowledge is explicitly a later, separate decision.
+function psNewFeedbackId() {
+  return 'fb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+function psJobFeedback(job, scope, scopeId) {
+  return (job.feedback || []).filter(f => f.scope === scope && (scope === 'job' || f.scopeId === scopeId));
+}
+// Every OPEN needsClarification for a scope — the one thing Work Queue needs to know to surface a
+// visible warning without touching task status (see psWorkQueueHasOpenClarification).
+function psOpenClarifications(job, scope, scopeId) {
+  return psJobFeedback(job, scope, scopeId).filter(f => f.kind === 'needsClarification' && f.status === 'open');
+}
+function psAddFeedback(jobId, scope, scopeId, kind, text) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const trimmed = (text || '').trim();
+  if (!trimmed) return;
+  const actor = invResolveActor(); // honest fallback to bare email or 'Unknown' — never invents a person
+  if (!job.feedback) job.feedback = [];
+  job.feedback.push({
+    id: psNewFeedbackId(), scope, scopeId: scope === 'job' ? null : scopeId,
+    kind, text: trimmed,
+    who: actor.who, whoEmail: actor.whoEmail, createdAt: Date.now(),
+    status: kind === 'needsClarification' ? 'open' : null,
+    resolutionNote: '', resolvedAt: null, resolvedBy: null,
+  });
+  psSaveJob(job);
+  psRenderAllJobViews();
+}
+// Resolution is a plain state change with an optional short note — never a reply thread. Only
+// meaningful for 'needsClarification'; a no-op on any other kind (nothing to resolve).
+function psResolveFeedback(jobId, feedbackId, resolutionNote) {
+  const job = psFindJob(jobId);
+  const item = job && (job.feedback || []).find(f => f.id === feedbackId);
+  if (!item || item.kind !== 'needsClarification') return;
+  const actor = invResolveActor();
+  item.status = 'resolved';
+  item.resolutionNote = (resolutionNote || '').trim();
+  item.resolvedAt = Date.now();
+  item.resolvedBy = actor.who;
+  psSaveJob(job);
+  psRenderAllJobViews();
+}
+// A small safety valve for "resolved by mistake" — reopens exactly like it was never resolved.
+function psReopenFeedback(jobId, feedbackId) {
+  const job = psFindJob(jobId);
+  const item = job && (job.feedback || []).find(f => f.id === feedbackId);
+  if (!item || item.kind !== 'needsClarification') return;
+  item.status = 'open';
+  item.resolutionNote = '';
+  item.resolvedAt = null;
+  item.resolvedBy = null;
+  psSaveJob(job);
+  psRenderAllJobViews();
+}
+function psDeleteFeedback(jobId, feedbackId) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const item = (job.feedback || []).find(f => f.id === feedbackId);
+  if (!item) return;
+  if (!confirm('Delete this note? This can\'t be undone.')) return;
+  job.feedback = job.feedback.filter(f => f.id !== feedbackId);
+  psSaveJob(job);
+  psRenderAllJobViews();
+}
+const FEEDBACK_KIND_LABELS = { needsClarification: 'Needs Clarification', teamFeedback: 'Team Feedback', noteForNextTime: 'Note for Next Time' };
+function psFeedbackWhen(ms) {
+  if (!ms) return '';
+  return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+// One entry's read-only display line — reused everywhere a feedback/clarification record is
+// shown (job level, item level, task level), so the wording/attribution never drifts between them.
+function psFeedbackEntryHtml(job, item, readOnly) {
+  const isClarification = item.kind === 'needsClarification';
+  const openBadge = isClarification
+    ? (item.status === 'open'
+        ? `<span class="rp-badge rp-badge-attention">Open</span>`
+        : `<span class="rp-badge" style="background:var(--border); color:var(--text-secondary);">Resolved</span>`)
+    : '';
+  let html = `<div style="padding:6px 0; border-top:0.5px solid var(--border);">
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:8px;">
+      <div style="font-size:13px;">${psEscape(item.text)}</div>
+      ${openBadge}
+    </div>
+    <div style="font-size:11px; color:var(--text-secondary); margin-top:2px;">${psEscape(item.who || 'Unknown')} · ${psEscape(psFeedbackWhen(item.createdAt))}${!isClarification ? ' · ' + psEscape(FEEDBACK_KIND_LABELS[item.kind] || item.kind) : ''}</div>`;
+  if (isClarification && item.status === 'resolved') {
+    html += `<div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">Resolved${item.resolvedBy ? ' by ' + psEscape(item.resolvedBy) : ''}${item.resolutionNote ? ': ' + psEscape(item.resolutionNote) : ''}</div>`;
+  }
+  // A Completed job stays fully readable (see the batch instruction: history is never hidden) —
+  // only the actions that would change it (resolve/reopen) are held back, matching how Review &
+  // Pull already treats a Completed job as read-only.
+  if (isClarification && !readOnly) {
+    if (item.status === 'open') {
+      html += `<div class="no-print" style="display:flex; gap:6px; margin-top:4px;">
+        <input type="text" id="fb-resolve-${item.id}" placeholder="Resolution note (optional)" style="flex:1; font-size:12px;">
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="psResolveFeedback('${job.id}','${item.id}', document.getElementById('fb-resolve-${item.id}').value)">Resolve</button>
+      </div>`;
+    } else {
+      html += `<div class="no-print" style="margin-top:4px;"><button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="psReopenFeedback('${job.id}','${item.id}')">Reopen</button></div>`;
+    }
+  }
+  html += `</div>`;
+  return html;
+}
+// Shared add form — one text field + a kind choice, never a giant taxonomy (per the explicit
+// instruction). `kinds` lets a caller offer just the two relevant choices in context (e.g. a task
+// row only ever needs Needs Clarification / Note for Next Time, not the job-level "Team Feedback"
+// wording, which reads oddly attached to one task) without a second implementation.
+function psFeedbackAddFormHtml(jobId, scope, scopeId, formKey, kinds) {
+  const options = kinds.map(k => `<option value="${k}">${psEscape(FEEDBACK_KIND_LABELS[k])}</option>`).join('');
+  return `<div class="no-print" style="margin-top:0.4rem;">
+    <div class="row" style="margin-bottom:0.4rem;">
+      <select id="fb-kind-${formKey}" style="flex:0 0 170px;">${options}</select>
+      <input type="text" id="fb-text-${formKey}" placeholder="What's the question or note?">
+    </div>
+    <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psSubmitFeedback('${jobId}','${scope}', ${scopeId ? `'${scopeId}'` : 'null'}, '${formKey}')">Add</button>
+  </div>`;
+}
+function psSubmitFeedback(jobId, scope, scopeId, formKey) {
+  const kindEl = document.getElementById('fb-kind-' + formKey);
+  const textEl = document.getElementById('fb-text-' + formKey);
+  if (!kindEl || !textEl) return;
+  psAddFeedback(jobId, scope, scopeId, kindEl.value, textEl.value);
+}
+// Full section for a given scope — a list of existing entries (oldest first, reads like a small
+// log) plus the shared add form. `title`/`kinds` let the job-level "Team Feedback" +
+// "Needs Clarification" sections (two separate calls, two separate kind sets) share this same
+// renderer with the item/task-level "lightweight contextual" version (one combined section,
+// both kinds offered together).
+function psFeedbackSectionHtml(job, scope, scopeId, formKey, title, kinds) {
+  // A Completed job keeps full feedback/clarification history visible but stops accepting new
+  // entries or resolve/reopen actions -- the same read-only convention psReviewPullSectionHtml
+  // already uses for a finished job.
+  const readOnly = job.status === 'completed';
+  const entries = psJobFeedback(job, scope, scopeId);
+  let html = `<div class="section-label">${psEscape(title)}</div>`;
+  if (entries.length === 0) {
+    html += `<div style="font-size:13px; color:var(--text-secondary);">Nothing recorded yet.</div>`;
+  } else {
+    html += entries.map(item => psFeedbackEntryHtml(job, item, readOnly)).join('');
+  }
+  if (!readOnly) {
+    html += psFeedbackAddFormHtml(job.id, scope, scopeId, formKey, kinds);
+  }
+  return html;
+}
+
 // ═══════════════════════════════════════ INTERNAL EVENT MODEL (shared by Production & Staffing) ═══════════════════════════════════════
 //
 // A "Job" is this app's standardized event object — the single source of truth every import
@@ -3743,7 +3907,12 @@ function psBlankJob(overrides) {
     // productionItems) so a future work-queue-style view can scan every job's tasks in one pass;
     // each entry's own productionItemId says which line it belongs to. Old jobs without this
     // just read as `[]`, matching every other additive field this session.
-    tasks: []
+    tasks: [],
+    // { id, scope:'job'|'productionItem'|'task', scopeId, kind:'needsClarification'|'teamFeedback'|
+    // 'noteForNextTime', text, who, whoEmail, createdAt, status, resolutionNote, resolvedAt,
+    // resolvedBy } — see psAddFeedback/psFeedbackSectionHtml. One flat array, filtered by
+    // scope+scopeId at read time rather than duplicated across separate arrays per scope.
+    feedback: []
   }, overrides || {});
 }
 
@@ -3853,6 +4022,32 @@ function psAttachmentIcon(fileType) {
   return 'fa-file-lines';
 }
 
+// A link is a reference/URL attachment with no uploaded file at all -- it lives in the same
+// job.attachments[] array as a normal upload (kind:'file', the default for every record saved
+// before this existed, via `|| 'file'` at every read site) rather than a second array, since the
+// only real difference is "does this have a file behind it."
+function psAddLinkAttachment(jobId, context, url, title) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const trimmedUrl = (url || '').trim();
+  if (!trimmedUrl) return;
+  const fullUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmedUrl) ? trimmedUrl : 'https://' + trimmedUrl;
+  job.attachments = job.attachments || [];
+  job.attachments.push({
+    id: psNewAttachmentId(),
+    kind: 'link',
+    title: (title || '').trim() || trimmedUrl,
+    category: ATTACHMENT_CATEGORIES[0],
+    visibility: 'team',
+    displayLocations: ['production', 'event'],
+    url: fullUrl,
+    uploadedAt: new Date().toISOString(),
+  });
+  psSaveJob(job);
+  psRenderProductionJobs();
+  psRenderStaffingJobs();
+}
+
 // Uploads the file to Storage, then appends the metadata record to the Job and saves — the
 // Job document itself never holds the file bytes, only this lightweight reference to them.
 async function psHandleAttachmentUpload(jobId, context, fileInput) {
@@ -3869,6 +4064,7 @@ async function psHandleAttachmentUpload(jobId, context, fileInput) {
     job.attachments = job.attachments || [];
     job.attachments.push({
       id: attachmentId,
+      kind: 'file',
       title: file.name.replace(/\.[^.]+$/, ''),
       category: ATTACHMENT_CATEGORIES[0],
       visibility: 'team',
@@ -3924,6 +4120,7 @@ function psDeleteAttachment(jobId, attId) {
 // unlock already used everywhere else in the app for sensitive content (there's no separate
 // per-user role system here to hook into instead).
 function psAttachmentsSectionHtml(job, context) {
+  const readOnly = job.status === 'completed';
   const all = job.attachments || [];
   const visible = all.filter(a => (a.displayLocations || []).includes(context) && (a.visibility !== 'admin' || invAdminUnlocked));
   let html = `<div class="section-label">Attachments</div>`;
@@ -3932,20 +4129,21 @@ function psAttachmentsSectionHtml(job, context) {
     html += `<div style="font-size:13px; color:var(--text-secondary); margin-bottom:0.5rem;">No attachments here yet.</div>`;
   } else {
     visible.forEach(a => {
-      const isImage = (a.fileType || '').startsWith('image/');
+      const isLink = a.kind === 'link';
+      const isImage = !isLink && (a.fileType || '').startsWith('image/');
       html += `<div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-top:0.5px solid var(--border);">
         ${isImage
           ? `<img src="${invAttr(a.url)}" style="width:40px; height:40px; object-fit:cover; border-radius:var(--radius-sm); flex-shrink:0;">`
-          : `<div style="width:40px; height:40px; display:flex; align-items:center; justify-content:center; background:var(--bg); border-radius:var(--radius-sm); flex-shrink:0;"><i class="fa-solid ${psAttachmentIcon(a.fileType)}" style="color:var(--text-secondary); font-size:16px;"></i></div>`}
+          : `<div style="width:40px; height:40px; display:flex; align-items:center; justify-content:center; background:var(--bg); border-radius:var(--radius-sm); flex-shrink:0;"><i class="fa-solid ${isLink ? 'fa-link' : psAttachmentIcon(a.fileType)}" style="color:var(--text-secondary); font-size:16px;"></i></div>`}
         <div style="flex:1; min-width:0;">
           <div style="font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${psEscape(a.title || a.fileName)}</div>
-          <div style="font-size:11px; color:var(--text-secondary);">${psEscape(a.category)}${a.visibility === 'admin' ? ' · Admin only' : ''}</div>
+          <div style="font-size:11px; color:var(--text-secondary);">${isLink ? 'Link' : psEscape(a.category)}${a.visibility === 'admin' ? ' · Admin only' : ''}</div>
         </div>
         <a class="icon-btn" style="padding:4px; width:auto;" href="${invAttr(a.url)}" target="_blank" rel="noopener" aria-label="Open"><i class="fa-solid fa-up-right-from-square"></i></a>
-        <a class="icon-btn" style="padding:4px; width:auto;" href="${invAttr(a.url)}" download="${invAttr(a.fileName)}" aria-label="Download"><i class="fa-solid fa-download"></i></a>
-        <button class="icon-btn no-print" style="padding:4px;" onclick="psToggleExpandAttachment('${job.id}','${a.id}')" aria-label="Edit"><i class="fa-solid fa-chevron-${psExpandedAttachment === a.id ? 'up' : 'down'}"></i></button>
+        ${isLink ? '' : `<a class="icon-btn" style="padding:4px; width:auto;" href="${invAttr(a.url)}" download="${invAttr(a.fileName)}" aria-label="Download"><i class="fa-solid fa-download"></i></a>`}
+        ${readOnly ? '' : `<button class="icon-btn no-print" style="padding:4px;" onclick="psToggleExpandAttachment('${job.id}','${a.id}')" aria-label="Edit"><i class="fa-solid fa-chevron-${psExpandedAttachment === a.id ? 'up' : 'down'}"></i></button>`}
       </div>`;
-      if (psExpandedAttachment === a.id) {
+      if (!readOnly && psExpandedAttachment === a.id) {
         html += `<div class="no-print" style="padding:8px 0 8px 50px;">
           <div class="settings-field" style="margin-bottom:0.5rem;"><label>Title</label><input type="text" value="${invAttr(a.title)}" onchange="psUpdateAttachmentField('${job.id}','${a.id}','title', this.value)"></div>
           <div class="settings-field" style="margin-bottom:0.5rem;"><label>Category</label>
@@ -3970,11 +4168,22 @@ function psAttachmentsSectionHtml(job, context) {
     });
   }
 
-  html += `<div class="no-print" style="margin-top:0.5rem;">
-    <input type="file" id="att-upload-${job.id}-${context}" style="display:none" onchange="psHandleAttachmentUpload('${job.id}', '${context}', this)" accept="image/*,application/pdf,.doc,.docx,.txt">
-    <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="document.getElementById('att-upload-${job.id}-${context}').click()"><i class="fa-solid fa-paperclip"></i> Add attachment</button>
-    <div id="att-upload-status-${job.id}-${context}" style="display:none; font-size:12px; margin-top:0.4rem;"></div>
-  </div>`;
+  if (!readOnly) {
+    html += `<div class="no-print" style="margin-top:0.5rem; display:flex; gap:8px; flex-wrap:wrap;">
+      <input type="file" id="att-upload-${job.id}-${context}" style="display:none" onchange="psHandleAttachmentUpload('${job.id}', '${context}', this)" accept="image/*,application/pdf,.doc,.docx,.txt">
+      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="document.getElementById('att-upload-${job.id}-${context}').click()"><i class="fa-solid fa-paperclip"></i> Add attachment</button>
+      <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="psToggleAddLink('${job.id}','${context}')"><i class="fa-solid fa-link"></i> Add a link</button>
+      <div id="att-upload-status-${job.id}-${context}" style="display:none; font-size:12px; margin-top:0.4rem;"></div>
+    </div>`;
+
+    if (psAddLinkOpenFor === job.id + '|' + context) {
+      html += `<div class="no-print row" style="margin-top:0.5rem;">
+        <input type="text" id="att-link-url-${job.id}-${context}" placeholder="https://...">
+        <input type="text" id="att-link-title-${job.id}-${context}" placeholder="Label (optional)">
+        <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="psSubmitAddLink('${job.id}','${context}')">Add</button>
+      </div>`;
+    }
+  }
 
   return html;
 }
@@ -3983,6 +4192,40 @@ function psToggleExpandAttachment(jobId, attId) {
   psExpandedAttachment = psExpandedAttachment === attId ? null : attId;
   psRenderProductionJobs();
   psRenderStaffingJobs();
+}
+let psAddLinkOpenFor = null;
+function psToggleAddLink(jobId, context) {
+  const key = jobId + '|' + context;
+  psAddLinkOpenFor = psAddLinkOpenFor === key ? null : key;
+  psRenderProductionJobs();
+  psRenderStaffingJobs();
+}
+function psSubmitAddLink(jobId, context) {
+  const urlEl = document.getElementById(`att-link-url-${jobId}-${context}`);
+  const titleEl = document.getElementById(`att-link-title-${jobId}-${context}`);
+  if (!urlEl || !urlEl.value.trim()) return;
+  psAddLinkAttachment(jobId, context, urlEl.value, titleEl ? titleEl.value : '');
+  psAddLinkOpenFor = null;
+}
+
+// Combined Notes & Attachments section — execution/reference info, as distinct from the Event
+// section's clean operational identity fields. For context === 'event' this also carries the
+// general job.staffing.notes textarea (relocated here from the old always-editable Staffing
+// form); Production's own attachments block has no equivalent free-text notes field today, so
+// context === 'production' renders attachments only.
+function psNotesAttachmentsSectionHtml(job, context) {
+  const readOnly = job.status === 'completed';
+  let html = '';
+  if (context === 'event') {
+    const s = job.staffing || {};
+    html += `<div class="settings-field" style="margin-bottom:0.75rem;"><label>Notes</label>${
+      readOnly
+        ? `<div style="font-size:13px; white-space:pre-wrap;">${psEscape(s.notes || '') || '<span style="color:var(--text-secondary);">No notes.</span>'}</div>`
+        : `<textarea rows="2" onchange="psUpdateStaffingField('${job.id}','notes',this.value)">${psEscape(s.notes || '')}</textarea>`
+    }</div>`;
+  }
+  html += psAttachmentsSectionHtml(job, context);
+  return html;
 }
 
 // Constructs a blank Event Model from an Import Layer result — populates only true
@@ -4121,6 +4364,14 @@ function wqTaskRowHtml(row, holdMode) {
   const task = row.task;
   const dueText = wqFmtDate(row.dueMs) || wqFmtDate(row.eventMs);
   const dueLabel = row.dueMs !== null ? dueText : (dueText ? `event ${dueText}` : null);
+  // Surface an open Needs Clarification scoped to this exact task or its production item --
+  // visible, never a status change. Task status and clarification status stay separate concepts
+  // (see the batch instruction: never silently move Ready -> Hold over this).
+  const openClar = psOpenClarifications(row.job, 'task', task.id)
+    .concat(psOpenClarifications(row.job, 'productionItem', task.productionItemId));
+  const clarBadge = openClar.length
+    ? `<i class="fa-solid fa-triangle-exclamation" style="color:var(--warning-text); flex-shrink:0;" title="${psEscape(openClar.map(c => c.text).join(' / '))}"></i>`
+    : '';
   return `<div class="ps-check-row">
     ${holdMode
       ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="wqSetHold('${row.job.id}','${task.id}', false)">Resume</button>`
@@ -4131,6 +4382,7 @@ function wqTaskRowHtml(row, holdMode) {
         ${psEscape(TASK_PHASE_LABELS[task.phase] || task.phase)}${dueLabel ? ' · due ' + psEscape(dueLabel) : ''}
       </span>
     </label>
+    ${clarBadge}
     <button class="icon-btn" style="width:auto; padding:2px 6px; flex-shrink:0;" title="${task.priority ? 'Do Next — click to unmark' : 'Do Next'}" onclick="wqTogglePriority('${row.job.id}','${task.id}', ${task.priority ? 'false' : 'true'})"><i class="fa-${task.priority ? 'solid' : 'regular'} fa-star" style="color:${task.priority ? 'var(--warning-text)' : 'var(--text-tertiary)'};"></i></button>
     ${!holdMode ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="wqSetHold('${row.job.id}','${task.id}', true)">Hold</button>` : ''}
   </div>`;
@@ -5754,12 +6006,29 @@ function psJsKeyAttr(s) {
 // mirrors the same "Prioritize" star already used in Standard Latex Inventory, so "Do Next" reads
 // as the same idea wherever it appears in this app; Hold/Resume is its own control since it's a
 // third state, not a modifier on the checkbox.
+// Lightweight task-level Needs Clarification -- a one-line prompt() rather than a full form,
+// matching this file's own established pattern for quick, infrequent text capture (see the
+// admin-passcode prompts elsewhere). Not a chat thread: one flag, resolved from the Notes &
+// Clarification section wherever it's shown (job/item level) or reopened via psReopenFeedback.
+function psTaskFlagClarification(jobId, taskId) {
+  const text = prompt("What needs clarification for this task?");
+  if (text === null) return;
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  psAddFeedback(jobId, 'task', taskId, 'needsClarification', trimmed);
+}
 function psTaskRowHtml(job, task, itemLabel) {
   const done = task.status === 'done';
   const held = task.status === 'hold';
+  const openClar = psOpenClarifications(job, 'task', task.id);
+  const clarBadge = openClar.length
+    ? `<i class="fa-solid fa-triangle-exclamation" style="color:var(--warning-text); flex-shrink:0;" title="${psEscape(openClar.map(c => c.text).join(' / '))}"></i>`
+    : '';
   return `<div class="ps-check-row${done ? ' done' : ''}"${held ? ' style="opacity:0.55;"' : ''}>
     <input type="checkbox" ${done ? 'checked' : ''} onchange="psSetTaskStatus('${job.id}','${task.id}', this.checked ? 'done' : 'ready')">
     <label>${itemLabel ? `<span style="color:var(--text-secondary);">${psEscape(itemLabel)}:</span> ` : ''}${psEscape(task.text)}${held ? ' <span style="font-size:11px; font-weight:700; color:var(--warning-text);">HOLD</span>' : ''}</label>
+    ${clarBadge}
+    <button class="icon-btn no-print" style="width:auto; padding:2px 6px; flex-shrink:0;" title="Flag a clarification" onclick="psTaskFlagClarification('${job.id}','${task.id}')"><i class="fa-regular fa-circle-question" style="color:var(--text-tertiary);"></i></button>
     <button class="icon-btn" style="width:auto; padding:2px 6px; flex-shrink:0;" title="${task.priority ? 'Do Next — click to unmark' : 'Do Next'}" onclick="psSetTaskPriority('${job.id}','${task.id}', ${task.priority ? 'false' : 'true'})"><i class="fa-${task.priority ? 'solid' : 'regular'} fa-star" style="color:${task.priority ? 'var(--warning-text)' : 'var(--text-tertiary)'};"></i></button>
     ${!done ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psSetTaskStatus('${job.id}','${task.id}', '${held ? 'ready' : 'hold'}')">${held ? 'Resume' : 'Hold'}</button>` : ''}
   </div>`;
@@ -6030,6 +6299,7 @@ function psProductionBodyHtml(job) {
         <label>Build notes</label>
         <textarea rows="2" placeholder="Add construction notes..." onchange="psUpdateItemNotes('${job.id}', ${idx}, this.value)">${line.notes ? psEscape(line.notes) : ''}</textarea>
       </div>`;
+      html += `<div style="margin-top:0.4rem;">${psFeedbackSectionHtml(job, 'productionItem', line.id, 'item-fb-' + sanitizedEditKey, 'Notes & Clarification', ['needsClarification', 'teamFeedback', 'noteForNextTime'])}</div>`;
       html += `</div>`;
     });
 
@@ -6075,7 +6345,7 @@ function psProductionBodyHtml(job) {
     <div class="settings-field" style="margin-bottom:0"><label>Event date</label><input type="text" value="${psEscape(job.eventDate)}" onchange="psUpdateJobField('${job.id}','eventDate',this.value)"></div>
   </div></div>`;
 
-  html += psAttachmentsSectionHtml(job, 'production');
+  html += psNotesAttachmentsSectionHtml(job, 'production');
 
   if (job.productionItems.length > 0) {
     html += `<button class="save-btn no-print" onclick="window.print()"><i class="fa-solid fa-print"></i> Print / Save as PDF</button>`;
@@ -19920,18 +20190,59 @@ function psRenderStaffingJobs() {
   }).join('');
 }
 
+// A clean read-only display row for the Event section — reuses the pre-existing
+// .ps-sub-row/.label/.val CSS (already defined for exactly this label/value purpose) rather
+// than adding new styling.
+function psEventFieldRowHtml(label, value) {
+  return `<div class="ps-sub-row" style="display:flex; justify-content:space-between; gap:12px; padding:3px 0;">
+    <span class="label">${psEscape(label)}</span>
+    <span class="val">${psEscape(value) || '—'}</span>
+  </div>`;
+}
+
+let psEventEditOpen = null;
+function psToggleEventEdit(jobId) {
+  psEventEditOpen = psEventEditOpen === jobId ? null : jobId;
+  psRenderStaffingJobs();
+}
+
+// EVENT: clean, read-only operational info by default (identity, date/time, location, day-of
+// contact) -- an owner/admin explicitly opens Edit to reveal the exact same fields as a form.
+// NOTES & ATTACHMENTS: execution/reference info (general notes + the now link-capable
+// attachments list), followed by job-scoped Team Feedback and Needs Clarification -- all three
+// built on the shared psFeedbackSectionHtml/psNotesAttachmentsSectionHtml architecture so this
+// screen and Production's own per-item/task sections read and write the exact same job data.
 function psStaffingBodyHtml(job) {
   const s = job.staffing || {};
-  let html = `<div class="row" style="margin-top:0.75rem;">
-    <div class="settings-field" style="margin-bottom:0.75rem"><label>Client / Event name</label><input type="text" value="${psEscape(job.jobName)}" onchange="psUpdateJobField('${job.id}','jobName',this.value)"></div>
-    <div class="settings-field" style="margin-bottom:0.75rem"><label>Event date</label><input type="text" value="${psEscape(job.eventDate)}" onchange="psUpdateJobField('${job.id}','eventDate',this.value)"></div>
-  </div>`;
-  [['setupTime', 'Setup time'], ['eventStartTime', 'Event start time'], ['eventTakeDown', 'Event take-down'],
-   ['eventLocation', 'Event location'], ['dayOfContact', 'Day-of contact']].forEach(([key, label]) => {
-    html += `<div class="settings-field"><label>${label}</label><input type="text" value="${psEscape(s[key] || '')}" onchange="psUpdateStaffingField('${job.id}','${key}',this.value)"></div>`;
-  });
-  html += `<div class="settings-field" style="margin-bottom:0"><label>Notes</label><textarea rows="2" onchange="psUpdateStaffingField('${job.id}','notes',this.value)">${psEscape(s.notes || '')}</textarea></div>`;
-  html += psAttachmentsSectionHtml(job, 'event');
+  const readOnly = job.status === 'completed';
+  let html = `<div class="section-label" style="margin-top:0.5rem;">Event</div>`;
+
+  if (!readOnly && psEventEditOpen === job.id) {
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0.75rem"><label>Client / Event name</label><input type="text" value="${psEscape(job.jobName)}" onchange="psUpdateJobField('${job.id}','jobName',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0.75rem"><label>Event date</label><input type="text" value="${psEscape(job.eventDate)}" onchange="psUpdateJobField('${job.id}','eventDate',this.value)"></div>
+    </div>`;
+    [['setupTime', 'Setup time'], ['eventStartTime', 'Event start time'], ['eventTakeDown', 'Event take-down'],
+     ['eventLocation', 'Event location'], ['dayOfContact', 'Day-of contact']].forEach(([key, label]) => {
+      html += `<div class="settings-field"><label>${label}</label><input type="text" value="${psEscape(s[key] || '')}" onchange="psUpdateStaffingField('${job.id}','${key}',this.value)"></div>`;
+    });
+    html += `<div class="no-print" style="margin:0.5rem 0 1rem;"><button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psToggleEventEdit('${job.id}')">Done editing</button></div>`;
+  } else {
+    html += psEventFieldRowHtml('Client / Event', job.jobName);
+    html += psEventFieldRowHtml('Event date', job.eventDate);
+    if (s.setupTime) html += psEventFieldRowHtml('Setup time', s.setupTime);
+    if (s.eventStartTime) html += psEventFieldRowHtml('Event start time', s.eventStartTime);
+    if (s.eventTakeDown) html += psEventFieldRowHtml('Event take-down', s.eventTakeDown);
+    if (s.eventLocation) html += psEventFieldRowHtml('Event location', s.eventLocation);
+    if (s.dayOfContact) html += psEventFieldRowHtml('Day-of contact', s.dayOfContact);
+    if (!readOnly && invAdminUnlocked) {
+      html += `<div class="no-print" style="margin-top:0.5rem;"><button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psToggleEventEdit('${job.id}')"><i class="fa-solid fa-pen"></i> Edit event</button></div>`;
+    }
+  }
+
+  html += psNotesAttachmentsSectionHtml(job, 'event');
+  html += psFeedbackSectionHtml(job, 'job', null, 'staff-job-feedback', 'Team Feedback', ['teamFeedback', 'noteForNextTime']);
+  html += psFeedbackSectionHtml(job, 'job', null, 'staff-job-clarify', 'Needs Clarification', ['needsClarification']);
   return html;
 }
 
