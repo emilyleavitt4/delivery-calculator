@@ -1699,10 +1699,12 @@
     <div id="qc-root"></div>
   </div><!-- end view-quantity -->
 
-  <!-- ═══════════════════════════════════════ FORMULAS & RECIPES VIEW -->
-  <!-- Two independent sections: editable balloon-math rates (FORMULAS, shared with everything
-       that computes a balloon count) and a free-form custom-recipe notebook (CUSTOM_RECIPES,
-       purely for reference — never feeds into the math). Both built in JS. -->
+  <!-- ═══════════════════════════════════════ REFERENCE NOTES VIEW -->
+  <!-- A free-form notebook (CUSTOM_RECIPES internally — the name predates the real Production
+       Template library and was kept for the data/collection, not the UI label) for seasonal/
+       one-off items purely for reference — never feeds into any calculation. Real repeatable
+       designs that DO need to build/calculate belong in Production Templates (Settings), not
+       here — see the "Add specialty design" path there. -->
   <div class="view" id="view-formulas">
     <div id="fr-root"></div>
   </div><!-- end view-formulas -->
@@ -2293,7 +2295,7 @@ const TOOL_META = {
   staffing:   { title: 'Event Schedule & Staffing',    icon: 'fa-solid fa-calendar-days',      showBack: true,  showGear: true  },
   workQueue:  { title: 'Work Queue',                    icon: 'fa-solid fa-bars-staggered',      showBack: true,  showGear: false },
   quantity:   { title: 'Quantity Calculator',           icon: 'fa-solid fa-ruler',               showBack: true,  showGear: true  },
-  formulas:   { title: 'Custom Recipes',                icon: 'fa-solid fa-flask',               showBack: true,  showGear: true  },
+  formulas:   { title: 'Reference Notes',               icon: 'fa-solid fa-flask',               showBack: true,  showGear: true  },
   inventory:  { title: 'Inventory',                     icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
   'inventory-latex-choice': { title: 'Latex Inventory', icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
   'inventory-latex': { title: 'Standard Latex',         icon: 'fa-solid fa-boxes-stacked',       showBack: true,  showGear: true  },
@@ -2332,7 +2334,7 @@ const HOME_TOOLS = [
   { id: 'jobcost', view: 'jobcost', icon: 'fa-solid fa-tags', title: 'Job Cost Calculator', group: 'job' },
   { id: 'helium', view: 'helium', icon: 'fa-solid fa-wind', title: 'Helium Cost Calculator', group: 'job' },
   { id: 'letters', view: 'letters', icon: 'fa-solid fa-font', title: 'Letter Styling Calculator', group: 'job' },
-  { id: 'formulas', view: 'formulas', icon: 'fa-solid fa-flask', title: 'Custom Recipes', group: 'business' },
+  { id: 'formulas', view: 'formulas', icon: 'fa-solid fa-flask', title: 'Reference Notes', group: 'business' },
   { id: 'inventory', view: 'inventory', icon: 'fa-solid fa-boxes-stacked', title: 'Inventory', group: 'business' },
   { id: 'assets', view: 'assets', icon: 'fa-solid fa-warehouse', title: 'Assets', group: 'business' },
   { id: 'supplies', view: 'supplies', icon: 'fa-solid fa-cart-shopping', title: 'Supply Order', group: 'business' },
@@ -3065,6 +3067,11 @@ function psNormalizeTemplateFields(t) {
   if (typeof t.pullListNotes !== 'string') t.pullListNotes = '';
   if (typeof t.staffingRecommendation !== 'string') t.staffingRecommendation = '';
   if (!Array.isArray(t.tasks)) t.tasks = [];
+  // Common vs. reusable-specialty is organization, not a second schema — one RECIPES entry
+  // either way, just grouped differently in the picker (see psItemOptionsHtml). Anything
+  // missing/invalid defaults to 'common', so every existing template (the 22 starters and any
+  // business-created one from before this field existed) needs no migration.
+  if (t.library !== 'common' && t.library !== 'specialty') t.library = 'common';
   return t;
 }
 RECIPES.forEach(psNormalizeTemplateFields);
@@ -5632,12 +5639,27 @@ function psToggleExpand(view, jobId) {
 }
 
 // ═══════════════════════════════════════ PRODUCTION VIEW ═══════════════════════════════════════
+// Common templates stay grouped by category exactly as before, at the top of the list — the
+// fast/default choices. Reusable specialty/custom templates (library === 'specialty') are pulled
+// into one trailing "Custom / Specialty" group instead of mixing into their own category's group,
+// so a giant everyday-Column list never has a one-off Candy Cane Column sitting equally among the
+// common choices — but it's still one native <select> (still searchable via the browser's own
+// type-ahead, still one click away), never a separate hidden screen. Shared by every caller that
+// lets someone pick a Production Template — Production's Add Item, Import Review's item cards,
+// and Import Mapping Rules — so all three get this for free from one change.
 function psItemOptionsHtml(selectedId) {
+  const ready = psReadyRecipes();
+  const common = ready.filter(r => r.library !== 'specialty');
+  const specialty = ready.filter(r => r.library === 'specialty');
   const groups = {};
-  psReadyRecipes().forEach(r => { (groups[r.category] = groups[r.category] || []).push(r); });
-  return Object.keys(groups).map(cat =>
+  common.forEach(r => { (groups[r.category] = groups[r.category] || []).push(r); });
+  let html = Object.keys(groups).map(cat =>
     `<optgroup label="${cat}s">` + groups[cat].map(r => `<option value="${r.id}"${r.id === selectedId ? ' selected' : ''}>${psEscape(r.display)}</option>`).join('') + `</optgroup>`
   ).join('');
+  if (specialty.length) {
+    html += `<optgroup label="Custom / Specialty">` + specialty.map(r => `<option value="${r.id}"${r.id === selectedId ? ' selected' : ''}>${psEscape(r.display)}</option>`).join('') + `</optgroup>`;
+  }
+  return html;
 }
 
 function psRenderProductionJobs() {
@@ -7035,9 +7057,9 @@ let frEditingRecipeId = null; // id of the recipe open for editing, '__new__' fo
 function frInit() {
   const root = document.getElementById('fr-root');
   root.innerHTML = `
-    <div class="section-label" style="margin-top:0">Custom recipes</div>
+    <div class="section-label" style="margin-top:0">Reference notes</div>
     <div class="card" style="text-align:center; color:var(--text-secondary); font-size:12px; margin-bottom:0.5rem;">
-      For reference only — seasonal or one-off items you won't add to Production. These never affect the Quantity Calculator or Production math.
+      For reference only — seasonal or one-off items you won't add to Production. These never affect the Quantity Calculator or Production math. Looking to save a repeatable specialty design (like a Candy Cane Column) that actually builds and calculates? Use "Add specialty design" under Settings → Production Templates instead.
     </div>
     <div id="fr-recipes-root"></div>
     <div class="home-footer-note">Balloon math and Production Templates now live under Settings.</div>
@@ -7132,7 +7154,10 @@ function ptRenderShell() {
           : `<button class="icon-btn" style="width:auto; padding:4px 12px; font-size:12px;" onclick="ptUnlockAdmin()">Unlock</button>`}
       </div>
       <div id="pt-list"></div>
-      ${invAdminUnlocked ? `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; margin-top:8px;" onclick="ptAddTemplate()"><i class="fa-solid fa-plus"></i> Add template</button>` : ''}
+      ${invAdminUnlocked ? `<div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="ptAddTemplate()"><i class="fa-solid fa-plus"></i> Add template</button>
+        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="ptAddTemplate(null, 'specialty')"><i class="fa-solid fa-wand-magic-sparkles"></i> Add specialty design</button>
+      </div>` : ''}
       <div style="margin-top:1rem; padding-top:0.75rem; border-top:0.5px solid var(--border);">
         <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px; background:var(--bg); color:var(--text-secondary); border:0.5px solid var(--border-strong);" onclick="ptClearAllTemplates()"><i class="fa-solid fa-triangle-exclamation"></i> Clear all templates</button>
       </div>
@@ -7270,6 +7295,12 @@ function ptTemplateFieldsEditorHtml(t) {
     </div>
   </div>
   <div style="font-size:11px; color:var(--text-secondary); margin:-0.2rem 0 0.6rem;">If a style genuinely needs different build directions, give it its own template (e.g. "Classic Column" and "Freeform Column" as two separate Names) rather than expressing it as a size/label variant of this one.</div>
+  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Library <span style="font-weight:400;">(organization only — same template either way)</span></label>
+    <select onchange="ptUpdateField('${t.id}','library', this.value)">
+      <option value="common" ${t.library !== 'specialty' ? 'selected' : ''}>Common — shown with the everyday templates</option>
+      <option value="specialty" ${t.library === 'specialty' ? 'selected' : ''}>Custom / Specialty — reusable design, kept out of the main picker list</option>
+    </select>
+  </div>
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Linear feet</label><input type="number" step="0.5" min="0" value="${t.linearFt || ''}" ${t.customLinear ? 'disabled placeholder="entered per job"' : ''} onchange="ptUpdateField('${t.id}','linearFt', this.value)"></div>
   <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">
     <input type="checkbox" ${t.customLinear ? 'checked' : ''} onchange="ptUpdateField('${t.id}','customLinear', this.checked)">
@@ -7296,7 +7327,7 @@ function ptTemplateHtml(t) {
   let html = `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
     <div style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" onclick="ptToggleExpanded('${t.id}')">
       <div>
-        <div style="font-size:13px; font-weight:600;">${psEscape(t.display)} ${t.needsSetup ? `<span style="font-size:10px; font-weight:700; text-transform:uppercase; color:var(--warning-text); background:var(--warning-bg); padding:2px 6px; border-radius:999px; margin-left:4px;">Needs Setup</span>` : ''}</div>
+        <div style="font-size:13px; font-weight:600;">${psEscape(t.display)} ${t.library === 'specialty' ? `<span style="font-size:10px; font-weight:700; text-transform:uppercase; color:var(--text-secondary); background:var(--bg); border:0.5px solid var(--border-strong); padding:2px 6px; border-radius:999px; margin-left:4px;">Specialty</span>` : ''} ${t.needsSetup ? `<span style="font-size:10px; font-weight:700; text-transform:uppercase; color:var(--warning-text); background:var(--warning-bg); padding:2px 6px; border-radius:999px; margin-left:4px;">Needs Setup</span>` : ''}</div>
         <div style="font-size:11px; color:var(--text-secondary);">${psEscape(t.category)} — ${psEscape(t.style || '')}</div>
       </div>
       <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'}" style="color:var(--text-tertiary); font-size:11px;"></i>
@@ -7458,7 +7489,12 @@ function ptCompleteSetup(id) {
 // item) seed a real starting Display Name instead of the literal "New template" placeholder —
 // purely a convenience default, still fully editable, and still gated behind the same
 // ptCanCompleteSetup/Complete Template Setup requirement regardless of what name it starts with.
-function ptAddTemplate(prefillName) {
+// `library` ('common' | 'specialty') is the one intentional-creation entry point for a reusable
+// specialty design: same RECIPES shape, same needsSetup/Complete Template Setup gate, same
+// editor — only the picker grouping differs (see psItemOptionsHtml). Defaults to 'common' so
+// every other existing caller (Import Review's "+ New template" for an unmapped invoice item)
+// keeps creating an ordinary template exactly as before.
+function ptAddTemplate(prefillName, library) {
   // needsSetup: true — these starting values are not a meaningful default for whatever real decor
   // type this ends up being; they only exist so the record has something to render while it's
   // being configured. See psReadyRecipes/ptReadyRecipe for where this keeps the template out of
@@ -7469,9 +7505,11 @@ function ptAddTemplate(prefillName) {
   // in the Formula editor before Complete Template Setup can ever succeed (ptCanCompleteSetup).
   const newTemplate = psNormalizeTemplateFields({
     id: 'custom-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-    display: (prefillName && prefillName.trim()) || 'New template', category: 'Garland', style: 'Classic',
+    display: (prefillName && prefillName.trim()) || (library === 'specialty' ? 'New specialty design' : 'New template'),
+    category: 'Garland', style: 'Classic',
     formula: null, customLinear: true,
     needsSetup: true,
+    library: library === 'specialty' ? 'specialty' : 'common',
   });
   RECIPES = RECIPES.concat([newTemplate]);
   ptExpandedTemplates.add(newTemplate.id);
@@ -8101,7 +8139,7 @@ function frRenderRecipes() {
   let html = '';
 
   if (CUSTOM_RECIPES.length === 0 && frEditingRecipeId !== '__new__') {
-    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No custom recipes yet.</div>`;
+    html += `<div class="card" style="text-align:center; color:var(--text-secondary);">No reference notes yet.</div>`;
   } else {
     CUSTOM_RECIPES.forEach(r => {
       if (frEditingRecipeId === r.id) {
