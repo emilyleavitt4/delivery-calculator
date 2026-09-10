@@ -3609,7 +3609,11 @@ function psFindTask(job, taskId) {
 // path or a different data shape).
 function psUpdateTaskField(jobId, taskId, field, value) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  // Completed jobs are read-only for operational task progress — the UI already hides these
+  // controls (see psTaskRowHtml/psPhaseSectionHtml's readOnly gating), this is the backstop at
+  // the one function that actually changes a task, matching the same defense-in-depth pattern
+  // used everywhere else a completed job must not be mutated (e.g. psReviewPullConfirmRow).
+  if (!job || job.status === 'completed') return;
   const task = psFindTask(job, taskId);
   if (!task) return;
   if (field === 'priority') task.priority = !!value;
@@ -3665,7 +3669,13 @@ function psTaskDueDate(job, task) {
 // permission system exists to check anyway — see invResolveActor). Never mutates a master
 // Production Template, a Color Library/inventory record, or any other "master data" — promoting a
 // piece of feedback into reusable business knowledge is explicitly a later, separate decision.
-function psNewFeedbackId() {
+// Named distinctly from psNewFeedbackId (the unrelated, pre-existing alpha-testing "report a
+// bug" widget further down this file, its own separate FEEDBACK_ITEMS collection) — both used to
+// be named the same thing, a real duplicate-function-declaration bug caught during the Batch 2
+// regression pass: the later declaration in source order silently won for both features, so this
+// job-scoped feedback was actually minting the OTHER system's id prefix. Renamed rather than the
+// established widget, since this is the newer of the two.
+function psNewJobFeedbackId() {
   return 'fb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
 }
 function psJobFeedback(job, scope, scopeId) {
@@ -3678,13 +3688,15 @@ function psOpenClarifications(job, scope, scopeId) {
 }
 function psAddFeedback(jobId, scope, scopeId, kind, text) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  // Backstop matching every other completed-job guard added this pass — psFeedbackSectionHtml
+  // already hides the add form once a job is Completed.
+  if (!job || job.status === 'completed') return;
   const trimmed = (text || '').trim();
   if (!trimmed) return;
   const actor = invResolveActor(); // honest fallback to bare email or 'Unknown' — never invents a person
   if (!job.feedback) job.feedback = [];
   job.feedback.push({
-    id: psNewFeedbackId(), scope, scopeId: scope === 'job' ? null : scopeId,
+    id: psNewJobFeedbackId(), scope, scopeId: scope === 'job' ? null : scopeId,
     kind, text: trimmed,
     who: actor.who, whoEmail: actor.whoEmail, createdAt: Date.now(),
     status: kind === 'needsClarification' ? 'open' : null,
@@ -3697,6 +3709,7 @@ function psAddFeedback(jobId, scope, scopeId, kind, text) {
 // meaningful for 'needsClarification'; a no-op on any other kind (nothing to resolve).
 function psResolveFeedback(jobId, feedbackId, resolutionNote) {
   const job = psFindJob(jobId);
+  if (job && job.status === 'completed') return;
   const item = job && (job.feedback || []).find(f => f.id === feedbackId);
   if (!item || item.kind !== 'needsClarification') return;
   const actor = invResolveActor();
@@ -3710,6 +3723,7 @@ function psResolveFeedback(jobId, feedbackId, resolutionNote) {
 // A small safety valve for "resolved by mistake" — reopens exactly like it was never resolved.
 function psReopenFeedback(jobId, feedbackId) {
   const job = psFindJob(jobId);
+  if (job && job.status === 'completed') return;
   const item = job && (job.feedback || []).find(f => f.id === feedbackId);
   if (!item || item.kind !== 'needsClarification') return;
   item.status = 'open';
@@ -3721,7 +3735,7 @@ function psReopenFeedback(jobId, feedbackId) {
 }
 function psDeleteFeedback(jobId, feedbackId) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const item = (job.feedback || []).find(f => f.id === feedbackId);
   if (!item) return;
   if (!confirm('Delete this note? This can\'t be undone.')) return;
@@ -4060,7 +4074,9 @@ function psAttachmentIcon(fileType) {
 // only real difference is "does this have a file behind it."
 function psAddLinkAttachment(jobId, context, url, title) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  // Backstop matching every other completed-job guard added this pass — psAttachmentsSectionHtml
+  // already hides the add controls once a job is Completed.
+  if (!job || job.status === 'completed') return;
   const trimmedUrl = (url || '').trim();
   if (!trimmedUrl) return;
   const fullUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmedUrl) ? trimmedUrl : 'https://' + trimmedUrl;
@@ -4086,7 +4102,7 @@ async function psHandleAttachmentUpload(jobId, context, fileInput) {
   const file = fileInput.files[0];
   if (!file) return;
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const statusEl = document.getElementById('att-upload-status-' + jobId + '-' + context);
   if (statusEl) { statusEl.textContent = 'Uploading…'; statusEl.style.display = 'block'; statusEl.className = ''; }
 
@@ -4120,6 +4136,7 @@ async function psHandleAttachmentUpload(jobId, context, fileInput) {
 
 function psUpdateAttachmentField(jobId, attId, field, value) {
   const job = psFindJob(jobId);
+  if (job && job.status === 'completed') return;
   const att = job && (job.attachments || []).find(a => a.id === attId);
   if (!att) return;
   att[field] = value;
@@ -4127,6 +4144,7 @@ function psUpdateAttachmentField(jobId, attId, field, value) {
 }
 function psToggleAttachmentLocation(jobId, attId, loc, checked) {
   const job = psFindJob(jobId);
+  if (job && job.status === 'completed') return;
   const att = job && (job.attachments || []).find(a => a.id === attId);
   if (!att) return;
   att.displayLocations = att.displayLocations || [];
@@ -4136,7 +4154,7 @@ function psToggleAttachmentLocation(jobId, attId, loc, checked) {
 }
 function psDeleteAttachment(jobId, attId) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const att = (job.attachments || []).find(a => a.id === attId);
   if (!att) return;
   if (!confirm(`Delete "${att.title || att.fileName}"? This can't be undone.`)) return;
@@ -4519,14 +4537,16 @@ function psCreateManualJob(view) {
 
 function psUpdateJobField(jobId, field, value) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  // Backstop matching every other completed-job guard added this pass — both Production's and
+  // Staffing's own UI already hide the editable fields that call this once a job is Completed.
+  if (!job || job.status === 'completed') return;
   job[field] = value;
   psSaveJob(job);
 }
 
 function psUpdateStaffingField(jobId, field, value) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   if (!job.staffing) job.staffing = {};
   job.staffing[field] = value;
   psSaveJob(job);
@@ -4534,7 +4554,7 @@ function psUpdateStaffingField(jobId, field, value) {
 
 function psToggleRentalStatus(jobId, itemId, field, checked) {
   const job = psFindJob(jobId);
-  if (!job || !job.rentalItems) return;
+  if (!job || job.status === 'completed' || !job.rentalItems) return;
   const item = job.rentalItems.find(i => i.id === itemId);
   if (!item) return;
   item[field] = checked;
@@ -5957,7 +5977,7 @@ function psColorPickerHtml(key, draft) {
 // wrong, delete and re-add; everything else about an already-added item can be fixed here.
 function psStartEditItem(jobId, idx) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const line = job.productionItems[idx];
   const key = psColorDraftKey(jobId, idx);
   psColorDraftStore[key] = [...line.colors];
@@ -5972,7 +5992,7 @@ function psCancelEditItem() {
 }
 function psSaveEditItem(jobId, idx) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const line = job.productionItems[idx];
   const r = psLineRecipe(line);
   const key = psColorDraftKey(jobId, idx);
@@ -6077,6 +6097,7 @@ function psTaskFlagClarification(jobId, taskId) {
   psAddFeedback(jobId, 'task', taskId, 'needsClarification', trimmed);
 }
 function psTaskRowHtml(job, task, itemLabel) {
+  const readOnly = job.status === 'completed';
   const done = task.status === 'done';
   const held = task.status === 'hold';
   const openClar = psOpenClarifications(job, 'task', task.id);
@@ -6084,12 +6105,12 @@ function psTaskRowHtml(job, task, itemLabel) {
     ? `<i class="fa-solid fa-triangle-exclamation" style="color:var(--warning-text); flex-shrink:0;" title="${psEscape(openClar.map(c => c.text).join(' / '))}"></i>`
     : '';
   return `<div class="ps-check-row${done ? ' done' : ''}"${held ? ' style="opacity:0.55;"' : ''}>
-    <input type="checkbox" ${done ? 'checked' : ''} onchange="psSetTaskStatus('${job.id}','${task.id}', this.checked ? 'done' : 'ready')">
+    <input type="checkbox" ${done ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psSetTaskStatus('${job.id}','${task.id}', this.checked ? 'done' : 'ready')">
     <label>${itemLabel ? `<span style="color:var(--text-secondary);">${psEscape(itemLabel)}:</span> ` : ''}${psEscape(task.text)}${held ? ' <span style="font-size:11px; font-weight:700; color:var(--warning-text);">HOLD</span>' : ''}</label>
     ${clarBadge}
-    <button class="icon-btn no-print" style="width:auto; padding:2px 6px; flex-shrink:0;" title="Flag a clarification" onclick="psTaskFlagClarification('${job.id}','${task.id}')"><i class="fa-regular fa-circle-question" style="color:var(--text-tertiary);"></i></button>
+    ${readOnly ? '' : `<button class="icon-btn no-print" style="width:auto; padding:2px 6px; flex-shrink:0;" title="Flag a clarification" onclick="psTaskFlagClarification('${job.id}','${task.id}')"><i class="fa-regular fa-circle-question" style="color:var(--text-tertiary);"></i></button>
     <button class="icon-btn" style="width:auto; padding:2px 6px; flex-shrink:0;" title="${task.priority ? 'Do Next — click to unmark' : 'Do Next'}" onclick="psSetTaskPriority('${job.id}','${task.id}', ${task.priority ? 'false' : 'true'})"><i class="fa-${task.priority ? 'solid' : 'regular'} fa-star" style="color:${task.priority ? 'var(--warning-text)' : 'var(--text-tertiary)'};"></i></button>
-    ${!done ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psSetTaskStatus('${job.id}','${task.id}', '${held ? 'ready' : 'hold'}')">${held ? 'Resume' : 'Hold'}</button>` : ''}
+    ${!done ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psSetTaskStatus('${job.id}','${task.id}', '${held ? 'ready' : 'hold'}')">${held ? 'Resume' : 'Hold'}</button>` : ''}`}
   </div>`;
 }
 // { [jobId|phase]: true } — expand state only, never persisted (matches every other in-memory
@@ -6175,6 +6196,7 @@ function psItemProgressBadgeHtml(job, productionItemId) {
 // qty itself is edited (see psSaveEditItem), so this can never silently exceed what was booked.
 function psSetCompletedQty(jobId, idx, value) {
   const job = psFindJob(jobId);
+  if (job && job.status === 'completed') return; // same completed-job backstop as psUpdateTaskField
   const line = job && job.productionItems[idx];
   if (!line) return;
   const bookedQty = Math.max(1, Math.round(line.qty) || 1);
@@ -6187,22 +6209,29 @@ function psSetCompletedQty(jobId, idx, value) {
 // item gets the "N of M" stepper, matching the exact wording used everywhere else this progress
 // is shown (psItemProgressBadgeHtml).
 function psCompletedQtyControlHtml(job, idx, line) {
+  const readOnly = job.status === 'completed';
   const bookedQty = Math.max(1, Math.round(line.qty) || 1);
   const completed = Math.max(0, Math.min(bookedQty, line.completedQty || 0));
   if (bookedQty <= 1) {
     return `<label class="no-print" style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin:0.3rem 0;">
-      <input type="checkbox" ${completed >= 1 ? 'checked' : ''} onchange="psSetCompletedQty('${job.id}',${idx}, this.checked ? 1 : 0)">
+      <input type="checkbox" ${completed >= 1 ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psSetCompletedQty('${job.id}',${idx}, this.checked ? 1 : 0)">
       Mark built
     </label>`;
   }
   return `<div class="no-print" style="display:flex; align-items:center; gap:8px; font-size:12px; margin:0.3rem 0;">
     <span style="color:var(--text-secondary);">Completed:</span>
-    <button class="icon-btn" style="width:auto; padding:2px 8px;" ${completed <= 0 ? 'disabled' : ''} onclick="psSetCompletedQty('${job.id}',${idx}, ${completed - 1})" aria-label="Decrease completed count">−</button>
+    ${readOnly ? '' : `<button class="icon-btn" style="width:auto; padding:2px 8px;" ${completed <= 0 ? 'disabled' : ''} onclick="psSetCompletedQty('${job.id}',${idx}, ${completed - 1})" aria-label="Decrease completed count">−</button>`}
     <span style="font-weight:600;">${completed} of ${bookedQty}</span>
-    <button class="icon-btn" style="width:auto; padding:2px 8px;" ${completed >= bookedQty ? 'disabled' : ''} onclick="psSetCompletedQty('${job.id}',${idx}, ${completed + 1})" aria-label="Increase completed count">+</button>
+    ${readOnly ? '' : `<button class="icon-btn" style="width:auto; padding:2px 8px;" ${completed >= bookedQty ? 'disabled' : ''} onclick="psSetCompletedQty('${job.id}',${idx}, ${completed + 1})" aria-label="Increase completed count">+</button>`}
   </div>`;
 }
 function psProductionBodyHtml(job) {
+  // Completed jobs stay a fully readable historical record (configuration, tasks, completedQty,
+  // notes) but must never accept new operational mutation — caught during the Batch 2 regression
+  // pass: this whole body had no such gate at all, unlike every other completed-job-aware section
+  // added this session (Review & Pull, Feedback, Attachments, Staffing). Threaded through as a
+  // plain local rather than re-deriving job.status === 'completed' at every call site below.
+  const readOnly = job.status === 'completed';
   let html = '';
 
   html += `<div class="section-label" style="margin-top:0.75rem;">Pull</div>`;
@@ -6281,9 +6310,9 @@ function psProductionBodyHtml(job) {
       html += `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
         <div style="font-size:14px; font-weight:700; margin-bottom:6px;">${psEscape(item.name)} <span style="font-weight:400; color:var(--text-secondary);">× ${item.qty}</span></div>
         <div style="display:flex; gap:16px; font-size:13px;">
-          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.pulled ? 'checked' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','pulled',this.checked)"> Pulled</label>
-          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.packed ? 'checked' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','packed',this.checked)"> Packed</label>
-          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.returned ? 'checked' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','returned',this.checked)"> Returned</label>
+          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.pulled ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','pulled',this.checked)"> Pulled</label>
+          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.packed ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','packed',this.checked)"> Packed</label>
+          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.returned ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','returned',this.checked)"> Returned</label>
         </div>
       </div>`;
     });
@@ -6305,13 +6334,13 @@ function psProductionBodyHtml(job) {
           ${psItemProgressBadgeHtml(job, line.id)}
         </div>
         <div style="display:flex; gap:2px;">
-          ${!editing ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx})">Edit</button>` : ''}
-          <button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>
+          ${(!editing && !readOnly) ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx})">Edit</button>` : ''}
+          ${readOnly ? '' : `<button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>`}
         </div>
       </div>`;
       html += psCompletedQtyControlHtml(job, idx, line);
 
-      if (editing) {
+      if (editing && !readOnly) {
         html += `<div class="no-print">
           ${psFootageEditorHtml(line, r, sanitizedEditKey)}
           <div class="settings-field"><label>Item label <span style="font-weight:400;">(optional — shown here and in Review &amp; Pull instead of the template name)</span></label><input type="text" id="pi-edit-label-${sanitizedEditKey}" placeholder="${psEscape(r.display)}" value="${psEscape(line.itemLabel || '')}"></div>
@@ -6356,7 +6385,9 @@ function psProductionBodyHtml(job) {
 
       html += `<div class="settings-field no-print" style="margin-top:0.5rem;">
         <label>Build notes</label>
-        <textarea rows="2" placeholder="Add construction notes..." onchange="psUpdateItemNotes('${job.id}', ${idx}, this.value)">${line.notes ? psEscape(line.notes) : ''}</textarea>
+        ${readOnly
+          ? `<div style="font-size:13px; white-space:pre-wrap;">${line.notes ? psEscape(line.notes) : '<span style="color:var(--text-secondary);">None.</span>'}</div>`
+          : `<textarea rows="2" placeholder="Add construction notes..." onchange="psUpdateItemNotes('${job.id}', ${idx}, this.value)">${line.notes ? psEscape(line.notes) : ''}</textarea>`}
       </div>`;
       html += `<div style="margin-top:0.4rem;">${psFeedbackSectionHtml(job, 'productionItem', line.id, 'item-fb-' + sanitizedEditKey, 'Notes & Clarification', ['needsClarification', 'teamFeedback', 'noteForNextTime'])}</div>`;
       html += `</div>`;
@@ -6366,7 +6397,9 @@ function psProductionBodyHtml(job) {
   }
 
   html += `<div class="no-print">`;
-  if (psAddItemOpenFor !== job.id) {
+  if (readOnly) {
+    // No new active work on a completed job — no "Add an item" disclosure at all.
+  } else if (psAddItemOpenFor !== job.id) {
     // Collapsed by default — adding an item is a deliberate action, not something that should
     // permanently occupy the space under every job whether or not anyone's about to use it.
     html += `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:13px;" onclick="psToggleAddItemForm('${job.id}')"><i class="fa-solid fa-pen"></i> Edit production items</button>`;
@@ -6398,11 +6431,17 @@ function psProductionBodyHtml(job) {
     </div>`;
   }
 
-  html += `<div class="section-label">Job details</div>
-  <div class="row">
-    <div class="settings-field" style="margin-bottom:0"><label>Client / Event name</label><input type="text" value="${psEscape(job.jobName)}" onchange="psUpdateJobField('${job.id}','jobName',this.value)"></div>
-    <div class="settings-field" style="margin-bottom:0"><label>Event date</label><input type="text" value="${psEscape(job.eventDate)}" onchange="psUpdateJobField('${job.id}','eventDate',this.value)"></div>
-  </div></div>`;
+  html += `<div class="section-label">Job details</div>`;
+  if (readOnly) {
+    html += psEventFieldRowHtml('Client / Event', job.jobName);
+    html += psEventFieldRowHtml('Event date', job.eventDate);
+  } else {
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0"><label>Client / Event name</label><input type="text" value="${psEscape(job.jobName)}" onchange="psUpdateJobField('${job.id}','jobName',this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0"><label>Event date</label><input type="text" value="${psEscape(job.eventDate)}" onchange="psUpdateJobField('${job.id}','eventDate',this.value)"></div>
+    </div>`;
+  }
+  html += `</div>`;
 
   html += psNotesAttachmentsSectionHtml(job, 'production');
 
@@ -6423,7 +6462,7 @@ function psItemFieldsChanged(jobId) {
 
 function psAddItemToJob(jobId) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   // psItemOptionsHtml already excludes needsSetup templates from this dropdown's options — this
   // is the same independent-guard pattern as psApplyReviewDraftToEvent, not trusting the UI alone.
   const recipe = psReadyRecipes().find(r => r.id === document.getElementById('pi-item-' + jobId).value);
@@ -6453,7 +6492,7 @@ function psAddItemToJob(jobId) {
 
 function psRemoveItemFromJob(jobId, idx) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const removed = job.productionItems[idx];
   job.productionItems.splice(idx, 1);
   // Drops every task instance for this line — including any synthetic Prep tasks (topper/pull
@@ -6465,7 +6504,7 @@ function psRemoveItemFromJob(jobId, idx) {
 
 function psUpdateItemNotes(jobId, idx, value) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   job.productionItems[idx].notes = value;
   psSaveJob(job);
 }
@@ -6484,6 +6523,7 @@ function psUpdateItemNotes(jobId, idx, value) {
 function psNewModifierId() { return 'mod_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 function psAddModifier(jobId, idx) {
   const job = psFindJob(jobId);
+  if (job && job.status === 'completed') return;
   const line = job && job.productionItems[idx];
   if (!line) return;
   if (!line.modifiers) line.modifiers = [];
@@ -6497,7 +6537,7 @@ function psFindModifier(job, idx, modId) {
 }
 function psUpdateModifierField(jobId, idx, modId, field, value) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const mod = psFindModifier(job, idx, modId);
   if (!mod) return;
   if (field === 'qty') mod.qty = parseFloat(value) || 0;
@@ -6517,7 +6557,7 @@ function psParseInventoryRefValue(value) {
 }
 function psSetModifierInventoryRef(jobId, idx, modId, value) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const mod = psFindModifier(job, idx, modId);
   if (!mod) return;
   mod.inventoryRef = psParseInventoryRefValue(value);
@@ -6526,7 +6566,7 @@ function psSetModifierInventoryRef(jobId, idx, modId, value) {
 }
 function psRemoveModifier(jobId, idx, modId) {
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const line = job.productionItems[idx];
   if (!line) return;
   line.modifiers = (line.modifiers || []).filter(m => m.id !== modId);
@@ -10546,7 +10586,7 @@ function psReviewPullAlwaysMatch(jobId, colorName, colorId) {
 function psToggleInventoryExclusion(jobId, requirementKey, excluded) {
   if (!invAdminUnlocked) return;
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   if (!job.inventoryExclusions) job.inventoryExclusions = {};
   if (excluded) job.inventoryExclusions[requirementKey] = true;
   else delete job.inventoryExclusions[requirementKey];
@@ -10558,7 +10598,7 @@ function psToggleInventoryExclusion(jobId, requirementKey, excluded) {
 function psToggleItemInventoryExclusion(jobId, productionItemId, excluded) {
   if (!invAdminUnlocked) return;
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   if (!job.itemInventoryExclusions) job.itemInventoryExclusions = {};
   if (excluded) job.itemInventoryExclusions[productionItemId] = true;
   else delete job.itemInventoryExclusions[productionItemId];
@@ -10570,7 +10610,7 @@ function psToggleItemInventoryExclusion(jobId, productionItemId, excluded) {
 // ever lists already-RESOLVED requirements (a real inventoryItemId) — there's nothing to exclude
 // about an unresolved color or a broken formula, those are decisions, not requirements yet.
 function psItemInventoryExclusionEditorHtml(job, line) {
-  if (!invAdminUnlocked) return '';
+  if (!invAdminUnlocked || job.status === 'completed') return '';
   const reqs = psComputeJobRequirements(job).filter(r => r.productionItemId === line.id && r.inventoryItemId);
   if (reqs.length === 0) return '';
   const allExcluded = !!(job.itemInventoryExclusions && job.itemInventoryExclusions[line.id]);
@@ -20417,7 +20457,10 @@ function psAggregateStaffStatus(job) {
 function psOccSetPeopleNeeded(jobId, type, value) {
   if (!invAdminUnlocked) return;
   const job = psFindJob(jobId);
-  if (!job) return;
+  // Backstop for the same completed-job rule the render side already enforces (psOccCardHtml
+  // hides these controls once a job is Completed) — caught during the Batch 2 regression pass,
+  // matching every other completed-job guard added this pass.
+  if (!job || job.status === 'completed') return;
   const occ = psOccEnsure(job, type);
   occ.peopleNeeded = Math.max(0, Math.round(parseFloat(value)) || 0);
   psSaveJob(job);
@@ -20426,7 +20469,7 @@ function psOccSetPeopleNeeded(jobId, type, value) {
 function psOccSetOverride(jobId, type, field, value) {
   if (!invAdminUnlocked) return;
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const occ = psOccEnsure(job, type);
   occ[field] = (value || '').trim() || null;
   psSaveJob(job);
@@ -20440,7 +20483,7 @@ function psOccToggleMyAvailability(jobId, type) {
   const email = psMyEmail();
   if (!email) { alert("Sign in to mark yourself available."); return; }
   const job = psFindJob(jobId);
-  if (!job) return;
+  if (!job || job.status === 'completed') return;
   const occ = psOccEnsure(job, type);
   if (occ.available[email]) delete occ.available[email];
   else occ.available[email] = { at: Date.now() };
@@ -20456,7 +20499,7 @@ function psOccToggleMyAvailability(jobId, type) {
 function psOccSetScheduled(jobId, type, email, scheduled) {
   if (!invAdminUnlocked) return;
   const job = psFindJob(jobId);
-  if (!job || !email) return;
+  if (!job || job.status === 'completed' || !email) return;
   const occ = psOccEnsure(job, type);
   const key = email.toLowerCase();
   const wasScheduled = !!occ.scheduled[key];
