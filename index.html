@@ -6,7 +6,18 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Balloon Code">
+<meta name="theme-color" content="#4a9eb7">
 <title>Balloon Code</title>
+<!-- Favicon: PNG via link tag (works in every modern browser, doesn't depend on the implicit
+     /favicon.ico root request, which wouldn't even resolve under this GitHub Pages project path
+     anyway) + a real .ico for older/legacy fallback. All relative paths — this app is served at
+     https://emilyleavitt4.github.io/delivery-calculator/, and a leading-slash absolute path here
+     would incorrectly resolve to the account root instead of this project's own subpath. -->
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16.png">
+<link rel="icon" href="assets/favicon.ico">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -21683,6 +21694,13 @@ function bootApp() {
   try { bsUpdateHomeBanner(); } catch (e) { console.error('bsUpdateHomeBanner failed:', e); }
   try { setTopBar('home'); } catch (e) { console.error('setTopBar failed:', e); }
 }
+</script>
+<!-- PWA installability: registers the no-op service worker (sw.js) so Chrome/Android will offer
+     an "Install app" prompt. Relative path, deliberately isolated from the main app script above. -->
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+  }
 </script>
 </body>
 </html>
