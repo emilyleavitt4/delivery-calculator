@@ -6467,7 +6467,11 @@ function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
   const busy = !!psReviewPullBusyKeys[busyKey];
   const label = row.color || rpItemLabel(row);
   const checked = row.status === 'done';
-  const detailBtn = invAdminUnlocked ? `<button class="icon-btn no-print" style="width:auto; padding:1px 5px; font-size:10px; flex-shrink:0; color:var(--text-tertiary);" title="Show why" onclick="psTogglePrepRowDetail('${psJsKeyAttr(row.key)}')"><i class="fa-regular fa-circle-question"></i></button>` : '';
+  // Deliberately NOT gated on invAdminUnlocked, unlike the "Pull N" shortage override button
+  // below — this only ever reveals already-computed, read-only numbers and never moves any
+  // inventory, so there's no reason to make debugging a "why is this short" question wait on the
+  // admin passcode the way an actual ledger action correctly does.
+  const detailBtn = `<button class="icon-btn no-print" style="width:auto; padding:1px 5px; font-size:10px; flex-shrink:0; color:var(--text-tertiary);" title="Show why" onclick="psTogglePrepRowDetail('${psJsKeyAttr(row.key)}')"><i class="fa-regular fa-circle-question"></i></button>`;
   let html = `<div class="ps-check-row${checked ? ' done' : ''}">`;
   if (row.status === 'short') {
     const missing = Math.max(0, row.stillNeeded - row.available);
