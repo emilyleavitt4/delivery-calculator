@@ -147,6 +147,11 @@
     z-index: 10;
   }
 
+  /* Trims the topbar's own vertical padding only while the Home logo is showing (toggled by
+     setTopBar), so the bigger logo image fills most of the bar's height instead of sitting in a
+     lot of extra whitespace left over from the icon+title layout's smaller content. Every other
+     screen keeps the original .topbar padding untouched. */
+  .topbar.topbar-logo-mode { padding-top: 0.4rem; padding-bottom: 0.4rem; }
   .topbar-left { display: flex; align-items: center; gap: 9px; }
   .topbar-icon { font-size: 17px; color: var(--brand-blue); }
   .topbar h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.2px; }
@@ -1355,15 +1360,18 @@
   </div>
 
   <!-- TOP BAR -->
-  <div class="topbar">
+  <div class="topbar" id="topbar">
     <div class="topbar-left">
       <button class="icon-btn" id="topbar-back" onclick="goBack()" aria-label="Back to tools" style="display:none">
         <i class="fa-solid fa-arrow-left"></i>
       </button>
       <!-- Home shows the real Balloon Code logo instead of the generic icon+text pair; every
            other tool screen keeps its own icon+name exactly as before (setTopBar toggles which
-           of these two is visible, per view). -->
-      <img id="topbar-logo" src="assets/balloon-code-logo.png" alt="Balloon Code" style="height:68px; width:auto; display:none;">
+           of these two is visible, per view). The logo is sized to fill most of the topbar's own
+           height (see .topbar.topbar-logo-mode below, which trims the topbar's vertical padding
+           only while the logo is showing) rather than a small image floating in a lot of
+           whitespace — every other screen's padding/icon/title sizing is untouched. -->
+      <img id="topbar-logo" src="assets/balloon-code-logo.png" alt="Balloon Code" style="height:84px; width:auto; display:none;">
       <i class="fa-solid fa-toolbox topbar-icon" id="topbar-icon"></i>
       <h1 id="topbar-title">Balloon Code</h1>
       <span class="app-mode-badge">Admin</span>
@@ -21557,6 +21565,7 @@ function setTopBar(v) {
   document.getElementById('topbar-logo').style.display = isHome ? 'block' : 'none';
   document.getElementById('topbar-icon').style.display = isHome ? 'none' : '';
   document.getElementById('topbar-title').style.display = isHome ? 'none' : '';
+  document.getElementById('topbar').classList.toggle('topbar-logo-mode', isHome);
   document.getElementById('topbar-title').textContent = meta.title;
   document.getElementById('topbar-icon').className = meta.icon + ' topbar-icon';
   document.getElementById('topbar-back').style.display = meta.showBack ? 'flex' : 'none';
