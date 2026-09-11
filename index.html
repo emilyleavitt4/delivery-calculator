@@ -6424,6 +6424,40 @@ function psPrepStatusInfo(job) {
   return { done, total, complete: done === total && tasksComplete && !openMissing, remaining: Math.max(0, total - done) };
 }
 
+// Admin-only diagnostic disclosure — shows exactly what a row resolved to and the raw numbers
+// behind its status (resolved item, backstock, perBag, loose, remainder, computed available,
+// already pulled, still needed), so a real "why does this say short/0 available when we have
+// stock" question can be answered by looking, not guessed at. Never mutates anything; a plain
+// toggle over data psReviewPullRows already computed. Session-local (never persisted), same as
+// every other transient UI toggle in this file.
+let psPrepRowDetailOpenFor = null; // the one row key currently showing its detail, or null
+function psTogglePrepRowDetail(rowKey) {
+  psPrepRowDetailOpenFor = psPrepRowDetailOpenFor === rowKey ? null : rowKey;
+  psRenderProductionJobs();
+}
+function psPrepRowDetailHtml(row) {
+  if (psPrepRowDetailOpenFor !== row.key) return '';
+  const system = row.system || 'standardLatex';
+  const lines = [`system: ${system}`, `inventoryItemId: ${row.inventoryItemId || '(none)'}`, `colorId: ${row.colorId || '(none)'}`, `size: ${row.size || '(none)'}`];
+  if (system === 'standardLatex' && row.inventoryItemId) {
+    const item = invFindItem(row.inventoryItemId);
+    lines.push(`resolved inventory item: ${item ? `${item.brand} ${item.color}${item.active === false ? ' (ARCHIVED)' : ''}` : '(not found — item may have been deleted since this was computed)'}`);
+    const sd = item && item.sizes[row.size];
+    if (sd) {
+      lines.push(`backstock: ${sd.backstock || 0} bags`, `perBag: ${sd.perBag || '(not set)'}`, `looseBalloons: ${sd.looseBalloons || 0}`, `usageRemainder: ${sd.usageRemainder || 0}`);
+    }
+    // Surfaces a real, known failure mode directly: more than one Inventory item pointing at the
+    // same colorId means requirement resolution (INVENTORY_ITEMS.find, first match wins) could be
+    // reading a different item than the one that actually holds the stock — see the batch note on
+    // "correct color/item ID" for why this specific check was added here.
+    const siblings = row.colorId ? INVENTORY_ITEMS.filter(i => i.colorId === row.colorId) : [];
+    if (siblings.length > 1) {
+      lines.push(`⚠ ${siblings.length} Inventory items share this colorId (ids: ${siblings.map(i => i.id).join(', ')}) — only the first is ever used; duplicates should be merged/removed.`);
+    }
+  }
+  lines.push(`trackingUnit: ${invTrackingUnit}`, `available (individual balloons): ${row.available}`, `alreadyPulled for this job: ${row.alreadyPulled}`, `stillNeeded: ${row.stillNeeded}`);
+  return `<div class="no-print" style="font-size:11px; color:var(--text-secondary); font-family:monospace; background:var(--bg); border:0.5px solid var(--border); border-radius:var(--radius-sm); padding:6px 8px; margin:2px 0 6px; white-space:pre-wrap;">${lines.map(psEscape).join('\n')}</div>`;
+}
 // A single color+size checkbox row — the employee-facing control for the real ledger Pull/Return.
 // `hideOwnQty` suppresses the per-row quantity when the group header above it already states
 // "N of each color" for every row in the group, so the number isn't shown twice.
@@ -6433,23 +6467,27 @@ function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
   const busy = !!psReviewPullBusyKeys[busyKey];
   const label = row.color || rpItemLabel(row);
   const checked = row.status === 'done';
+  const detailBtn = invAdminUnlocked ? `<button class="icon-btn no-print" style="width:auto; padding:1px 5px; font-size:10px; flex-shrink:0; color:var(--text-tertiary);" title="Show why" onclick="psTogglePrepRowDetail('${psJsKeyAttr(row.key)}')"><i class="fa-regular fa-circle-question"></i></button>` : '';
   let html = `<div class="ps-check-row${checked ? ' done' : ''}">`;
   if (row.status === 'short') {
     const missing = Math.max(0, row.stillNeeded - row.available);
     html += `<input type="checkbox" disabled>`;
     html += `<label>${psEscape(label)}${hideOwnQty ? '' : ` — need ${row.stillNeeded}`}</label>`;
     html += `<span style="font-size:11px; color:var(--warning-text); white-space:nowrap; flex-shrink:0;">${missing} missing</span>`;
+    html += detailBtn;
     if (!readOnly && invAdminUnlocked) {
       html += `<button class="icon-btn no-print" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" ${busy ? 'disabled' : ''} onclick="psReviewPullConfirmRow('${job.id}','${psJsKeyAttr(row.key)}', ${row.available})">${busy ? '…' : `Pull ${row.available}`}</button>`;
     }
   } else {
     html += `<input type="checkbox" ${checked ? 'checked' : ''} ${(readOnly || busy) ? 'disabled' : ''} onchange="this.checked ? psPrepCheckPull('${job.id}','${psJsKeyAttr(row.key)}') : psPrepReturnPull('${job.id}','${psJsKeyAttr(row.key)}')">`;
     html += `<label>${psEscape(label)}${hideOwnQty ? '' : ` — ${row.stillNeeded}`}${(!checked && row.alreadyPulled > 0) ? ` <span style="font-size:11px; color:var(--text-secondary);">(${row.alreadyPulled} already pulled)</span>` : ''}</label>`;
+    html += detailBtn;
     if (!checked && row.alreadyPulled > 0 && !readOnly) {
       html += `<button class="icon-btn no-print" style="width:auto; padding:1px 6px; font-size:10px; flex-shrink:0;" ${busy ? 'disabled' : ''} onclick="psPrepReturnPull('${job.id}','${psJsKeyAttr(row.key)}')">Return ${row.alreadyPulled}</button>`;
     }
   }
   html += `</div>`;
+  html += psPrepRowDetailHtml(row);
   return html;
 }
 // Groups this item's own 'item'-kind rows by size — "SIZE — N of each color" when every color in
