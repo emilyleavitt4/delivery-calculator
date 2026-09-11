@@ -6244,6 +6244,44 @@ function psToggleTaskPhase(jobId, phase) {
   psExpandedTaskPhases[key] = !psPhaseExpanded(jobId, phase);
   psRenderProductionJobs();
 }
+
+// ─── Item-level collapse (PREP / INFLATE & BUILD / FINISH & PACK) ───
+//
+// One item's own nested content (colors, size groups, pull rows, tasks, missing-note controls,
+// reference/instructions, etc.) inside a given stage — same in-memory-only, never-persisted
+// convention as psExpandedTaskPhases, just one level finer (per item, per phase, per job) so
+// collapsing one item's Prep doesn't affect its own Build block or any other item. Defaults
+// expanded — an item's content should be visible the first time you open a stage; collapsing is
+// something you do once you've already dealt with it, matching this file's general "collapsed
+// only once there's a reason to be" preference (contrast psPhaseDefaultExpanded, which defaults
+// Build/Finish closed at the whole-stage level — that's a different, coarser decision).
+let psExpandedItemsByPhase = {};
+function psItemPhaseExpanded(jobId, productionItemId, phase) {
+  const key = jobId + '|' + productionItemId + '|' + phase;
+  return psExpandedItemsByPhase.hasOwnProperty(key) ? psExpandedItemsByPhase[key] : true;
+}
+function psToggleItemPhaseExpanded(jobId, productionItemId, phase) {
+  const key = jobId + '|' + productionItemId + '|' + phase;
+  psExpandedItemsByPhase[key] = !psItemPhaseExpanded(jobId, productionItemId, phase);
+  psRenderProductionJobs();
+}
+// The one shared collapse header every stage's per-item block renders — title, qty, a stage-
+// specific compact status (already-derived text the caller supplies, never a second completion
+// concept), and the toggle chevron. Collapsing only ever hides the CONTENT below this line; the
+// header itself (and whatever controls the caller renders inside it, e.g. Build's Edit/Trash
+// buttons) always stays visible so an item is still identifiable and reachable while collapsed.
+function psItemCollapseHeaderHtml(job, line, r, phase, statusHtml, extraHeaderHtml) {
+  const expanded = psItemPhaseExpanded(job.id, line.id, phase);
+  return `<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; cursor:pointer;" onclick="psToggleItemPhaseExpanded('${job.id}','${line.id}','${phase}')">
+    <div style="display:flex; align-items:center; gap:6px; min-width:0; flex-wrap:wrap;">
+      <i class="fa-solid fa-chevron-${expanded ? 'down' : 'right'}" style="font-size:10px; color:var(--text-secondary); flex-shrink:0;"></i>
+      <span style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))}</span>
+      <span style="font-weight:400; color:var(--text-secondary); font-size:13px;">× ${line.qty}</span>
+      ${statusHtml ? `<span style="font-size:12px; font-weight:400; color:var(--text-secondary);">${statusHtml}</span>` : ''}
+    </div>
+    ${extraHeaderHtml || ''}
+  </div>`;
+}
 // One stage's task list across every item on the job — a task's own itemLabel is only shown when
 // the job has more than one item, since with a single item it would just repeat the section
 // header's own context. Completion ("N/M complete") is read straight off task.status — there is no
@@ -6265,14 +6303,29 @@ function psPhaseSectionHtml(job, phase) {
   </div>`;
   if (!expanded) return html;
   const multiItem = new Set(tasks.map(t => t.productionItemId)).size > 1;
-  tasks.forEach(t => {
-    let itemLabel = null;
-    if (multiItem) {
-      const line = (job.productionItems || []).find(l => l.id === t.productionItemId);
-      const r = line && psLineRecipe(line);
-      itemLabel = (line && r) ? psLineLabel(line, r) : null;
+  // A single-item job has nothing for a per-item collapse to distinguish — the phase header above
+  // already covers it, so this stays the plain flat list exactly as before. A multi-item job groups
+  // by item (in the job's own item order) so each item gets the same collapsible block Prep/Build
+  // already give it — an item with zero finish tasks just never gets a block, nothing to collapse.
+  if (!multiItem) {
+    tasks.forEach(t => { html += psTaskRowHtml(job, t, null); });
+    return html;
+  }
+  (job.productionItems || []).forEach(line => {
+    const itemTasks = tasks.filter(t => t.productionItemId === line.id);
+    if (itemTasks.length === 0) return;
+    const r = psLineRecipe(line);
+    if (!r) return;
+    const done2 = itemTasks.filter(t => t.status === 'done').length;
+    const itemExpanded = psItemPhaseExpanded(job.id, line.id, phase);
+    html += `<div style="margin-bottom:0.6rem;">`;
+    html += psItemCollapseHeaderHtml(job, line, r, phase, `${done2}/${itemTasks.length} complete`);
+    if (itemExpanded) {
+      html += `<div class="ps-item-indent">`;
+      itemTasks.forEach(t => { html += psTaskRowHtml(job, t, null); });
+      html += `</div>`;
     }
-    html += psTaskRowHtml(job, t, itemLabel);
+    html += `</div>`;
   });
   return html;
 }
@@ -6496,23 +6549,36 @@ function psPrepSectionHtml(job) {
     });
     const prepTasks = (job.tasks || []).filter(t => t.productionItemId === line.id && t.phase === 'prep');
 
+    // Compact, collapsed-state status — "N/M pulled" mirrors psPrepStatusInfo's job-level wording
+    // one level finer, plus a small attention flag when something here needs a human regardless of
+    // pull completion (a genuine shortage, an unresolved color, or an open "missing" note) — never
+    // hidden just because the item itself is collapsed.
+    const itemRows = rows.filter(x => x.kind === 'item');
+    const itemDone = itemRows.filter(x => x.status === 'done').length;
+    const needsAttention = rows.some(x => x.status === 'short' || x.status === 'configMissing' || x.kind === 'unresolved' || x.kind === 'noItem' || x.status === 'formulaInvalid')
+      || psOpenClarifications(job, 'productionItem', line.id).length > 0;
+    const prepStatusHtml = (itemRows.length ? `${itemDone}/${itemRows.length} pulled` : '') + (needsAttention ? ` <i class="fa-solid fa-triangle-exclamation" style="color:var(--warning-text);"></i>` : '');
+    const itemExpanded = psItemPhaseExpanded(job.id, line.id, 'prep');
+
     html += `<div style="margin-bottom:0.75rem;">`;
-    html += `<div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))} <span style="font-weight:400; color:var(--text-secondary);">× ${line.qty}</span></div>`;
-    html += `<div class="ps-item-indent">`;
-    html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Colors: ${psEscape(line.colors.join(' / '))}</div>`;
-    // Add-ons/modifiers stay visible here too, even the non-inventory-backed ones with no pull
-    // row of their own (an inventory-backed one still gets its own real checkbox below via `rows`).
-    (line.modifiers || []).forEach(mod => {
-      if (!mod.label || !mod.label.trim()) return;
-      const qtyText = mod.qty > 1 ? ` × ${mod.qty}` : '';
-      const trackedNote = mod.inventoryRef ? '' : ' <span style="color:var(--text-tertiary);">(not inventory-tracked)</span>';
-      html += `<div style="font-size:12px; color:var(--text-secondary); padding:1px 0;">${psEscape(mod.label)}${qtyText}${trackedNote}</div>`;
-    });
-    html += psPrepItemChecklistHtml(job, rows, readOnly);
-    prepTasks.forEach(t => { html += psTaskRowHtml(job, t, null); });
-    html += `</div>`;
-    if (!readOnly) html += psItemInventoryExclusionEditorHtml(job, line);
-    html += psPrepMissingNoteHtml(job, line, readOnly);
+    html += psItemCollapseHeaderHtml(job, line, r, 'prep', prepStatusHtml);
+    if (itemExpanded) {
+      html += `<div class="ps-item-indent">`;
+      html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Colors: ${psEscape(line.colors.join(' / '))}</div>`;
+      // Add-ons/modifiers stay visible here too, even the non-inventory-backed ones with no pull
+      // row of their own (an inventory-backed one still gets its own real checkbox below via `rows`).
+      (line.modifiers || []).forEach(mod => {
+        if (!mod.label || !mod.label.trim()) return;
+        const qtyText = mod.qty > 1 ? ` × ${mod.qty}` : '';
+        const trackedNote = mod.inventoryRef ? '' : ' <span style="color:var(--text-tertiary);">(not inventory-tracked)</span>';
+        html += `<div style="font-size:12px; color:var(--text-secondary); padding:1px 0;">${psEscape(mod.label)}${qtyText}${trackedNote}</div>`;
+      });
+      html += psPrepItemChecklistHtml(job, rows, readOnly);
+      prepTasks.forEach(t => { html += psTaskRowHtml(job, t, null); });
+      html += `</div>`;
+      if (!readOnly) html += psItemInventoryExclusionEditorHtml(job, line);
+      html += psPrepMissingNoteHtml(job, line, readOnly);
+    }
     html += `</div>`;
   });
 
@@ -6548,18 +6614,27 @@ function psBuildItemBlockHtml(job, line, idx, readOnly) {
   const sanitizedEditKey = editKey.replace(/\|/g, '-');
   const editing = psEditingItemKey === editKey;
 
+  // Collapsing while actively editing would hide the very form you're editing — editing always
+  // forces this item's Build content open, matching how Prep's own collapse never applies mid-edit
+  // elsewhere in this file.
+  const itemExpanded = (editing && !readOnly) || psItemPhaseExpanded(job.id, line.id, 'build');
+
   let html = `<div class="ps-item-block">`;
-  html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem; gap:8px;">
-    <div style="display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap;">
+  html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem; gap:8px; flex-wrap:wrap;">
+    <div style="display:flex; align-items:center; gap:6px; min-width:0; cursor:pointer;" onclick="psToggleItemPhaseExpanded('${job.id}','${line.id}','build')">
+      <i class="fa-solid fa-chevron-${itemExpanded ? 'down' : 'right'}" style="font-size:10px; color:var(--text-secondary); flex-shrink:0;"></i>
       <div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))}</div>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;" onclick="event.stopPropagation()">
       ${psCompletedQtyControlHtml(job, idx, line)}
       ${psItemProgressBadgeHtml(job, line.id)}
     </div>
-    <div style="display:flex; gap:2px; flex-shrink:0;">
+    <div style="display:flex; gap:2px; flex-shrink:0;" onclick="event.stopPropagation()">
       ${(!editing && !readOnly) ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx})">Edit</button>` : ''}
       ${readOnly ? '' : `<button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>`}
     </div>
   </div>`;
+  if (!itemExpanded) { html += `</div>`; return html; }
 
   if (editing && !readOnly) {
     html += `<div class="no-print">
@@ -9129,6 +9204,12 @@ function invStartListeners() {
       if (clLoaded) clMigrateFromInventory();
       invRenderLatex();
       bsUpdateHomeBanner(); // Color Library's Business Setup status is derived from INVENTORY_ITEMS
+      // Production's Prep/Review & Pull requirement rows read INVENTORY_ITEMS directly (backstock,
+      // perBag, looseBalloons) — this and the two listeners below are what fixes a real bug where
+      // Jobs' own listener could resolve before this one, rendering Prep once against empty/stale
+      // inventory data (every row falsely "unresolved" or short) and then never being told to
+      // refresh once the real data arrived, since nothing but invRenderLatex() used to run here.
+      psRenderProductionJobs();
     },
     (err) => console.error('Inventory items sync error:', err)
   );
@@ -9137,7 +9218,16 @@ function invStartListeners() {
     (err) => console.error('Inventory orders sync error:', err)
   );
   window.fbOnSnapshotInventoryTransactions(
-    (snapshot) => { INVENTORY_TRANSACTIONS = snapshot.docs.map(d => d.data()); invRenderLatex(); },
+    (snapshot) => {
+      INVENTORY_TRANSACTIONS = snapshot.docs.map(d => d.data());
+      invRenderLatex();
+      // Prep's checkbox checked/unchecked state (alreadyPulled/stillNeeded) is derived entirely
+      // from this collection — without this, a pull recorded from Prep re-renders correctly only
+      // because psPrepCheckPull/psPrepReturnPull explicitly call psRenderProductionJobs() themselves
+      // afterward, but a pull's effect otherwise never reaches an already-rendered Prep screen (a
+      // reload, a teammate's pull on another device, this same job open in Review & Pull elsewhere).
+      psRenderProductionJobs();
+    },
     (err) => console.error('Inventory transactions sync error:', err)
   );
   invConfigInit();
@@ -9165,6 +9255,9 @@ function invConfigInit() {
       invTrackingUnit = (snap.exists() && snap.data().trackingUnit === 'balloons') ? 'balloons' : 'bags';
       invRenderLatex();
       invRenderSettingsSection();
+      // Prep's availability/configMissing status depends on invTrackingUnit (see
+      // psReviewPullRows/invAvailableBalloons) — same reasoning as the listeners above.
+      psRenderProductionJobs();
     },
     (err) => console.error('Inventory config sync error:', err)
   );
@@ -9796,6 +9889,11 @@ function clInit() {
     clMigrateFromInventory();
     invRenderLatex();
     clRenderSettingsSection();
+    // A production requirement resolves its color against COLOR_LIBRARY (clEntriesByExactName) —
+    // this is a one-time load (not a live listener) that can easily resolve after Jobs' own
+    // listener has already rendered Prep once against an empty Library (every color falsely
+    // "unresolved"), so Prep needs to be told to refresh once the real Library actually arrives.
+    psRenderProductionJobs();
   }).catch(err => console.error('Color Library load failed:', err));
   window.fbLoadColorLibraryTrash().then(snap => {
     if (snap.exists() && Array.isArray(snap.data().entries)) COLOR_LIBRARY_TRASH = snap.data().entries;
