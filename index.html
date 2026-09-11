@@ -754,6 +754,7 @@
   .rp-badge { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; margin-top: 1px; }
   .rp-badge-ready { background: var(--success-bg); color: var(--success-text); }
   .rp-badge-attention { background: var(--warning-bg); color: var(--warning-text); }
+  .rp-badge-danger { background: var(--danger-bg); color: var(--danger-text); }
   .rp-actions { margin-top: 0.4rem; }
   .rp-actions .icon-btn, .rp-actions .save-btn { padding: 8px 14px; font-size: 13px; }
 
@@ -6461,6 +6462,47 @@ function psPrepRowDetailHtml(row) {
 // A single color+size checkbox row — the employee-facing control for the real ledger Pull/Return.
 // `hideOwnQty` suppresses the per-row quantity when the group header above it already states
 // "N of each color" for every row in the group, so the number isn't shown twice.
+// The "Maybe" row's own inline count-entry — the ONLY path that turns an Open Bin estimate into a
+// real number. Submitting always writes an explicit looseBalloons value through the exact same
+// ADJUSTMENT ledger entry the Adjust screen itself uses (see invSubmitAdjust) — delta:0 so sealed
+// Backstock is never touched, just the counted loose amount. The row then recomputes fresh next
+// render: enough → a normal checkable 'ready' row; still short → a real, accurate 'short' row.
+// Nothing is ever pulled off of the guess itself — verifying only ever asserts a real count.
+let psPrepVerifyOpenFor = null; // the one row key currently showing its count-entry field, or null
+function psToggleVerifyOpenBin(rowKey) {
+  psPrepVerifyOpenFor = psPrepVerifyOpenFor === rowKey ? null : rowKey;
+  psRenderProductionJobs();
+}
+async function psPrepSubmitVerifyCount(jobId, rowKey, itemId, size) {
+  const inputId = 'prep-verify-' + psJsKeyAttr(rowKey).replace(/[^a-zA-Z0-9]/g, '');
+  const el = document.getElementById(inputId);
+  const counted = el && parseFloat(el.value);
+  if (!Number.isFinite(counted) || counted < 0) { alert('Enter how many loose balloons you actually counted.'); return; }
+  const job = psFindJob(jobId);
+  if (!job || job.status === 'completed') return;
+  const busyKey = jobId + '|' + rowKey;
+  if (psReviewPullBusyKeys[busyKey]) return;
+  psReviewPullBusyKeys[busyKey] = true;
+  psRenderProductionJobs();
+  try {
+    await invApplyInventoryTransactions([{ itemId, size, type: 'ADJUSTMENT', delta: 0, looseBalloons: counted, jobId, jobName: job.jobName || '', note: 'Counted from Prep to verify an Open Bin estimate' }]);
+    psPrepVerifyOpenFor = null;
+  } catch (err) {
+    console.error('Verify count failed:', err);
+    alert(err.message || "Couldn't save that count — check your connection and try again.");
+  } finally {
+    delete psReviewPullBusyKeys[busyKey];
+    psRenderProductionJobs();
+  }
+}
+function psPrepVerifyInputHtml(row) {
+  if (psPrepVerifyOpenFor !== row.key) return '';
+  const inputId = 'prep-verify-' + psJsKeyAttr(row.key).replace(/[^a-zA-Z0-9]/g, '');
+  return `<div class="no-print row" style="margin:2px 0 6px;">
+    <input type="number" id="${inputId}" min="0" inputmode="numeric" placeholder="e.g. 40">
+    <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psPrepSubmitVerifyCount('${row.jobIdForVerify}','${psJsKeyAttr(row.key)}','${row.inventoryItemId}','${invAttr(row.size)}')">Save count</button>
+  </div>`;
+}
 function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
   if (row.status === 'configMissing' || row.status === 'formulaInvalid') return psReviewPullRowHtml(job, row, readOnly);
   const busyKey = job.id + '|' + row.key;
@@ -6473,10 +6515,25 @@ function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
   // admin passcode the way an actual ledger action correctly does.
   const detailBtn = `<button class="icon-btn no-print" style="width:auto; padding:1px 5px; font-size:10px; flex-shrink:0; color:var(--text-tertiary);" title="Show why" onclick="psTogglePrepRowDetail('${psJsKeyAttr(row.key)}')"><i class="fa-regular fa-circle-question"></i></button>`;
   let html = `<div class="ps-check-row${checked ? ' done' : ''}">`;
+  if (row.status === 'maybeShort') {
+    html += `<input type="checkbox" disabled>`;
+    html += `<label>${psEscape(label)}${hideOwnQty ? '' : ` — need ${row.stillNeeded}`}</label>`;
+    html += `<span class="rp-badge rp-badge-attention">Maybe</span>`;
+    html += detailBtn;
+    if (!readOnly) {
+      html += `<button class="icon-btn no-print" style="width:auto; padding:1px 8px; font-size:11px; flex-shrink:0;" onclick="psToggleVerifyOpenBin('${psJsKeyAttr(row.key)}')">Verify</button>`;
+    }
+    html += `</div>`;
+    html += `<div style="font-size:11px; color:var(--text-secondary); margin:-2px 0 2px 26px;">Open Bin: ${psEscape(row.openStatus)} — ~${row.shortfall} not yet counted. It might be in there; go check.</div>`;
+    if (!readOnly) html += psPrepVerifyInputHtml(Object.assign({}, row, { jobIdForVerify: job.id }));
+    html += psPrepRowDetailHtml(row);
+    return html;
+  }
   if (row.status === 'short') {
     const missing = Math.max(0, row.stillNeeded - row.available);
     html += `<input type="checkbox" disabled>`;
     html += `<label>${psEscape(label)}${hideOwnQty ? '' : ` — need ${row.stillNeeded}`}</label>`;
+    html += `<span class="rp-badge rp-badge-danger">Out of stock</span>`;
     html += `<span style="font-size:11px; color:var(--warning-text); white-space:nowrap; flex-shrink:0;">${missing} missing</span>`;
     html += detailBtn;
     if (!readOnly && invAdminUnlocked) {
@@ -6485,6 +6542,7 @@ function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
   } else {
     html += `<input type="checkbox" ${checked ? 'checked' : ''} ${(readOnly || busy) ? 'disabled' : ''} onchange="this.checked ? psPrepCheckPull('${job.id}','${psJsKeyAttr(row.key)}') : psPrepReturnPull('${job.id}','${psJsKeyAttr(row.key)}')">`;
     html += `<label>${psEscape(label)}${hideOwnQty ? '' : ` — ${row.stillNeeded}`}${(!checked && row.alreadyPulled > 0) ? ` <span style="font-size:11px; color:var(--text-secondary);">(${row.alreadyPulled} already pulled)</span>` : ''}</label>`;
+    if (!checked) html += `<span class="rp-badge rp-badge-ready">In stock</span>`;
     html += detailBtn;
     if (!checked && row.alreadyPulled > 0 && !readOnly) {
       html += `<button class="icon-btn no-print" style="width:auto; padding:1px 6px; font-size:10px; flex-shrink:0;" ${busy ? 'disabled' : ''} onclick="psPrepReturnPull('${job.id}','${psJsKeyAttr(row.key)}')">Return ${row.alreadyPulled}</button>`;
@@ -6597,7 +6655,7 @@ function psPrepSectionHtml(job) {
     // hidden just because the item itself is collapsed.
     const itemRows = rows.filter(x => x.kind === 'item');
     const itemDone = itemRows.filter(x => x.status === 'done').length;
-    const needsAttention = rows.some(x => x.status === 'short' || x.status === 'configMissing' || x.kind === 'unresolved' || x.kind === 'noItem' || x.status === 'formulaInvalid')
+    const needsAttention = rows.some(x => x.status === 'short' || x.status === 'maybeShort' || x.status === 'configMissing' || x.kind === 'unresolved' || x.kind === 'noItem' || x.status === 'formulaInvalid')
       || psOpenClarifications(job, 'productionItem', line.id).length > 0;
     const prepStatusHtml = (itemRows.length ? `${itemDone}/${itemRows.length} pulled` : '') + (needsAttention ? ` <i class="fa-solid fa-triangle-exclamation" style="color:var(--warning-text);"></i>` : '');
     const itemExpanded = psItemPhaseExpanded(job.id, line.id, 'prep');
@@ -8776,6 +8834,16 @@ const INV_SIZE_SHORT = { '5"/7"': '5"', '11"': '11"', '17"/18"': '18"', '24"': '
 // Maps a Production balloon size to the inventory size group it belongs to.
 const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '18"': '17"/18"', '24"': '24"', '36"': '30"/36"' };
 const INV_OPEN_STATUSES = ['Full', 'Partial', 'Empty'];
+// Open Bin is deliberately a quick qualitative status, never a counted quantity (see its own
+// comment on INV_OPEN_STATUSES/INV_OPEN_STATUS_BADGE) — nothing here writes a real number from it,
+// and it is NEVER used to compute a row's actual `available` balloons (that stays exact: backstock
+// * perBag + counted looseBalloons only). This table exists for exactly one purpose: deciding
+// whether a shortfall in Prep is confidently real ("Out of stock") or merely uncounted-but-
+// plausible ("Maybe" — go verify), per Emily's own real-world estimate of what each status
+// typically holds. Uses the upper end of her stated range on purpose — "Maybe" means "the open
+// bin COULD plausibly cover this," a generous benefit-of-the-doubt threshold to prompt a human
+// count, not a claim that the balloons are confirmed present.
+const INV_OPEN_STATUS_MAX_ESTIMATE = { Full: 100, Partial: 80, Empty: 5 };
 // Compact letter + color chip for the quick-view glance — same warning/info convention as the
 // backstock number boxes right above it: Empty is a solid warning fill (needs refilling, most
 // urgent), Partial a lighter warning tint, Full uses the calm info-blue (fully stocked).
@@ -11083,7 +11151,27 @@ function psReviewPullRows(job) {
       return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'formulaInvalid' });
     }
     if (stillNeeded <= 0) return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'done' });
-    if (available < stillNeeded) return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'short' });
+    if (available < stillNeeded) {
+      // A real shortfall against the exact, counted numbers — but Open Bin's own status (a quick
+      // qualitative glance, never a counted quantity — see INV_OPEN_STATUS_MAX_ESTIMATE) may mean
+      // there's genuinely enough sitting uncounted in an opened bag. Only ever softens the
+      // employee-facing status to "verify" when the shortfall is within that generous estimate —
+      // never changes `available` itself, and never lets anything actually get pulled off a guess
+      // (see psPrepSubmitVerifyCount, the only path that can turn this into a real 'ready').
+      // Once a real loose count has ever been entered (via Verify or a plain Adjust/Receive),
+      // looseBalloons stops meaning "never counted" and starts meaning "this many, for real" —
+      // the estimate must never override an actual human count, even a small or zero one, or
+      // "Maybe" would keep reoffering itself after someone already told the truth. Only a
+      // genuinely never-touched 0 is treated as "uncounted."
+      const shortfall = stillNeeded - available;
+      const openStatus = sd.openStatus;
+      const maxEstimate = INV_OPEN_STATUS_MAX_ESTIMATE[openStatus] || 0;
+      const looseCounted = !!sd.looseBalloons;
+      if (!looseCounted && maxEstimate > 0 && shortfall <= maxEstimate) {
+        return Object.assign({}, row, { alreadyPulled, stillNeeded, available, shortfall, openStatus, status: 'maybeShort' });
+      }
+      return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'short' });
+    }
     return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'ready' });
   }).sort((a, b) => INV_SIZES.indexOf(a.size) - INV_SIZES.indexOf(b.size) || (a.color || '').localeCompare(b.color || ''));
 }
