@@ -755,6 +755,15 @@
   .rp-badge-ready { background: var(--success-bg); color: var(--success-text); }
   .rp-badge-attention { background: var(--warning-bg); color: var(--warning-text); }
   .rp-badge-danger { background: var(--danger-bg); color: var(--danger-text); }
+  /* Cross-category Orders section, above Inventory's own "Choose a category" tiles — see
+     invOrdersSectionHtml. Single column on phone width (this app's default), two columns
+     (Add an Order / Order Tracking) once there's room, matching the two-pane layout requested. */
+  .inv-orders-grid { display: grid; grid-template-columns: 1fr; gap: 0.75rem; margin-bottom: 1rem; }
+  @media (min-width: 760px) {
+    .inv-orders-grid { grid-template-columns: 1fr 1fr; align-items: start; }
+  }
+  .inv-order-line-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; font-size: 13px; border-bottom: 0.5px solid var(--border); }
+  .inv-order-line-row:last-child { border-bottom: none; }
   .rp-actions { margin-top: 0.4rem; }
   .rp-actions .icon-btn, .rp-actions .save-btn { padding: 8px 14px; font-size: 13px; }
 
@@ -1751,6 +1760,11 @@
 
   <!-- ═══════════════════════════════════════ INVENTORY HOME (category picker) -->
   <div class="view" id="view-inventory">
+    <!-- Cross-category Orders — a purchase order often spans several categories at once (a few
+         Standard Latex colors, ribbon, foil letters, all on one supplier order), so this lives
+         above the category picker rather than nested inside any one category's own screen. Built
+         entirely in JS via invRenderOrdersSection/invOrdersSectionHtml. -->
+    <div id="inv-orders-root"></div>
     <div class="section-label" style="margin-top:0">Choose a category</div>
     <div class="tool-grid">
       <div class="tool-tile" onclick="showView('inventory-latex-choice')">
@@ -9168,7 +9182,6 @@ function invLockAdmin() {
   settingsRefreshAdminSections();
 }
 let invCollapsedGroups = new Set(); // group keys currently collapsed
-let invPendingCollapsed = false;
 // Collapsed by default — houses everything occasional/setup (Start Count, Rearrange shelf order,
 // Add a color, Recently deleted) so it never visually competes with daily search/filter/count
 // controls. Forced open at render time (not stored) whenever there are zero colors yet, so the
@@ -9210,10 +9223,6 @@ let clAliasBoxExpanded = new Set(); // colorIds whose "add an alias" box is curr
 let clSubstitutePickerFor = null; // colorId currently showing its "add a substitute" search box, or null
 let clSubstitutePickerQuery = '';
 
-function invTogglePendingCollapsed() {
-  invPendingCollapsed = !invPendingCollapsed;
-  invRenderLatex();
-}
 function invToggleImportCollapsed() {
   invImportCollapsed = !invImportCollapsed;
   clRenderSettingsSection();
@@ -9301,6 +9310,7 @@ function invStartListeners() {
   // can be delayed or — if the security rules don't cover these paths yet — never arrive at
   // all) so the view always shows something instead of staying blank while waiting.
   invRenderLatex();
+  invRenderOrdersSection();
   invModeInit();
   invCustomOrderInit();
   window.fbOnSnapshotInventoryItems(
@@ -9313,6 +9323,7 @@ function invStartListeners() {
       // the Library loads after inventory already has.
       if (clLoaded) clMigrateFromInventory();
       invRenderLatex();
+      invRenderOrdersSection(); // the Orders item picker can include Standard Latex colors
       bsUpdateHomeBanner(); // Color Library's Business Setup status is derived from INVENTORY_ITEMS
       // Production's Prep/Review & Pull requirement rows read INVENTORY_ITEMS directly (backstock,
       // perBag, looseBalloons) — this and the two listeners below are what fixes a real bug where
@@ -9324,7 +9335,7 @@ function invStartListeners() {
     (err) => console.error('Inventory items sync error:', err)
   );
   window.fbOnSnapshotInventoryOrders(
-    (snapshot) => { INVENTORY_ORDERS = snapshot.docs.map(d => d.data()); invRenderLatex(); },
+    (snapshot) => { INVENTORY_ORDERS = snapshot.docs.map(d => d.data()); invRenderLatex(); invRenderOrdersSection(); },
     (err) => console.error('Inventory orders sync error:', err)
   );
   window.fbOnSnapshotInventoryTransactions(
@@ -9547,6 +9558,11 @@ const INV_SYSTEMS = {
   standardLatex: {
     label: 'Standard Latex', viewId: 'inventory-latex', itemRef: (itemId) => window.fbInventoryItemRef(itemId),
     findItem: (itemId) => INVENTORY_ITEMS.find(i => i.id === itemId),
+    // listItems/sizeOptions exist ONLY for the cross-category Orders picker (invOrdersSectionHtml)
+    // — nothing about existing per-category screens reads these. Archived colors are excluded;
+    // reordering a discontinued color isn't a real action.
+    listItems: () => INVENTORY_ITEMS.filter(i => i.active !== false),
+    sizeOptions: () => INV_SIZES.map(s => ({ value: s, label: s })),
     displayLabel: (item) => [item.brand, item.color].filter(Boolean).join(' '),
   },
   specialtyLatex: {
@@ -9576,6 +9592,8 @@ const INV_SYSTEMS = {
       item.looseBalloons = qty - item.backstock * perBag;
     },
     findItem: (itemId) => SPECIALTY_ITEMS.find(i => i.id === itemId),
+    listItems: () => SPECIALTY_ITEMS,
+    sizeOptions: () => null, // one flat SKU per record — nothing to sub-select
     displayLabel: (item) => [item.color, item.pattern].filter(Boolean).join(' — ') || item.brand || '(unnamed)',
   },
   addOns: {
@@ -9583,6 +9601,8 @@ const INV_SYSTEMS = {
     getQty: (item) => item.quantity || 0,
     setQty: (item, size, qty) => { item.quantity = qty; },
     findItem: (itemId) => INVX_ITEMS.find(i => i.id === itemId),
+    listItems: () => INVX_ITEMS.filter(i => i.category === 'addOns'),
+    sizeOptions: () => null,
     displayLabel: (item) => item.name || '(unnamed)',
   },
   framework: {
@@ -9590,6 +9610,8 @@ const INV_SYSTEMS = {
     getQty: (item) => item.quantity || 0,
     setQty: (item, size, qty) => { item.quantity = qty; },
     findItem: (itemId) => INVX_ITEMS.find(i => i.id === itemId),
+    listItems: () => INVX_ITEMS.filter(i => i.category === 'framework'),
+    sizeOptions: () => null,
     displayLabel: (item) => item.name || '(unnamed)',
   },
   foil: {
@@ -9599,7 +9621,13 @@ const INV_SYSTEMS = {
     getQty: (item, size) => size ? ((item.quantities && item.quantities[size]) || 0) : (item.quantity || 0),
     setQty: (item, size, qty) => { if (size) { if (!item.quantities) item.quantities = {}; item.quantities[size] = qty; } else { item.quantity = qty; } },
     findItem: (itemId) => FOIL_ITEMS.find(i => i.id === itemId),
-    displayLabel: (item) => item.name || item.color || '(unnamed)',
+    listItems: () => FOIL_ITEMS,
+    // Only a Letters & Numbers group has anything to sub-select — a specific character to
+    // restock. Decorator Shapes/Themed are one flat quantity, same as Specialty Latex/Add-Ons.
+    sizeOptions: (item) => item.category === 'lettersNumbers' ? foilCharsFor(item.charType).map(c => ({ value: c, label: c })) : null,
+    displayLabel: (item) => item.category === 'lettersNumbers'
+      ? `${item.brand ? item.brand + ' ' : ''}${foilCharTypeLabel(item.charType)} — ${item.size || ''} ${item.color || ''}`.trim()
+      : (item.name || item.color || item.shape || '(unnamed)'),
   },
 };
 function invSystemFor(name) { return INV_SYSTEMS[name || 'standardLatex'] || INV_SYSTEMS.standardLatex; }
@@ -12632,26 +12660,227 @@ function invHistoryHtml(itemId, size) {
     </div>`;
   }).join('');
 }
+// ═══════════════════════════════════════ CROSS-CATEGORY ORDERS (above Inventory's category picker) ═══════════════════════════════════════
+//
+// A real purchase order often spans several inventory categories at once — a few Standard Latex
+// colors, a roll of ribbon, a pack of foil letters, all on one supplier order — so this is
+// deliberately NOT scoped to one system the way the original single-item order form was. One
+// order = a vendor + orderedDate + a list of lines, each line independently addressing whichever
+// system/item/size it came from via the existing INV_SYSTEMS registry (see its listItems/
+// sizeOptions/displayLabel, added specifically to make this generic picker possible without
+// hardcoding a branch per category). Reuses the exact same `inventoryOrders` collection/doc
+// functions the original single-item version used — only the document SHAPE changed, and
+// invOrderLines (below invSubmitOrder) reads both shapes so an order already in flight keeps
+// working.
+let invOrderDraft = null; // { vendor, orderedDate, lines: [] } while composing a new order, else null
+let invOrderDraftLine = { system: 'standardLatex', itemId: '' }; // which category/item the in-progress "add a line" mini-form is on; qty/size are read straight from their own inputs at add-line time, nothing to persist for those
+
+function invOpenNewOrder() {
+  invOrderDraft = { vendor: '', orderedDate: '', lines: [] };
+  invOrderDraftLine = { system: 'standardLatex', itemId: '' };
+  invRenderOrdersSection();
+}
+function invCancelNewOrder() {
+  invOrderDraft = null;
+  invRenderOrdersSection();
+}
+function invOrderDraftSetField(field, value) {
+  if (!invOrderDraft) return;
+  invOrderDraft[field] = value;
+}
+function invOrderDraftLineSetSystem(system) {
+  invOrderDraftLine = { system, itemId: '' };
+  invRenderOrdersSection();
+}
+function invOrderDraftLineSetItem(itemId) {
+  invOrderDraftLine.itemId = itemId;
+  invRenderOrdersSection(); // a different item can mean different sizeOptions (e.g. a Foil charType) — rebuild that dropdown
+}
+// Adding a line never touches the ledger — it only grows the in-memory draft. Nothing is real
+// until Save order writes the whole thing as one document; cancelling the draft discards every
+// line added so far, same as any other unsaved form in this app.
+function invAddOrderLine() {
+  if (!invOrderDraft) return;
+  const { system, itemId } = invOrderDraftLine;
+  if (!itemId) { alert('Choose an item first.'); return; }
+  const sys = invSystemFor(system);
+  const item = sys.findItem(itemId);
+  if (!item) { alert("That item couldn't be found — try picking it again."); return; }
+  const sizeOpts = sys.sizeOptions && sys.sizeOptions(item);
+  const sizeEl = document.getElementById('inv-order-line-size');
+  const size = sizeOpts ? (sizeEl ? sizeEl.value : '') : null;
+  if (sizeOpts && !size) { alert(system === 'foil' ? 'Choose a character.' : 'Choose a size.'); return; }
+  const qty = parseFloat((document.getElementById('inv-order-line-qty') || {}).value) || 0;
+  if (qty <= 0) { alert('Enter a quantity.'); return; }
+  // Denormalized at add-time, same convention Production's own requirement rows use — the order
+  // stays legible even if this item is later renamed, re-categorized, or deleted.
+  const label = sys.displayLabel(item) + (size ? ` — ${size}` : '');
+  invOrderDraft.lines.push({ system, itemId, size: size || null, qty, label });
+  invOrderDraftLine = { system, itemId: '' };
+  invRenderOrdersSection();
+}
+function invRemoveOrderLine(idx) {
+  if (!invOrderDraft) return;
+  invOrderDraft.lines.splice(idx, 1);
+  invRenderOrdersSection();
+}
+function invSubmitNewOrder() {
+  if (!invOrderDraft || invOrderDraft.lines.length === 0) { alert('Add at least one line to this order.'); return; }
+  const vendor = ((document.getElementById('inv-order-vendor-new') || {}).value || '').trim();
+  const date = ((document.getElementById('inv-order-date-new') || {}).value || '').trim();
+  const order = { id: psNewInventoryOrderId(), vendor, orderedDate: date, status: 'ordered', receivedDate: '', lines: invOrderDraft.lines };
+  invOrderDraft = null;
+  window.fbSaveInventoryOrder(order).catch(err => {
+    console.error(err);
+    alert("Couldn't save that order — check your connection and try again.");
+  });
+}
+function invOrderStatusBadgeHtml(status) {
+  if (status === 'backordered') return `<span class="rp-badge rp-badge-attention">Backordered</span>`;
+  return `<span class="rp-badge" style="background:var(--info-bg); color:var(--info-text);">Ordered</span>`;
+}
+// The one generic "pick a category, then an item within it, then a size/character if that
+// category has one" control — every category branches through the SAME markup here via
+// INV_SYSTEMS, no per-category special-casing in this function itself.
+function invOrderLinePickerHtml() {
+  const sys = invSystemFor(invOrderDraftLine.system);
+  const items = sys.listItems ? sys.listItems() : [];
+  const selectedItem = invOrderDraftLine.itemId ? sys.findItem(invOrderDraftLine.itemId) : null;
+  const sizeOpts = selectedItem && sys.sizeOptions ? sys.sizeOptions(selectedItem) : null;
+  let html = `<div class="row">
+    <div class="settings-field" style="margin-bottom:0;"><label>Category</label>
+      <select onchange="invOrderDraftLineSetSystem(this.value)">
+        ${Object.keys(INV_SYSTEMS).map(key => `<option value="${key}" ${key === invOrderDraftLine.system ? 'selected' : ''}>${psEscape(INV_SYSTEMS[key].label)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="settings-field" style="margin-bottom:0;"><label>Item</label>
+      <select onchange="invOrderDraftLineSetItem(this.value)">
+        <option value="">— select —</option>
+        ${items.map(i => `<option value="${invAttr(i.id)}" ${i.id === invOrderDraftLine.itemId ? 'selected' : ''}>${psEscape(sys.displayLabel(i))}</option>`).join('')}
+      </select>
+    </div>
+  </div>`;
+  if (sizeOpts) {
+    html += `<div class="settings-field"><label>${invOrderDraftLine.system === 'foil' ? 'Character' : 'Size'}</label>
+      <select id="inv-order-line-size">
+        <option value="">— select —</option>
+        ${sizeOpts.map(o => `<option value="${invAttr(o.value)}">${psEscape(o.label)}</option>`).join('')}
+      </select>
+    </div>`;
+  }
+  html += `<div class="row">
+    <div class="settings-field" style="margin-bottom:0;"><label>Quantity</label><input type="number" id="inv-order-line-qty" min="1" inputmode="numeric"></div>
+    <div class="settings-field" style="margin-bottom:0; display:flex; align-items:flex-end;"><button class="icon-btn" style="width:100%;" onclick="invAddOrderLine()"><i class="fa-solid fa-plus"></i> Add line</button></div>
+  </div>`;
+  return html;
+}
+function invOrdersSectionHtml() {
+  const pending = INVENTORY_ORDERS.filter(o => o.status === 'ordered' || o.status === 'backordered');
+  let html = `<div class="section-label" style="margin-top:0;">Orders</div><div class="inv-orders-grid">`;
+
+  // Left pane — Add an Order
+  html += `<div class="card">
+    <div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">Add an Order</div>`;
+  if (!invOrderDraft) {
+    html += `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenNewOrder()"><i class="fa-solid fa-cart-plus"></i> New order</button>`;
+  } else {
+    html += `<div class="row">
+      <div class="settings-field" style="margin-bottom:0;"><label>Ordered from</label><input type="text" id="inv-order-vendor-new" placeholder="e.g. Loftus" value="${invAttr(invOrderDraft.vendor)}" oninput="invOrderDraftSetField('vendor', this.value)"></div>
+      <div class="settings-field" style="margin-bottom:0;"><label>Order date</label><input type="text" id="inv-order-date-new" placeholder="e.g. 3/14" value="${invAttr(invOrderDraft.orderedDate)}" oninput="invOrderDraftSetField('orderedDate', this.value)"></div>
+    </div>`;
+    if (invOrderDraft.lines.length) {
+      html += `<div style="margin:0.4rem 0;">` + invOrderDraft.lines.map((l, idx) => `<div class="inv-order-line-row">
+          <span>${psEscape(l.label)} <span style="color:var(--text-secondary);">× ${l.qty}</span></span>
+          <button class="icon-btn" style="padding:2px 6px;" onclick="invRemoveOrderLine(${idx})" aria-label="Remove line"><i class="fa-solid fa-xmark"></i></button>
+        </div>`).join('') + `</div>`;
+    }
+    html += `<div style="border-top:0.5px dashed var(--border); padding-top:0.5rem; margin-top:0.25rem;">${invOrderLinePickerHtml()}</div>`;
+    html += `<div style="display:flex; gap:8px; margin-top:0.5rem;">
+      <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="invSubmitNewOrder()">Save order${invOrderDraft.lines.length ? ` (${invOrderDraft.lines.length} line${invOrderDraft.lines.length === 1 ? '' : 's'})` : ''}</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invCancelNewOrder()">Cancel</button>
+    </div>`;
+  }
+  html += `</div>`;
+
+  // Right pane — Order Tracking: vendor, status, every line, and the actions to move it forward.
+  html += `<div class="card">
+    <div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">Order Tracking${pending.length ? ` (${pending.length})` : ''}</div>`;
+  if (pending.length === 0) {
+    html += `<div style="font-size:13px; color:var(--text-secondary);">Nothing on order right now.</div>`;
+  } else {
+    pending.forEach(o => {
+      const lines = invOrderLines(o);
+      html += `<div style="padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+          <div style="font-size:13px; font-weight:700;">${psEscape(o.vendor || 'Unknown vendor')}${o.orderedDate ? ` <span style="font-weight:400; color:var(--text-secondary);">· ${psEscape(o.orderedDate)}</span>` : ''}</div>
+          ${invOrderStatusBadgeHtml(o.status)}
+        </div>`;
+      lines.forEach(l => {
+        const liveItem = invSystemFor(l.system).findItem(l.itemId);
+        const displayLabel = l.label || (liveItem ? invSystemFor(l.system).displayLabel(liveItem) + (l.size ? ' — ' + l.size : '') : 'Unknown item');
+        html += `<div style="font-size:12px; color:var(--text-secondary); padding:1px 0;">${psEscape(displayLabel)} — qty ${l.qty}</div>`;
+      });
+      html += `<div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap;">
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invMarkReceived('${o.id}')"><i class="fa-solid fa-check"></i> Mark received</button>
+        ${o.status === 'ordered'
+          ? `<button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invMarkBackordered('${o.id}')"><i class="fa-solid fa-clock"></i> Backordered</button>`
+          : `<button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invMarkOrderedAgain('${o.id}')"><i class="fa-solid fa-rotate-left"></i> Back to ordered</button>`}
+        <button class="icon-btn" style="width:auto; padding:3px 10px; font-size:11px;" onclick="invCancelOrder('${o.id}')"><i class="fa-solid fa-xmark"></i> Cancel</button>
+      </div>
+      </div>`;
+    });
+  }
+  html += `</div></div>`; // .card, .inv-orders-grid
+  return html;
+}
+function invRenderOrdersSection() {
+  const root = document.getElementById('inv-orders-root');
+  if (!root) return;
+  root.innerHTML = invOrdersSectionHtml();
+}
+
+// Standard Latex's own per-color "Order" button — a quick one-line shortcut into the same
+// unified, multi-category order shape the top-level Orders section (invOrdersSectionHtml) uses.
+// Always writes `lines[]` (never the old bare itemId/size/qty shape) so every order from here on,
+// regardless of which entry point created it, is read the same way everywhere (invOrderLines).
 function invSubmitOrder(itemId, size) {
   const qty = parseFloat(document.getElementById('inv-order-qty').value) || 0;
   const vendor = document.getElementById('inv-order-vendor').value.trim();
   const date = document.getElementById('inv-order-date').value.trim();
   if (qty <= 0) { alert("Enter how many you're ordering."); return; }
-  const order = { id: psNewInventoryOrderId(), itemId, size, qty, vendor, orderedDate: date, status: 'ordered', receivedDate: '' };
+  const item = invFindItem(itemId);
+  const label = (item ? [item.brand, item.color].filter(Boolean).join(' ') : 'Standard Latex') + ` — ${size}`;
+  const order = { id: psNewInventoryOrderId(), vendor, orderedDate: date, status: 'ordered', receivedDate: '', lines: [{ system: 'standardLatex', itemId, size, qty, label }] };
   invOrderFormKey = null;
   window.fbSaveInventoryOrder(order).catch(err => {
     console.error(err);
     alert("Couldn't save that order — check your connection and try again.");
   });
 }
-// Crediting the ordered qty straight to that size's shelf count — routed through the same
-// ledger service as every other backstock change (this used to be a plain read-then-setDoc, a
-// real race if two people marked different orders for the same item/size at once; runTransaction
-// closes that).
+// Reads either order shape — the current lines[] array, or (for an order saved before this
+// feature existed) the old bare itemId/size/qty, always addressing Standard Latex since that was
+// the only system the original single-item form ever supported. Read-only normalization; an old
+// document is never rewritten in place, it just keeps working exactly as it always did.
+function invOrderLines(order) {
+  if (Array.isArray(order.lines)) return order.lines;
+  if (order.itemId) return [{ system: 'standardLatex', itemId: order.itemId, size: order.size || null, qty: order.qty, label: null }];
+  return [];
+}
+// Crediting every line to its own category's shelf count in ONE atomic ledger call (the same
+// multi-entry support "Pull all ready" already relies on) — routed through the same
+// invApplyInventoryTransactions service every other backstock change uses, generalized across
+// systems via INV_SYSTEMS exactly like Review & Pull's own generic branch already is. Whole-order
+// receiving only for now (all lines credited together) — partial/per-line receiving would be a
+// real, separate feature if it turns out to be needed.
 function invMarkReceived(orderId) {
   const order = INVENTORY_ORDERS.find(o => o.id === orderId);
   if (!order) return;
-  invApplyInventoryTransactions([{ itemId: order.itemId, size: order.size, type: 'RECEIVE', delta: order.qty, reference: order.vendor }])
+  const lines = invOrderLines(order);
+  if (lines.length === 0) return;
+  const entries = lines.map(l => (l.system && l.system !== 'standardLatex')
+    ? { system: l.system, itemId: l.itemId, size: l.size, type: 'RECEIVE', delta: l.qty, reference: order.vendor }
+    : { itemId: l.itemId, size: l.size, type: 'RECEIVE', delta: l.qty, reference: order.vendor });
+  invApplyInventoryTransactions(entries)
     .then(() => {
       order.status = 'received';
       order.receivedDate = new Date().toLocaleDateString();
@@ -12785,48 +13014,6 @@ function invRenderLatex() {
     </div>`;
   }
   html += `<div id="inv-colors-results"></div>`;
-
-  // Pending orders — moved below the color list (it's a secondary, check-when-you-think-of-it
-  // list, not something that needs to sit above daily search/filter/count controls), collapsed
-  // by default same as before.
-  const pending = INVENTORY_ORDERS
-    .filter(o => o.status === 'ordered' || o.status === 'backordered')
-    .sort((a, b) => {
-      const ca = (invFindItem(a.itemId) || {}).color || '';
-      const cb = (invFindItem(b.itemId) || {}).color || '';
-      return ca.localeCompare(cb);
-    });
-  html += `<div class="inv-group-header" onclick="invTogglePendingCollapsed()">
-    <span>Pending orders (${pending.length})</span>
-    <i class="fa-solid fa-chevron-${invPendingCollapsed ? 'down' : 'up'}"></i>
-  </div>`;
-  if (!invPendingCollapsed) {
-    if (pending.length === 0) {
-      html += `<div class="card" style="text-align:center; color:var(--text-secondary);">Nothing on order right now.</div>`;
-    } else {
-      html += `<div class="inv-color-list">`;
-      pending.forEach(o => {
-        const item = invFindItem(o.itemId);
-        const label = item ? `${psEscape(item.color)}${item.brand ? ' <span style="font-weight:400; color:var(--text-secondary);">(' + psEscape(item.brand) + ')</span>' : ''} — ${psEscape(o.size)}` : 'Unknown color';
-        const detail = `Qty ${o.qty}${o.vendor ? ' · ' + psEscape(o.vendor) : ''}${o.orderedDate ? ' · ' + psEscape(o.orderedDate) : ''}`;
-        html += `<div class="inv-color-row">
-          <div class="inv-color-row-header" style="cursor:default;">
-            <div class="inv-color-row-text">
-              <div class="inv-color-row-name">${label}</div>
-              <div class="inv-color-row-brand">${detail}</div>
-            </div>
-            <span class="ps-status-btn ${o.status === 'backordered' ? 'ps-status-waiting' : 'ps-staffstatus-scheduled'}" style="flex-shrink:0;">${o.status === 'backordered' ? 'Backordered' : 'Ordered'}</span>
-            <button class="icon-btn" style="padding:4px;" title="Mark received" onclick="invMarkReceived('${o.id}')"><i class="fa-solid fa-check"></i></button>
-            ${o.status === 'ordered'
-              ? `<button class="icon-btn" style="padding:4px;" title="Mark backordered" onclick="invMarkBackordered('${o.id}')"><i class="fa-solid fa-clock"></i></button>`
-              : `<button class="icon-btn" style="padding:4px;" title="Back to ordered" onclick="invMarkOrderedAgain('${o.id}')"><i class="fa-solid fa-rotate-left"></i></button>`}
-            <button class="icon-btn" style="padding:4px;" title="Cancel" onclick="invCancelOrder('${o.id}')"><i class="fa-solid fa-xmark"></i></button>
-          </div>
-        </div>`;
-      });
-      html += `</div>`;
-    }
-  }
 
   // Manage — everything occasional/setup lives here, collapsed by default so it never competes
   // with daily controls: Start Count, Rearrange shelf order, Add a color, Recently deleted. The
@@ -14266,6 +14453,7 @@ function spStartListeners() {
       const all = snapshot.docs.map(d => d.data());
       SPECIALTY_ITEMS = all.filter(i => !i.deletedAt);
       spRenderScreen();
+      invRenderOrdersSection(); // the Orders item picker can include Specialty Latex items
     },
     (err) => console.error('Specialty Latex sync error:', err)
   );
@@ -15574,6 +15762,7 @@ function foilStartListeners() {
       foilMigrateLegacyPhraseItems();
       foilConsolidateDecoratorFamilies();
       foilRenderScreen();
+      invRenderOrdersSection(); // the Orders item picker can include Foil items
     },
     (err) => console.error('Foil items sync error:', err)
   );
@@ -17333,6 +17522,7 @@ function invxStartListeners() {
       INVX_ITEMS = all.filter(i => !i.deletedAt);
       INVX_ITEMS_TRASHED = all.filter(i => i.deletedAt);
       invxRenderScreen();
+      invRenderOrdersSection(); // the Orders item picker can include Add-Ons/Framework items
     },
     (err) => console.error('Inventory extras sync error:', err)
   );
