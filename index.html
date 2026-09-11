@@ -15020,20 +15020,25 @@ const FOIL_DECORATOR_GROUP_SEED = [
 // too. Orbs deliberately has no starter list ("use actual nominal/listed sizes stocked" per the
 // explicit instruction) — its suggestions grow organically only. Never used to invent a size on an
 // existing record; see foilConsolidateDecoratorFamilies for that rule.
+// 9" added to every family below per explicit instruction (a mini size requested for Hearts,
+// extended to "most decorator shapes" generally) — unlike the rest of this seed list, this one
+// isn't sourced from confirmed real supplier/nominal sizes per family, just added broadly as
+// asked. It's still only ever a suggestion (never enforced), so a family that doesn't actually
+// come in 9" simply won't use it; nothing here can invent a size on an existing record.
 const FOIL_DECORATOR_SIZE_SEED = {
-  'Starbursts': ['18"', '26"', '40"'],
+  'Starbursts': ['9"', '18"', '26"', '40"'],
   'Stars': ['4"', '9"', '18"', '36"'],
   'Starpoints': ['7"', '9"', '18"', '20"', '30"', '40"'],
-  'Circles': ['18"', '30"'],
-  'Hearts': ['18"', '32"'],
-  'Magic Stars': ['20"', '35"'],
-  'Bobo / Clear Bubble': ['18"', '20"', '24"', '36"'],
-  'Cubez': ['15"'],
-  'Diamondz': ['15"', '16"', '17"'],
-  'Crescents': ['19"', '35"'],
-  'Curves': ['15"', '19"', '28"', '36"', '42"'],
-  'Squares': ['18"', '24"'],
-  'Magic Arches': ['16"', '30"'],
+  'Circles': ['9"', '18"', '30"'],
+  'Hearts': ['9"', '18"', '32"'],
+  'Magic Stars': ['9"', '20"', '35"'],
+  'Bobo / Clear Bubble': ['9"', '18"', '20"', '24"', '36"'],
+  'Cubez': ['9"', '15"'],
+  'Diamondz': ['9"', '15"', '16"', '17"'],
+  'Crescents': ['9"', '19"', '35"'],
+  'Curves': ['9"', '15"', '19"', '28"', '36"', '42"'],
+  'Squares': ['9"', '18"', '24"'],
+  'Magic Arches': ['9"', '16"', '30"'],
 };
 function foilEnsureDecoratorGroupsSeeded() {
   if (!pgGroupsLoaded) return; // an empty roster here might just mean "hasn't loaded yet"
