@@ -15132,6 +15132,11 @@ function foilDecoratorSizeSuggestionsFor(printGroupId) {
   return [...new Set([...starter, ...used])];
 }
 let foilDecoratorSearchQuery = '';
+// Search from the top-level "Shape Families" tile grid, across EVERY family at once (including
+// Uncategorized/Needs Reassignment) — distinct from foilDecoratorSearchQuery above, which only
+// ever searches within whichever one family is already selected. Without this, finding "which
+// Shape Family has Gray?" meant guessing and clicking into families one at a time.
+let foilDecoratorGlobalSearchQuery = '';
 let foilDecoratorExpandedItem = null;
 let foilDecoratorAddOpen = false;
 let foilDecoratorAddDraft = null;
@@ -16408,7 +16413,45 @@ function foilDecoratorFindCollision(printGroupId, brand, color, size, condition,
     (i.condition || 'uninflated') === (condition || 'uninflated'));
 }
 function foilSetDecoratorSearch(q) { foilDecoratorSearchQuery = q; foilRenderDecoratorFamilyItems(); }
-function foilToggleDecoratorExpand(id) { foilDecoratorExpandedItem = foilDecoratorExpandedItem === id ? null : id; foilRenderDecoratorFamilyItems(); }
+// Re-renders through whichever path actually owns the currently-visible list: the family-scoped
+// #foil-decorator-results-root when a family is selected, or the top-level global-search/tile-grid
+// container when this expand happened from the top-level view (a different container entirely —
+// calling foilRenderDecoratorFamilyItems there would silently no-op against a
+// #foil-decorator-results-root that doesn't exist in that view).
+function foilToggleDecoratorExpand(id) {
+  foilDecoratorExpandedItem = foilDecoratorExpandedItem === id ? null : id;
+  if (foilDecoratorSelectedFamily === undefined) foilRenderDecoratorTopLevelResults();
+  else foilRenderDecoratorFamilyItems();
+}
+// Scoped to #foil-decorator-toplevel-root only (see foilRenderDecoratorTopLevelResults) — never
+// the whole screen — so the search input itself is never recreated mid-keystroke and never loses
+// focus, the same reason invRenderColorsList only ever touches #inv-colors-results.
+function foilSetDecoratorGlobalSearch(q) { foilDecoratorGlobalSearchQuery = q; foilRenderDecoratorTopLevelResults(); }
+// Same match fields as the family-scoped foilDecoratorFilteredItems (brand/color/size/storage/
+// notes/tags), just never pre-filtered to one printGroupId — this is what makes a color search
+// answer "which family(ies) have this" instead of requiring the family to already be selected.
+function foilDecoratorGlobalFilteredItems() {
+  const q = foilDecoratorGlobalSearchQuery.trim().toLowerCase();
+  if (!q) return [];
+  return FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' &&
+    ([i.brand, i.color, i.size, i.storageLocation, i.notes].some(f => (f || '').toLowerCase().includes(q)) || psMatchesTags(i, q)));
+}
+// Groups global search hits by their own Shape Family (Uncategorized and Needs Reassignment as
+// their own buckets, same convention as the tile grid) so a color search still reads as "which
+// family is this actually in," not just an undifferentiated flat list.
+function foilDecoratorGlobalResultGroups() {
+  const byFamily = new Map();
+  foilDecoratorGlobalFilteredItems().forEach(item => {
+    const key = foilDecoratorIsOrphaned(item) ? FOIL_DECORATOR_ORPHAN_SENTINEL : (item.printGroupId || '');
+    if (!byFamily.has(key)) byFamily.set(key, []);
+    byFamily.get(key).push(item);
+  });
+  return [...byFamily.entries()].map(([key, groupItems]) => ({
+    key: key || 'uncategorized',
+    label: key === FOIL_DECORATOR_ORPHAN_SENTINEL ? 'Needs Reassignment' : (key ? ((pgFindGroup(key) || {}).name || 'Uncategorized') : 'Uncategorized'),
+    items: groupItems.sort((a, b) => (a.color || '').localeCompare(b.color || '')),
+  })).sort((a, b) => a.label.localeCompare(b.label));
+}
 // Scoped to whichever family is currently selected — search only ever operates within one family's
 // items, since the tile grid one level up has no items of its own to search.
 function foilDecoratorFilteredItems() {
@@ -16709,18 +16752,25 @@ function foilDecoratorAddFormHtml() {
   </div>`;
 }
 
-function foilDecoratorItemCardHtml(item) {
+// `familyLabel` is optional and only meaningful for the cross-family global search results
+// (foilDecoratorGlobalResultGroups already groups by family, but each row still names its own
+// family for when results are scanned as one list) — passed as a real string there. The two
+// existing family-scoped callers use this via a bare `.map(foilDecoratorItemCardHtml)`, which
+// passes the array INDEX as the second argument; a plain number always fails the `typeof ===
+// 'string'` check below, so those call sites are completely unaffected.
+function foilDecoratorItemCardHtml(item, familyLabel) {
   const expanded = foilDecoratorExpandedItem === item.id;
   const mode = foilDecoratorEffectiveMode(item);
   const displayQty = mode === 'packages'
     ? `${item.packagesFull || 0}${item.hasPartialPackage ? ' + ½' : ''}`
     : `${item.quantity || 0}`;
   const isZero = mode === 'packages' ? (!item.packagesFull && !item.hasPartialPackage) : !item.quantity;
+  const showFamily = typeof familyLabel === 'string' && familyLabel;
   let html = `<div class="inv-color-row" data-item-id="${item.id}">`;
   html += `<div class="inv-color-row-header" onclick="foilToggleDecoratorExpand('${item.id}')">
     <div class="inv-color-row-text">
       <div class="inv-color-row-name">${psEscape(item.color)} ${item.condition === 'inflated' ? '<span style="font-size:11px; font-weight:600; color:var(--info-text);">(Inflated)</span>' : ''}</div>
-      <div class="inv-color-row-brand">${psEscape(item.brand || 'Generic/Unknown')}${item.storageLocation ? ' · ' + psEscape(item.storageLocation) : ''}</div>
+      <div class="inv-color-row-brand">${showFamily ? psEscape(familyLabel) + ' · ' : ''}${psEscape(item.brand || 'Generic/Unknown')}${item.storageLocation ? ' · ' + psEscape(item.storageLocation) : ''}</div>
     </div>
     <div style="text-align:center; font-size:12px; font-weight:700; border-radius:5px; padding:3px 8px; background:${isZero ? 'var(--warning-bg)' : 'var(--info-bg)'}; color:${isZero ? 'var(--warning-text)' : 'var(--info-text)'};">${displayQty}</div>
     <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} inv-color-row-chevron"></i>
@@ -16802,39 +16852,74 @@ function foilDecoratorFamilyTileHtml(group) {
     <div class="tool-tile-title">${psEscape(group.name)}${count > 0 ? ` (${count})` : ''}</div>
   </div>`;
 }
+// Fills #foil-decorator-toplevel-root — either the global search results (query non-empty) or
+// the normal Shape Family tile grid + Recently Deleted (query empty), exactly as before this
+// feature existed. Kept separate from foilRenderDecoratorShapes' own shell so a keystroke in the
+// global search field only ever touches this container, never the input itself.
+function foilRenderDecoratorTopLevelResults() {
+  const root = document.getElementById('foil-decorator-toplevel-root');
+  if (!root) return;
+  let html = '';
+
+  if (foilDecoratorGlobalSearchQuery.trim()) {
+    const groups = foilDecoratorGlobalResultGroups();
+    if (groups.length === 0) {
+      html += `<div class="card" style="text-align:center; color:var(--text-secondary); font-size:13px;">No decorator shapes match "${psEscape(foilDecoratorGlobalSearchQuery.trim())}".</div>`;
+    } else {
+      html += groups.map(g => `<div class="inv-group-header" style="cursor:default;">
+          <span>${psEscape(g.label)} (${g.items.length})</span>
+        </div>
+        <div class="inv-color-list">${g.items.map(item => foilDecoratorItemCardHtml(item, g.label)).join('')}</div>`).join('');
+    }
+    root.innerHTML = html;
+    return;
+  }
+
+  html += `<div class="section-label" style="margin-top:0;">Shape Families</div>`;
+  const families = pgGroupsForKind('foilDecoratorShapes', false);
+  const uncategorizedCount = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && !i.printGroupId).length;
+  const orphanedCount = foilDecoratorOrphanedItems().length;
+  html += `<div class="tool-grid">
+    ${families.map(foilDecoratorFamilyTileHtml).join('')}
+    ${uncategorizedCount > 0 ? `<div class="tool-tile" onclick="foilSelectDecoratorFamily(null)"><div class="tool-tile-icon"><i class="fa-solid fa-shapes"></i></div><div class="tool-tile-title">Uncategorized (${uncategorizedCount})</div></div>` : ''}
+    ${orphanedCount > 0 ? `<div class="tool-tile" style="border-color:var(--warning-text);" onclick="foilSelectDecoratorFamily('${FOIL_DECORATOR_ORPHAN_SENTINEL}')"><div class="tool-tile-icon" style="background:var(--warning-bg); color:var(--warning-text);"><i class="fa-solid fa-triangle-exclamation"></i></div><div class="tool-tile-title">Needs Reassignment (${orphanedCount})</div></div>` : ''}
+  </div>`;
+
+  const trashed = FOIL_ITEMS_TRASHED.filter(i => i.category === 'decoratorShapes');
+  if (trashed.length > 0) {
+    html += `<div class="section-label">Recently deleted (${trashed.length})</div>
+    <div class="card">
+      ${trashed.map(item => `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
+          <div style="min-width:0;">
+            <div style="font-size:13px; font-weight:600;">${psEscape(foilItemLabel(item))}</div>
+            <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'Generic/Unknown')}${item.condition === 'inflated' ? ' · Inflated' : ''}</div>
+          </div>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilRestoreItem('${item.id}')">Restore</button>
+            <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="foilPermanentlyDeleteItem('${item.id}')">Delete forever</button>
+          </div>
+        </div>`).join('')}
+    </div>`;
+  }
+  root.innerHTML = html;
+}
 // Primary browsing hierarchy: Shape Family tiles -> (click) -> that family's Size sections ->
 // actual inventory records. The Manage Shape Families panel (rename/reorder/archive/add a family)
 // lives only at this top level; drilling into one family is where Add/browse/edit items happens.
 function foilRenderDecoratorShapes() {
   if (foilDecoratorSelectedFamily === undefined) {
     let html = `<div id="foil-manage-root" style="margin-bottom:0.75rem;"></div>`;
-    html += `<div class="section-label" style="margin-top:0;">Shape Families</div>`;
-    const families = pgGroupsForKind('foilDecoratorShapes', false);
-    const uncategorizedCount = FOIL_ITEMS.filter(i => i.category === 'decoratorShapes' && !i.printGroupId).length;
-    const orphanedCount = foilDecoratorOrphanedItems().length;
-    html += `<div class="tool-grid">
-      ${families.map(foilDecoratorFamilyTileHtml).join('')}
-      ${uncategorizedCount > 0 ? `<div class="tool-tile" onclick="foilSelectDecoratorFamily(null)"><div class="tool-tile-icon"><i class="fa-solid fa-shapes"></i></div><div class="tool-tile-title">Uncategorized (${uncategorizedCount})</div></div>` : ''}
-      ${orphanedCount > 0 ? `<div class="tool-tile" style="border-color:var(--warning-text);" onclick="foilSelectDecoratorFamily('${FOIL_DECORATOR_ORPHAN_SENTINEL}')"><div class="tool-tile-icon" style="background:var(--warning-bg); color:var(--warning-text);"><i class="fa-solid fa-triangle-exclamation"></i></div><div class="tool-tile-title">Needs Reassignment (${orphanedCount})</div></div>` : ''}
+    // Global, cross-family search — the one thing missing at this level (family-scoped search
+    // only exists one level in, see foilDecoratorSearchQuery). Typing a color here answers "which
+    // Shape Family has this?" directly, without guessing which tile to click first. The input
+    // lives in this static shell; only #foil-decorator-toplevel-root re-renders on each keystroke
+    // (foilSetDecoratorGlobalSearch/foilToggleDecoratorExpand below), so the field never loses
+    // focus mid-type — same scoped-render pattern invRenderColorsList already established.
+    html += `<div class="settings-field" style="margin-bottom:0.75rem;">
+      ${invSearchFieldHtml({ id: 'foil-decorator-global-search', placeholder: 'Search all shapes by color, size, brand, storage...', value: foilDecoratorGlobalSearchQuery, onInput: 'foilSetDecoratorGlobalSearch(this.value)', onClear: "foilSetDecoratorGlobalSearch('')" })}
     </div>`;
-
-    const trashed = FOIL_ITEMS_TRASHED.filter(i => i.category === 'decoratorShapes');
-    if (trashed.length > 0) {
-      html += `<div class="section-label">Recently deleted (${trashed.length})</div>
-      <div class="card">
-        ${trashed.map(item => `
-          <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0.5rem 0; border-bottom:0.5px solid var(--border);">
-            <div style="min-width:0;">
-              <div style="font-size:13px; font-weight:600;">${psEscape(foilItemLabel(item))}</div>
-              <div style="font-size:11px; color:var(--text-secondary);">${psEscape(item.brand || 'Generic/Unknown')}${item.condition === 'inflated' ? ' · Inflated' : ''}</div>
-            </div>
-            <div style="display:flex; gap:6px; flex-shrink:0;">
-              <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilRestoreItem('${item.id}')">Restore</button>
-              <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; color:var(--warning-text);" onclick="foilPermanentlyDeleteItem('${item.id}')">Delete forever</button>
-            </div>
-          </div>`).join('')}
-      </div>`;
-    }
+    html += `<div id="foil-decorator-toplevel-root"></div>`;
     return html;
   }
 
@@ -16877,7 +16962,7 @@ function foilRenderScreen() {
   root.innerHTML = html;
   if (foilCategoryTab === 'lettersNumbers') foilRenderLNContent();
   else if (foilCategoryTab === 'decoratorShapes') {
-    if (foilDecoratorSelectedFamily === undefined) pgRenderManage('foilDecoratorShapes');
+    if (foilDecoratorSelectedFamily === undefined) { pgRenderManage('foilDecoratorShapes'); foilRenderDecoratorTopLevelResults(); }
     else foilRenderDecoratorFamilyItems();
   }
 }
