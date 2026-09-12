@@ -11883,7 +11883,10 @@ function psPullRowKeyAndInfo(req) {
   if (req.formulaInvalid) {
     // One row per broken-config production item — never merged with anything else, since
     // there's no real color/size to group by. Never Ready, never actionable, by construction.
-    return { key: 'formulaInvalid:' + req.productionItemId, groupInfo: { kind: 'formulaInvalid', itemLabel: req.source && req.source.itemLabel, reason: req.formulaInvalidReason, templateId: req.templateId } };
+    // productionItemId included in groupInfo (not just the key) — a real bug found live: without
+    // it, psResyncItemToTemplate's onclick received the literal string "undefined" as its second
+    // argument, so the "Use current template settings" button silently did nothing at all.
+    return { key: 'formulaInvalid:' + req.productionItemId, groupInfo: { kind: 'formulaInvalid', productionItemId: req.productionItemId, itemLabel: req.source && req.source.itemLabel, reason: req.formulaInvalidReason, templateId: req.templateId } };
   }
   if (req.unresolved) {
     return { key: 'unresolved:' + req.color.trim().toLowerCase() + ':' + req.size, groupInfo: { kind: 'unresolved', color: req.color, size: req.size, candidates: req.candidates || [] } };
