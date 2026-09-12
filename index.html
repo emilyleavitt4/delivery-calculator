@@ -1198,6 +1198,17 @@
   window.fbSaveInventoryOrder = (order) => setDoc(doc(inventoryOrdersRef, order.id), order);
   window.fbDeleteInventoryOrder = (id) => deleteDoc(doc(inventoryOrdersRef, id));
 
+  // "To Order" flags — lightweight, dismissable "this needs ordering" markers (Orders' left
+  // column). Deliberately separate from inventoryOrders: a flag is just a note-to-self, never a
+  // real placed order, and most "needs ordering" rows are never stored here at all — they're
+  // computed live from invNeedBreakdown (par + upcoming jobs). This collection only holds the
+  // exceptions: a manual flag on an item that isn't otherwise flagged live (e.g. from a Prep
+  // shortage, or flagging ahead of an upcoming job before it's actually short).
+  const toOrderFlagsRef = collection(db, 'businesses', BUSINESS_ID, 'toOrderFlags');
+  window.fbOnSnapshotToOrderFlags = (onNext, onError) => onSnapshot(toOrderFlagsRef, onNext, onError);
+  window.fbSaveToOrderFlag = (flag) => setDoc(doc(toOrderFlagsRef, flag.id), flag);
+  window.fbDeleteToOrderFlag = (id) => deleteDoc(doc(toOrderFlagsRef, id));
+
   // Specialty Latex (Twisting/Linking/Printed/Shapes) — a separate, flat catalog, deliberately
   // its own collection rather than a differently-shaped row in inventoryItems, so nothing about
   // it can ever affect Standard Latex's data or the code that assumes every inventoryItems doc
@@ -6510,7 +6521,7 @@ async function psPrepConfirmOpenBin(jobId, rowKey, usedAmount) {
   psReviewPullBusyKeys[busyKey] = true;
   psRenderProductionJobs();
   try {
-    await invApplyInventoryTransactions([{ itemId: row.inventoryItemId, size: row.size, type: 'PULL', confirmedOpenBinUsed: usedAmount, jobId: job.id, jobName: job.jobName || '' }]);
+    await invApplyInventoryTransactions([{ itemId: row.inventoryItemId, size: row.size, type: 'PULL', confirmedOpenBinUsed: usedAmount, productionItemId: row.productionItemId, jobId: job.id, jobName: job.jobName || '' }]);
     psPrepMissingOpenBinFor = null;
   } catch (err) {
     console.error('Confirm open bin failed:', err);
@@ -8899,6 +8910,7 @@ let INVENTORY_ITEMS = [];
 // restore it; see invDeleteColor/invClearGroup/invRestoreItem.
 let INVENTORY_ITEMS_TRASHED = [];
 let INVENTORY_ORDERS = [];
+let TO_ORDER_FLAGS = []; // manual "needs ordering" markers — see toOrderFlagsRef's own comment
 let INVENTORY_TRANSACTIONS = []; // the audit trail — see invApplyInventoryTransactions
 let invExpandedItem = null;
 let invOrderFormKey = null; // `${itemId}|${size}` of the order form currently open, or null
@@ -9362,6 +9374,10 @@ function invStartListeners() {
     (snapshot) => { INVENTORY_ORDERS = snapshot.docs.map(d => d.data()); invRenderLatex(); invRenderOrdersSection(); },
     (err) => console.error('Inventory orders sync error:', err)
   );
+  window.fbOnSnapshotToOrderFlags(
+    (snapshot) => { TO_ORDER_FLAGS = snapshot.docs.map(d => d.data()); invRenderLatex(); invRenderOrdersSection(); psRenderProductionJobs(); },
+    (err) => console.error('To Order flags sync error:', err)
+  );
   window.fbOnSnapshotInventoryTransactions(
     (snapshot) => {
       INVENTORY_TRANSACTIONS = snapshot.docs.map(d => d.data());
@@ -9539,6 +9555,24 @@ function invStandardLatexOutstandingSplit(jobId, itemId, size) {
   });
   return { fromLoose, fromPool, fromOpenBin };
 }
+// psReviewPullRows now allocates one job's pooled already-pulled total across several production
+// items sharing the same color+size (see its own comment — a fix for pieces wrongly sharing one
+// checkbox), so a single row's own alreadyPulled can be a PARTIAL share of the full outstanding
+// pool, not the whole thing. The ledger itself was never asked to track which specific piece a
+// given balloon came from (deliberately — no schema change, no migration risk), so there's no
+// exact record of which loose/pool/open-bin balloons belong to this one row's own share. This
+// prorates the full outstanding split down to just `amount`, so returning one piece's own portion
+// never reverses (or fabricates credit for) a sibling piece's still-outstanding share. Rounds the
+// last portion to absorb any remainder so the three parts always sum to exactly `amount`.
+function invStandardLatexOutstandingSplitFor(jobId, itemId, size, amount) {
+  const full = invStandardLatexOutstandingSplit(jobId, itemId, size);
+  const total = full.fromLoose + full.fromPool + full.fromOpenBin;
+  if (total <= 0 || amount >= total) return full; // returning everything outstanding (the common single-piece case) — no prorating needed
+  const fromLoose = Math.round(full.fromLoose * amount / total);
+  const fromPool = Math.round(full.fromPool * amount / total);
+  const fromOpenBin = Math.max(0, amount - fromLoose - fromPool);
+  return { fromLoose, fromPool, fromOpenBin };
+}
 
 // Resolves the signed-in user to a display name (via TEAM_MEMBERS) plus the raw email, so history
 // stays legible ("Sheila") while still keeping the real, unspoofable identity for a genuine audit
@@ -9674,10 +9708,32 @@ function invGenericItemLabel(system, item) {
 // (a generic entry's delta is always already in the same unit the requirement itself is in).
 // Net PULL minus RETURN, the generic-system counterpart to invBalloonsPulledForJob's own netting
 // — same reasoning: RETURN is a distinct transaction, never a rewrite of the original PULL.
-function invQtyPulledForJob(jobId, system, itemId, size) {
+// Split into an EXACT figure (transactions carrying this exact productionItemId — unambiguous,
+// real per-piece attribution) and a separate LEGACY pool (see invLegacyQtyPooledForJob) for
+// transactions recorded before productionItemId existed on a doc at all. psReviewPullRows
+// combines the two — see its own comment on why the legacy pool needs a stable, one-time
+// allocation across siblings rather than being summed directly here.
+function invQtyPulledForJob(jobId, system, itemId, size, productionItemId) {
   let total = 0;
   INVENTORY_TRANSACTIONS.forEach(t => {
-    if (t.jobId !== jobId || (t.system || 'standardLatex') !== system || t.itemId !== itemId || (t.size || null) !== (size || null)) return;
+    if (t.jobId !== jobId || (t.system || 'standardLatex') !== system || t.itemId !== itemId || (t.size || null) !== (size || null) || (t.productionItemId || null) !== (productionItemId || null)) return;
+    if (t.type === 'PULL') total += Math.abs(t.delta || 0);
+    else if (t.type === 'RETURN') total -= Math.abs(t.delta || 0);
+  });
+  return total; // NOT clamped here — psReviewPullRows clamps once after adding the legacy share
+}
+// The residual, job-wide pool of pre-fix transactions that carry no productionItemId at all —
+// frozen forever (a NEW pull/return always writes a real productionItemId, so this number can
+// never grow after this fix ships; only already-recorded history lands here). Being frozen is
+// what makes allocating it across several sibling production items STABLE across renders/actions
+// — a live-growing/shrinking shared pool was tried first and found to break under Return or
+// out-of-order pulls (confirmed via live testing), since re-splitting a moving total from scratch
+// each time can't tell which sibling a past change actually belonged to. A fixed historical total
+// has no such problem: the same split comes out every time.
+function invLegacyQtyPooledForJob(jobId, system, itemId, size) {
+  let total = 0;
+  INVENTORY_TRANSACTIONS.forEach(t => {
+    if (t.jobId !== jobId || (t.system || 'standardLatex') !== system || t.itemId !== itemId || (t.size || null) !== (size || null) || t.productionItemId) return;
     if (t.type === 'PULL') total += Math.abs(t.delta || 0);
     else if (t.type === 'RETURN') total -= Math.abs(t.delta || 0);
   });
@@ -9741,6 +9797,12 @@ function invApplyInventoryTransactions(entries) {
           color: item.color || null, brand: item.brand || null, name: item.name || null,
           type: e.type, unit: trackingUnit, delta, previousBalance, newBalance,
           balloonsUsed: null, perBagAtTime: null, remainderBefore: null, remainderAfter: null, looseBefore: null, looseAfter: null,
+          // Which production item this pull/return belongs to — see the batch fix for a real,
+          // confirmed bug where several decor pieces on one job needing the same item+size shared
+          // one checkbox job-wide. null on a transaction from before this field existed (never
+          // backfilled) — invExactPulledForJob/invLegacyPooledForJob's own comments cover how that
+          // legacy case is handled without disturbing already-recorded history.
+          productionItemId: e.productionItemId || null,
           jobId: e.jobId || null, jobName: e.jobName || null,
           reference: e.reference || '', note: e.note || '',
           who: actor.who, whoEmail: actor.whoEmail,
@@ -9909,6 +9971,7 @@ function invApplyInventoryTransactions(entries) {
         type, unit: trackingUnit, delta, previousBalance, newBalance,
         balloonsUsed, perBagAtTime, remainderBefore, remainderAfter, looseBefore, looseAfter, balloonsReturned,
         openBinConfirmed: typeof e.confirmedOpenBinUsed === 'number', // see confirmedOpenBinUsed's own comment above
+        productionItemId: e.productionItemId || null, // see the generic branch's own comment on this field
         jobId: e.jobId || null, jobName: e.jobName || null,
         reference: e.reference || '', note: e.note || '',
         who: actor.who, whoEmail: actor.whoEmail,
@@ -11123,10 +11186,27 @@ function invAvailableBalloons(sd) {
 // distinct transaction type, never a rewrite/deletion of the original PULL, so history stays
 // honest (both records remain in INVENTORY_TRANSACTIONS forever) while this "how much is
 // currently pulled" read reflects the net effect of both.
-function invBalloonsPulledForJob(jobId, itemId, size) {
+// See invQtyPulledForJob's own comment on the exact/legacy split — same reasoning, Standard
+// Latex's own balloon-denominated version of it.
+function invBalloonsPulledForJob(jobId, itemId, size, productionItemId) {
   let total = 0;
   INVENTORY_TRANSACTIONS.forEach(t => {
-    if (t.jobId !== jobId || t.itemId !== itemId || t.size !== size) return;
+    if (t.jobId !== jobId || t.itemId !== itemId || t.size !== size || (t.productionItemId || null) !== (productionItemId || null)) return;
+    if (t.type === 'PULL') {
+      if (typeof t.balloonsUsed === 'number') { total += t.balloonsUsed; return; }
+      const item = invFindItem(itemId);
+      const perBag = t.perBagAtTime || (item && item.sizes[size] && item.sizes[size].perBag) || 0;
+      if (perBag > 0) total += Math.abs(t.delta || 0) * perBag;
+    } else if (t.type === 'RETURN' && typeof t.balloonsReturned === 'number') {
+      total -= t.balloonsReturned;
+    }
+  });
+  return total; // NOT clamped here — psReviewPullRows clamps once after adding the legacy share
+}
+function invLegacyBalloonsPooledForJob(jobId, itemId, size) {
+  let total = 0;
+  INVENTORY_TRANSACTIONS.forEach(t => {
+    if (t.jobId !== jobId || t.itemId !== itemId || t.size !== size || t.productionItemId) return;
     if (t.type === 'PULL') {
       if (typeof t.balloonsUsed === 'number') { total += t.balloonsUsed; return; }
       const item = invFindItem(itemId);
@@ -11172,10 +11252,14 @@ function psPullRowKeyAndInfo(req) {
   if (!req.inventoryItemId) {
     return { key: 'noitem:' + system + ':' + req.colorId + ':' + req.size, groupInfo: { kind: 'noItem', system, color: req.color, brand: req.brand, colorId: req.colorId, size: req.size } };
   }
-  // Prefixed with `system` so two different collections can never collide on a coincidentally
-  // identical itemId — harmless for Standard Latex (system is always 'standardLatex' there)
-  // but a real safety margin now that itemId can come from any of several collections.
-  return { key: 'item:' + system + ':' + req.inventoryItemId + ':' + (req.size || ''), groupInfo: { kind: 'item', system, category: req.category || 'balloon', color: req.color, brand: req.brand, colorId: req.colorId, inventoryItemId: req.inventoryItemId, size: req.size } };
+  // Includes productionItemId — a real, confirmed bug otherwise: a job with several decor pieces
+  // needing the SAME color+size (e.g. a Column and two Garlands all needing Deluxe Black 11")
+  // used to share ONE row/checkbox job-wide, so checking it off for one piece silently marked it
+  // done for every other piece too. Each production item now gets its own independent row/
+  // checkbox. The underlying shelf pull still IS shared (see psReviewPullRows' pool-allocation
+  // comment) — this only fixes which piece's own need a given checkbox/pull amount is attributed
+  // to, not the physical fact that they draw from one inventory item.
+  return { key: 'item:' + system + ':' + req.inventoryItemId + ':' + (req.size || '') + ':' + req.productionItemId, groupInfo: { kind: 'item', system, category: req.category || 'balloon', color: req.color, brand: req.brand, colorId: req.colorId, inventoryItemId: req.inventoryItemId, size: req.size, productionItemId: req.productionItemId } };
 }
 function psReviewPullRows(job) {
   const reqs = psComputeJobRequirements(job);
@@ -11186,13 +11270,36 @@ function psReviewPullRows(job) {
     groups[key].qty += req.qty;
   });
 
-  return Object.values(groups).map(row => {
+  // Each production item needing the same color+size used to share ONE row/checkbox job-wide —
+  // a real, confirmed bug: checking off one decor piece silently marked every other piece needing
+  // that color+size as done too. Fixed at the ledger level (see productionItemId on the
+  // transaction doc) — a NEW pull/return is always attributed to one exact production item, no
+  // allocation guessing needed for anything going forward. The only ambiguity left is the frozen
+  // pool of transactions recorded BEFORE that field existed (invLegacyBalloonsPooledForJob /
+  // invLegacyQtyPooledForJob) — that pool never grows, so splitting it across siblings (in this
+  // job's own productionItems array order — stable, predictable) gives the same answer every
+  // render, unlike an earlier version of this fix that tried to keep re-splitting the LIVE,
+  // still-changing total and broke as soon as a Return or an out-of-array-order pull happened
+  // (confirmed via live testing before this shipped).
+  const itemOrder = (job.productionItems || []).map(l => l.id);
+  const legacyClaimed = {}; // "system|itemId|size" -> how much of the FROZEN legacy pool an earlier-processed sibling this pass already claimed
+  const rowsArr = Object.values(groups);
+  rowsArr.sort((a, b) => {
+    if (a.kind === 'item' && b.kind === 'item' && a.system === b.system && a.inventoryItemId === b.inventoryItemId && a.size === b.size) {
+      return itemOrder.indexOf(a.productionItemId) - itemOrder.indexOf(b.productionItemId);
+    }
+    return 0;
+  });
+
+  return rowsArr.map(row => {
     if (row.kind !== 'item') return row; // nothing further to compute until this row is resolved and stocked
     // Defense in depth: even though psComputeJobRequirements/psComputeTotals now guard against a
     // non-finite qty at the source, a row's qty is an accumulated sum (see `groups[key].qty +=`
     // above) — this is the last checkpoint before a quantity could ever reach a Pull button, so it
     // fails closed (never Ready, never actionable) rather than trusting every upstream guard held.
     if (!Number.isFinite(row.qty)) return Object.assign({}, row, { alreadyPulled: 0, stillNeeded: NaN, status: 'formulaInvalid' });
+
+    const poolKey = row.system + '|' + row.inventoryItemId + '|' + row.size;
 
     if (row.system && row.system !== 'standardLatex') {
       // Generic path: the requirement's qty is always in the same unit invSystemFor(...).getQty
@@ -11202,7 +11309,12 @@ function psReviewPullRows(job) {
       // INV_SYSTEMS.specialtyLatex's own comment) — never a raw bags-vs-balloons comparison.
       const item = invFindItemGeneric(row.system, row.inventoryItemId);
       if (!item) return Object.assign({}, row, { kind: 'noItem' }); // item was deleted since the requirement was computed
-      const alreadyPulled = invQtyPulledForJob(job.id, row.system, row.inventoryItemId, row.size);
+      const exactPulled = Math.max(0, invQtyPulledForJob(job.id, row.system, row.inventoryItemId, row.size, row.productionItemId));
+      const legacyPool = invLegacyQtyPooledForJob(job.id, row.system, row.inventoryItemId, row.size);
+      const legacyClaimedSoFar = legacyClaimed[poolKey] || 0;
+      const legacyShare = Math.max(0, Math.min(Math.max(0, row.qty - exactPulled), legacyPool - legacyClaimedSoFar));
+      legacyClaimed[poolKey] = legacyClaimedSoFar + legacyShare;
+      const alreadyPulled = exactPulled + legacyShare;
       const stillNeeded = Math.max(0, row.qty - alreadyPulled);
       const available = invSystemFor(row.system).getQty(item, row.size);
       // null means "this system needs configuration it doesn't have" (e.g. Specialty Latex with
@@ -11219,11 +11331,16 @@ function psReviewPullRows(job) {
       return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'ready' });
     }
 
-    // ── Standard Latex — exact existing behavior, untouched ──
+    // Standard Latex -- exact existing behavior, aside from the exact/legacy split above --
     const item = invFindItem(row.inventoryItemId);
     if (!item) return Object.assign({}, row, { kind: 'noItem' }); // item was deleted since the requirement was computed
     const sd = item.sizes[row.size];
-    const alreadyPulled = invBalloonsPulledForJob(job.id, row.inventoryItemId, row.size);
+    const exactPulled = Math.max(0, invBalloonsPulledForJob(job.id, row.inventoryItemId, row.size, row.productionItemId));
+    const legacyPool = invLegacyBalloonsPooledForJob(job.id, row.inventoryItemId, row.size);
+    const legacyClaimedSoFar = legacyClaimed[poolKey] || 0;
+    const legacyShare = Math.max(0, Math.min(Math.max(0, row.qty - exactPulled), legacyPool - legacyClaimedSoFar));
+    legacyClaimed[poolKey] = legacyClaimedSoFar + legacyShare;
+    const alreadyPulled = exactPulled + legacyShare;
     const stillNeeded = Math.max(0, row.qty - alreadyPulled);
     if (invTrackingUnit === 'bags' && (!sd.perBag || sd.perBag <= 0)) {
       return Object.assign({}, row, { alreadyPulled, stillNeeded, status: 'configMissing' });
@@ -11397,8 +11514,8 @@ async function psReviewPullConfirmRow(jobId, rowKey, qty) {
     // every other system supplies a plain delta — see invApplyInventoryTransactions's own generic
     // branch, which has no packaging concept to convert through.
     const entry = (row.system && row.system !== 'standardLatex')
-      ? { system: row.system, itemId: row.inventoryItemId, size: row.size, type: 'PULL', delta: -amount, jobId: job.id, jobName: job.jobName || '' }
-      : { itemId: row.inventoryItemId, size: row.size, type: 'PULL', balloonsUsed: amount, jobId: job.id, jobName: job.jobName || '' };
+      ? { system: row.system, itemId: row.inventoryItemId, size: row.size, type: 'PULL', delta: -amount, productionItemId: row.productionItemId, jobId: job.id, jobName: job.jobName || '' }
+      : { itemId: row.inventoryItemId, size: row.size, type: 'PULL', balloonsUsed: amount, productionItemId: row.productionItemId, jobId: job.id, jobName: job.jobName || '' };
     await invApplyInventoryTransactions([entry]);
   } catch (err) {
     console.error('Review & Pull failed:', err);
@@ -11450,10 +11567,14 @@ async function psPrepReturnPull(jobId, rowKey) {
   try {
     let entry;
     if (row.system && row.system !== 'standardLatex') {
-      entry = { system: row.system, itemId: row.inventoryItemId, size: row.size, type: 'RETURN', delta: amount, jobId: job.id, jobName: job.jobName || '' };
+      entry = { system: row.system, itemId: row.inventoryItemId, size: row.size, type: 'RETURN', delta: amount, productionItemId: row.productionItemId, jobId: job.id, jobName: job.jobName || '' };
     } else {
-      const split = invStandardLatexOutstandingSplit(job.id, row.inventoryItemId, row.size);
-      entry = { itemId: row.inventoryItemId, size: row.size, type: 'RETURN', returnLoosePortion: split.fromLoose, returnPoolPortion: split.fromPool, returnOpenBinPortion: split.fromOpenBin, jobId: job.id, jobName: job.jobName || '' };
+      // `amount` (this row's own allocated share — see psReviewPullRows) can be less than the
+      // full outstanding pool when a sibling production item needing the same color+size also has
+      // its own share still outstanding — prorate the split so this return only ever reverses
+      // THIS piece's own portion, never a sibling's.
+      const split = invStandardLatexOutstandingSplitFor(job.id, row.inventoryItemId, row.size, amount);
+      entry = { itemId: row.inventoryItemId, size: row.size, type: 'RETURN', returnLoosePortion: split.fromLoose, returnPoolPortion: split.fromPool, returnOpenBinPortion: split.fromOpenBin, productionItemId: row.productionItemId, jobId: job.id, jobName: job.jobName || '' };
     }
     await invApplyInventoryTransactions([entry]);
   } catch (err) {
@@ -11479,8 +11600,8 @@ async function psReviewPullConfirmAllReady(jobId) {
   psRenderProductionJobs();
   try {
     await invApplyInventoryTransactions(rows.map(r => (r.system && r.system !== 'standardLatex')
-      ? { system: r.system, itemId: r.inventoryItemId, size: r.size, type: 'PULL', delta: -r.stillNeeded, jobId: job.id, jobName: job.jobName || '' }
-      : { itemId: r.inventoryItemId, size: r.size, type: 'PULL', balloonsUsed: r.stillNeeded, jobId: job.id, jobName: job.jobName || '' }
+      ? { system: r.system, itemId: r.inventoryItemId, size: r.size, type: 'PULL', delta: -r.stillNeeded, productionItemId: r.productionItemId, jobId: job.id, jobName: job.jobName || '' }
+      : { itemId: r.inventoryItemId, size: r.size, type: 'PULL', balloonsUsed: r.stillNeeded, productionItemId: r.productionItemId, jobId: job.id, jobName: job.jobName || '' }
     ));
   } catch (err) {
     console.error('Review & Pull (bulk) failed:', err);
@@ -11682,10 +11803,17 @@ function psReviewPullRowHtml(job, row, readOnly) {
   </div>`;
 }
 
+// Reads via invOrderLines so this counts correctly regardless of which shape an order was saved
+// in (see invOrderLines' own comment) — a real bug found while building the "To Order" list:
+// this still read the old bare o.itemId/o.size/o.qty directly, so it silently returned 0 for
+// every order placed through the newer multi-line composer, understating what's already pending
+// and inflating suggested reorder amounts.
 function invPendingOrderedQty(itemId, size) {
   return INVENTORY_ORDERS
-    .filter(o => o.itemId === itemId && o.size === size && (o.status === 'ordered' || o.status === 'backordered'))
-    .reduce((sum, o) => sum + o.qty, 0);
+    .filter(o => o.status === 'ordered' || o.status === 'backordered')
+    .reduce((sum, o) => sum + invOrderLines(o)
+      .filter(l => (l.system || 'standardLatex') === 'standardLatex' && l.itemId === itemId && l.size === size)
+      .reduce((s, l) => s + l.qty, 0), 0);
 }
 // Splits "how many bags to order" into two separate numbers instead of one combined total:
 //   urgentBags   — the bare minimum to cover upcoming jobs. If money's tight or a color is
@@ -11713,6 +11841,61 @@ function invNeedBreakdown(sd, upcoming, pendingBags) {
   const leftoverBagsAfterJobs = Math.floor(Math.max(0, balloonsAvailable - upcoming) / perBag);
   const restockBags = Math.max(0, (sd.par || 0) - leftoverBagsAfterJobs);
   return { urgentBags, restockBags, totalBags: urgentBags + restockBags, configMissing: false };
+}
+
+// ─── "To Order" (Orders' left column) ───
+//
+// Two sources, merged: LIVE rows (computed fresh every render from invNeedBreakdown — par +
+// upcoming job demand, exactly the same engine the per-color card's own restock recommendation
+// already uses, never a separate/parallel "below par" check that could disagree with it) and
+// MANUAL flags (TO_ORDER_FLAGS, for anything that isn't otherwise live-flagged — a Prep shortage,
+// or getting ahead of a job before a color is actually short). Standard Latex only for now, same
+// incremental scoping as the invoice parser — invNeedBreakdown itself is Standard-Latex-only
+// today, and extending "needs ordering" math to other categories would need its own per-category
+// investigation (Specialty Latex/Foil/Add-Ons have no par field at all yet).
+function invToOrderKey(system, itemId, size) { return [system || 'standardLatex', itemId, size || ''].join('|'); }
+function invStandardLatexLiveNeedRows() {
+  const upcomingMap = invComputeUpcoming();
+  const rows = [];
+  INVENTORY_ITEMS.filter(i => i.active !== false).forEach(item => {
+    INV_SIZES.forEach(size => {
+      const sd = item.sizes[size];
+      const upcoming = invUpcomingFor(item, size, upcomingMap);
+      const pendingQty = invPendingOrderedQty(item.id, size);
+      const need = invNeedBreakdown(sd, upcoming, pendingQty);
+      if (need.configMissing || need.totalBags <= 0) return;
+      rows.push({ key: invToOrderKey('standardLatex', item.id, size), system: 'standardLatex', itemId: item.id, size, item, suggestedQty: need.totalBags, urgent: need.urgentBags > 0, source: 'live' });
+    });
+  });
+  return rows;
+}
+function invToOrderRows() {
+  const live = invStandardLatexLiveNeedRows();
+  const liveKeys = new Set(live.map(r => r.key));
+  const manual = TO_ORDER_FLAGS.filter(f => !liveKeys.has(invToOrderKey(f.system, f.itemId, f.size))).map(f => {
+    const sys = invSystemFor(f.system);
+    const item = sys.findItem(f.itemId);
+    return { key: invToOrderKey(f.system, f.itemId, f.size), system: f.system || 'standardLatex', itemId: f.itemId, size: f.size, item, suggestedQty: f.suggestedQty || 1, urgent: false, source: 'manual', flagId: f.id, note: f.note || '' };
+  });
+  return [...live, ...manual];
+}
+function invIsFlaggedToOrder(system, itemId, size) {
+  return invToOrderRows().some(r => r.key === invToOrderKey(system, itemId, size));
+}
+// A live (par/upcoming-driven) row never needs a stored flag — it's already showing, and will
+// keep showing on its own until the real shortage is actually addressed. Only ever creates a
+// MANUAL flag doc, and only if this exact item+size isn't already flagged (live or manual).
+function invFlagToOrder(system, itemId, size, suggestedQty, note) {
+  if (invIsFlaggedToOrder(system, itemId, size)) return;
+  const flag = { id: 'toorder_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), system, itemId, size: size || null, suggestedQty: suggestedQty || 1, note: note || '', flaggedAt: Date.now() };
+  TO_ORDER_FLAGS.push(flag);
+  window.fbSaveToOrderFlag(flag).catch(err => { console.error('To Order flag save failed:', err); TO_ORDER_FLAGS = TO_ORDER_FLAGS.filter(f => f.id !== flag.id); invRenderOrdersSection(); });
+  invRenderLatex(); invRenderOrdersSection(); psRenderProductionJobs();
+}
+function invUnflagToOrder(flagId) {
+  TO_ORDER_FLAGS = TO_ORDER_FLAGS.filter(f => f.id !== flagId);
+  window.fbDeleteToOrderFlag(flagId).catch(err => console.error('To Order unflag failed:', err));
+  invRenderLatex(); invRenderOrdersSection(); psRenderProductionJobs();
 }
 function invSortedItems() {
   return [...INVENTORY_ITEMS].sort((a, b) => a.color.localeCompare(b.color) || (a.brand || '').localeCompare(b.brand || ''));
@@ -14627,6 +14810,20 @@ function invColorCardHtml(item, upcomingMap, orderInfo) {
       const badge = INV_OPEN_STATUS_BADGE[item.sizes[size].openStatus] || INV_OPEN_STATUS_BADGE.Empty;
       return `<div style="text-align:center; font-size:9px; font-weight:700; margin-top:2px; border-radius:4px; padding:0 2px; background:${badge.bg}; color:${badge.color};">${badge.letter}</div>`;
     }).join('')}
+    ${invAdminUnlocked ? INV_SIZES.map(size => {
+      // Quick-glance restock signal, admin-only (same gate as the pricing/restock math this reuses)
+      // — the exact same invNeedBreakdown engine the expanded card's own "Order" suggestion already
+      // uses, so the two can never disagree. A tap here flags it straight onto the To Order list
+      // with that suggested amount, no need to expand the card at all.
+      const sd = item.sizes[size];
+      const upcoming = invUpcomingFor(item, size, upcomingMap);
+      const pendingQty = invPendingOrderedQty(item.id, size);
+      const need = invNeedBreakdown(sd, upcoming, pendingQty);
+      const flagged = invIsFlaggedToOrder('standardLatex', item.id, size);
+      if (need.configMissing || (need.totalBags <= 0 && !flagged)) return `<div></div>`;
+      if (flagged) return `<div style="text-align:center;"><i class="fa-solid fa-circle-check" style="font-size:10px; color:var(--success-text);" title="On your To Order list"></i></div>`;
+      return `<div style="text-align:center;"><button class="icon-btn no-print" style="width:auto; padding:0; font-size:10px; color:${need.urgentBags > 0 ? 'var(--danger-text)' : 'var(--warning-text)'};" onclick="event.stopPropagation(); invFlagToOrder('standardLatex','${item.id}','${invAttr(size)}', ${need.totalBags})" title="Suggested: order ${need.totalBags} — tap to add to your To Order list"><i class="fa-solid fa-cart-plus"></i></button></div>`;
+    }).join('') : ''}
   </div>`;
 
   // Numeric alternative to dragging — jump straight to a position instead of walking a color
