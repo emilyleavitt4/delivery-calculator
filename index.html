@@ -756,11 +756,14 @@
   .rp-badge-attention { background: var(--warning-bg); color: var(--warning-text); }
   .rp-badge-danger { background: var(--danger-bg); color: var(--danger-text); }
   /* Cross-category Orders section, above Inventory's own "Choose a category" tiles — see
-     invOrdersSectionHtml. Single column on phone width (this app's default), two columns
-     (Add an Order / Order Tracking) once there's room, matching the two-pane layout requested. */
+     invOrdersSectionHtml. Single column on phone width (this app's default), growing to the full
+     three-column layout (To Order / Add an Order / Order Tracking) once there's room for it. */
   .inv-orders-grid { display: grid; grid-template-columns: 1fr; gap: 0.75rem; margin-bottom: 1rem; }
   @media (min-width: 760px) {
     .inv-orders-grid { grid-template-columns: 1fr 1fr; align-items: start; }
+  }
+  @media (min-width: 1080px) {
+    .inv-orders-grid { grid-template-columns: 1fr 1fr 1fr; }
   }
   .inv-order-line-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; font-size: 13px; border-bottom: 0.5px solid var(--border); }
   .inv-order-line-row:last-child { border-bottom: none; }
@@ -6595,6 +6598,24 @@ function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
     html += `<span class="rp-badge rp-badge-danger">Out of stock</span>`;
     html += `<span style="font-size:11px; color:var(--warning-text); white-space:nowrap; flex-shrink:0;">${missing} missing</span>`;
     html += detailBtn;
+    // Surfaces a shortage discovered mid-Prep straight onto Inventory's own "To Order" list —
+    // Standard Latex only for now, same scoping as invToOrderRows itself. Already-flagged shows a
+    // plain acknowledgment instead of re-offering the button, matching the collapsed-list glance
+    // indicator's own convention. Every OTHER suggestedQty in this list (invNeedBreakdown's own
+    // urgent/restock figures) is in whole BAGS, never individual balloons — converts `missing`
+    // (a balloon count) the same way before flagging, or this would silently mix units with every
+    // live row (found via testing before shipping: a raw balloon count would have shown as a
+    // wildly wrong bag suggestion the moment a live row wasn't already covering the same size).
+    if (!readOnly && (!row.system || row.system === 'standardLatex')) {
+      if (invIsFlaggedToOrder('standardLatex', row.inventoryItemId, row.size)) {
+        html += `<span style="font-size:11px; color:var(--success-text); flex-shrink:0;"><i class="fa-solid fa-circle-check"></i> On order list</span>`;
+      } else {
+        const shortItem = invFindItem(row.inventoryItemId);
+        const shortPerBag = shortItem && shortItem.sizes[row.size] && shortItem.sizes[row.size].perBag;
+        const missingBags = shortPerBag > 0 ? Math.max(1, Math.ceil(missing / shortPerBag)) : 1;
+        html += `<button class="icon-btn no-print" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="invFlagToOrder('standardLatex','${row.inventoryItemId}','${invAttr(row.size)}', ${missingBags})"><i class="fa-solid fa-cart-plus"></i> Add to order</button>`;
+      }
+    }
     if (!readOnly && invAdminUnlocked) {
       html += `<button class="icon-btn no-print" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" ${busy ? 'disabled' : ''} onclick="psReviewPullConfirmRow('${job.id}','${psJsKeyAttr(row.key)}', ${row.available})">${busy ? '…' : `Pull ${row.available}`}</button>`;
     }
@@ -13423,11 +13444,56 @@ function invInvoiceDraftHtml() {
   return html;
 }
 
+// One click adds a "To Order" row straight into the order currently being composed (opening a
+// fresh draft if none is active yet — never clobbering one already in progress), asking only for
+// the quantity (pre-filled with the suggested amount, editable) since everything else about the
+// line is already known. Removes the manual flag it came from, if any — a live (par/upcoming)
+// row just naturally stops appearing once the real shortage is actually addressed.
+function invToOrderAddToDraft(rowKey) {
+  const row = invToOrderRows().find(r => r.key === rowKey);
+  if (!row || !row.item) { alert("That item couldn't be found — it may have been removed."); return; }
+  const sys = invSystemFor(row.system);
+  const typed = prompt(`How many ${sys.label} — ${sys.displayLabel(row.item)}${row.size ? ' (' + row.size + ')' : ''} to order?`, row.suggestedQty);
+  if (typed === null) return;
+  const qty = parseFloat(typed);
+  if (!Number.isFinite(qty) || qty <= 0) { alert('Enter a valid quantity.'); return; }
+  if (!invOrderDraft) invOrderDraft = { vendor: '', orderedDate: '', lines: [] };
+  const label = sys.displayLabel(row.item) + (row.size ? ` — ${row.size}` : '');
+  invOrderDraft.lines.push({ system: row.system, itemId: row.itemId, size: row.size || null, qty, label });
+  if (row.source === 'manual' && row.flagId) invUnflagToOrder(row.flagId);
+  invRenderOrdersSection();
+}
+function invToOrderColumnHtml() {
+  const rows = invToOrderRows();
+  let html = `<div class="card">
+    <div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">To Order${rows.length ? ` (${rows.length})` : ''}</div>`;
+  if (rows.length === 0) {
+    html += `<div style="font-size:13px; color:var(--text-secondary);">Nothing flagged to order right now.</div>`;
+  } else {
+    rows.forEach(row => {
+      const sys = invSystemFor(row.system);
+      const label = row.item ? sys.displayLabel(row.item) : '(item no longer found)';
+      html += `<div style="padding:0.4rem 0; border-bottom:0.5px solid var(--border);">
+        <div style="font-size:13px;">${psEscape(label)}${row.size ? ' — ' + psEscape(row.size) : ''} ${row.urgent ? `<span class="rp-badge rp-badge-danger">Urgent</span>` : ''}</div>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:2px;">
+          <span style="font-size:12px; color:var(--text-secondary);">Suggested: ${row.suggestedQty}</span>
+          <div style="display:flex; gap:4px;">
+            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;" onclick="invToOrderAddToDraft('${row.key}')">Add to order</button>
+            ${row.source === 'manual' ? `<button class="icon-btn" style="padding:2px 6px;" onclick="invUnflagToOrder('${row.flagId}')" aria-label="Remove from list"><i class="fa-solid fa-xmark"></i></button>` : ''}
+          </div>
+        </div>
+      </div>`;
+    });
+  }
+  html += `</div>`;
+  return html;
+}
 function invOrdersSectionHtml() {
   const pending = INVENTORY_ORDERS.filter(o => o.status === 'ordered' || o.status === 'backordered');
   let html = `<div class="section-label" style="margin-top:0;">Orders</div><div class="inv-orders-grid">`;
+  html += invToOrderColumnHtml();
 
-  // Left pane — Add an Order. Three entry points: a quick manual composer for a small order (a
+  // Middle pane — Add an Order. Three entry points: a quick manual composer for a small order (a
   // few lines, picked one at a time), or reading a real vendor invoice — upload the PDF or paste
   // its text — for the "whole pages of things at once" case a manual picker doesn't scale to.
   html += `<div class="card">
