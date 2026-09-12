@@ -5869,17 +5869,46 @@ function psItemOptionsHtml(selectedId) {
   return html;
 }
 
+// Completed jobs stay fully reachable — same card, same "Edit"/print/status-cycle controls — but
+// live inside a collapsed-by-default section below the active list instead of piling up alongside
+// still-open work forever (the 'completed' status already existed on STATUS_ORDER/psCycleStatus,
+// but nothing previously did anything with it besides making the job read-only in place). Shared
+// by Production and Staffing; hidden entirely when nothing is completed yet, matching every other
+// "nothing here" collapsed section in this app (Recently Deleted, Flagged sizes). Cycling a job's
+// status away from 'completed' (the exact same button that marked it done) brings it right back
+// into the active list on the next render — there is no separate "un-archive" action to learn.
+let psCompletedExpanded = { production: false, staffing: false };
+function psToggleCompletedSection(view) {
+  psCompletedExpanded[view] = !psCompletedExpanded[view];
+  if (view === 'production') psRenderProductionJobs(); else psRenderStaffingJobs();
+}
+function psCompletedSectionHtml(view, completedJobs, cardHtmlFn) {
+  if (completedJobs.length === 0) return '';
+  const expanded = psCompletedExpanded[view];
+  let html = `<div class="inv-group-header" onclick="psToggleCompletedSection('${view}')" style="margin-top:0.75rem;">
+    <span>Completed (${completedJobs.length})</span>
+    <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'}"></i>
+  </div>`;
+  if (expanded) html += completedJobs.map(cardHtmlFn).join('');
+  return html;
+}
+
 function psRenderProductionJobs() {
   const container = document.getElementById('ps-production-job-list');
   const empty = document.getElementById('ps-production-empty');
   const jobs = psSortedJobs();
   if (jobs.length === 0) { container.innerHTML = ''; empty.style.display = 'block'; return; }
   empty.style.display = 'none';
-  container.innerHTML = jobs.map(job => {
+  const activeJobs = jobs.filter(j => j.status !== 'completed');
+  const completedJobs = jobs.filter(j => j.status === 'completed');
+  const cardHtml = job => {
     const expanded = psExpandedProduction === job.id;
     const body = expanded ? `<div class="ps-job-body">${psProductionBodyHtml(job)}</div>` : '';
     return `<div class="ps-job-card">${psJobHeaderHtml(job, 'production', expanded)}${body}</div>`;
-  }).join('');
+  };
+  const noActiveNote = (activeJobs.length === 0 && completedJobs.length > 0)
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary);">No active jobs — see Completed below.</div>` : '';
+  container.innerHTML = activeJobs.map(cardHtml).join('') + noActiveNote + psCompletedSectionHtml('production', completedJobs, cardHtml);
   if (psExpandedProduction) psItemFieldsChanged(psExpandedProduction);
 }
 
@@ -22022,11 +22051,16 @@ function psRenderStaffingJobs() {
   const jobs = psSortedJobs();
   if (jobs.length === 0) { container.innerHTML = ''; empty.style.display = 'block'; return; }
   empty.style.display = 'none';
-  container.innerHTML = jobs.map(job => {
+  const activeJobs = jobs.filter(j => j.status !== 'completed');
+  const completedJobs = jobs.filter(j => j.status === 'completed');
+  const cardHtml = job => {
     const expanded = psExpandedStaffing === job.id;
     const body = expanded ? `<div class="ps-job-body">${psStaffingBodyHtml(job)}</div>` : '';
     return `<div class="ps-job-card">${psJobHeaderHtml(job, 'staffing', expanded)}${body}</div>`;
-  }).join('');
+  };
+  const noActiveNote = (activeJobs.length === 0 && completedJobs.length > 0)
+    ? `<div class="card" style="text-align:center; color:var(--text-secondary);">No active jobs — see Completed below.</div>` : '';
+  container.innerHTML = activeJobs.map(cardHtml).join('') + noActiveNote + psCompletedSectionHtml('staffing', completedJobs, cardHtml);
 }
 
 // A clean read-only display row for the Event section — reuses the pre-existing
