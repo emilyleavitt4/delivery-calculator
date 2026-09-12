@@ -4555,12 +4555,27 @@ function psEventModelFromImport(rawImportData) {
   return psBlankJob({ jobName: rawImportData.clientName, eventTitle: rawImportData.eventTitle || '' });
 }
 
+// Some imported jobs carry far more than a date in eventDate — a whole "Setup Time: ... Event
+// Take Down: ... Day-of Contact: ..." blob concatenated on by the import source (confirmed
+// directly against real data, not a hypothetical), not something this app writes itself. That
+// broke a plain `new Date(job.eventDate)` outright (isNaN), which meant a job with a corrupted
+// eventDate silently fell out of chronological order entirely and sorted by upload order instead
+// — exactly the "not always chronological" gap reported. Retry against just the leading phrase
+// before the first such marker so the real date is still recovered even from a corrupted field.
+function psExtractCleanDate(raw) {
+  if (!raw) return null;
+  let d = new Date(raw);
+  if (isNaN(d.getTime())) {
+    const cut = raw.search(/\s+(Setup Time|Event Start Time|Event Take Down|Event Location|Day-of Contact)\s*:/i);
+    if (cut > 0) d = new Date(raw.slice(0, cut).trim());
+  }
+  return isNaN(d.getTime()) ? null : d;
+}
 // Jobs with a real, parseable date sort chronologically first; anything without a usable
 // date (blank, or free text that isn't a date) sorts to the bottom by creation order.
 function psJobDateValue(job) {
-  if (!job.eventDate) return null;
-  const d = new Date(job.eventDate);
-  return isNaN(d.getTime()) ? null : d.getTime();
+  const d = psExtractCleanDate(job.eventDate);
+  return d ? d.getTime() : null;
 }
 function psSortedJobs() {
   return [...JOBS].sort((a, b) => {
@@ -5999,12 +6014,37 @@ function psJobProductionSummary(job) {
   const done = tasks.filter(t => t.status === 'done').length;
   return `${itemText} · ${done}/${tasks.length} tasks complete`;
 }
+// job.eventDate (and psOccDateTime's own date, which falls back to it) can carry far more than a
+// date on some imported jobs — a whole "Setup Time: ... Event Take Down: ... Day-of Contact: ..."
+// blob concatenated in by the source, not just this app's own doing. Reported directly: that
+// blob was clogging up every job card's collapsed header. Never echo it raw — parse it as a real
+// date and format short, or fall back to a hard-truncated version rather than an unbounded string.
+function psCleanDateLabel(raw) {
+  if (!raw) return '';
+  const d = psExtractCleanDate(raw); // same recovery psJobDateValue uses — see its own comment
+  if (d) return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  return raw.length > 40 ? raw.slice(0, 40) + '…' : raw;
+}
+// One compact line per occurrence (Install/Strike) for the collapsed job header — exactly the
+// three things asked for: which occurrence, its date/time, and who's assigned. Replaces the raw
+// job.eventDate dump entirely; Install always renders (psOccExists always says true for it), so
+// this is also this app's only "date" line now for a job with no Strike configured at all.
+function psJobHeaderOccLineHtml(job, type) {
+  if (!psOccExists(job, type)) return '';
+  const { date, time } = psOccDateTime(job, type);
+  const whenText = [psCleanDateLabel(date), time].filter(Boolean).join(' · ') || 'No date set';
+  const occ = psOccOf(job, type);
+  const names = Object.keys(occ.scheduled || {}).map(psTeamMemberName);
+  const label = type === 'install' ? 'Install' : 'Strike';
+  return `<div class="ps-job-date">${psEscape(label)} · ${psEscape(whenText)} · ${psEscape(names.length ? names.join(', ') : 'Unassigned')}</div>`;
+}
 function psJobHeaderHtml(job, view, expanded) {
   const deleteBtn = `<button class="icon-btn" onclick="event.stopPropagation(); psDeleteJob('${job.id}')" aria-label="Delete job"><i class="fa-solid fa-trash"></i></button>`;
+  const occLines = STAFF_OCC_TYPES.map(t => psJobHeaderOccLineHtml(job, t)).join('');
   return `<div class="ps-job-header" onclick="psToggleExpand('${view}','${job.id}')">
     <div class="ps-job-header-text">
       <div class="ps-job-name">${psEscape(psJobHeading(job))}</div>
-      <div class="ps-job-date">${psEscape(job.eventDate) || 'No date set'}</div>
+      ${occLines}
       ${view === 'production' ? `<div style="font-size:11px; color:var(--text-secondary);">${psEscape(psJobProductionSummary(job))}</div>` : ''}
     </div>
     ${psStatusBtnHtml(job, view)}
@@ -22897,6 +22937,48 @@ function ttDeleteStopwatchLog(id) {
 }
 
 // ═══════════════════════════════════════ EVENT SCHEDULE & STAFFING VIEW ═══════════════════════════════════════
+// Grouped by the event's own calendar month (derived from psJobDateValue — the SAME field
+// psSortedJobs already sorts by, so a job never lands in a group that disagrees with where it
+// sorts) — direct request, so a growing schedule reads as "what's coming up this month" instead of
+// one long flat list. A job with no parseable date at all falls into its own trailing group rather
+// than being silently dropped or miscategorized into "now."
+function psStaffingMonthKey(job) {
+  const ms = psJobDateValue(job);
+  if (ms === null) return 'nodate';
+  const d = new Date(ms);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+function psStaffingMonthLabel(key) {
+  if (key === 'nodate') return 'No date set';
+  const [y, m] = key.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+}
+let psStaffingMonthCollapsed = new Set(); // month keys currently collapsed — expanded by default
+function psToggleStaffingMonth(key) {
+  if (psStaffingMonthCollapsed.has(key)) psStaffingMonthCollapsed.delete(key);
+  else psStaffingMonthCollapsed.add(key);
+  psRenderStaffingJobs();
+}
+// `jobs` must already be in the desired (chronological) order — this only buckets them, it never
+// re-sorts, so a month's own jobs stay in the same order psSortedJobs put them in.
+function psStaffingMonthGroupsHtml(jobs, cardHtmlFn) {
+  if (jobs.length === 0) return '';
+  const order = [];
+  const byKey = {};
+  jobs.forEach(job => {
+    const key = psStaffingMonthKey(job);
+    if (!byKey[key]) { byKey[key] = []; order.push(key); }
+    byKey[key].push(job);
+  });
+  return order.map(key => {
+    const groupJobs = byKey[key];
+    const collapsed = psStaffingMonthCollapsed.has(key);
+    return `<div class="inv-group-header" onclick="psToggleStaffingMonth('${key}')" style="margin-top:0.75rem;">
+      <span>${psEscape(psStaffingMonthLabel(key))} (${groupJobs.length})</span>
+      <i class="fa-solid fa-chevron-${collapsed ? 'down' : 'up'}"></i>
+    </div>${collapsed ? '' : groupJobs.map(cardHtmlFn).join('')}`;
+  }).join('');
+}
 function psRenderStaffingJobs() {
   const container = document.getElementById('ps-staffing-job-list');
   const empty = document.getElementById('ps-staffing-empty');
@@ -22912,7 +22994,7 @@ function psRenderStaffingJobs() {
   };
   const noActiveNote = (activeJobs.length === 0 && completedJobs.length > 0)
     ? `<div class="card" style="text-align:center; color:var(--text-secondary);">No active jobs — see Completed below.</div>` : '';
-  container.innerHTML = activeJobs.map(cardHtml).join('') + noActiveNote + psCompletedSectionHtml('staffing', completedJobs, cardHtml);
+  container.innerHTML = psStaffingMonthGroupsHtml(activeJobs, cardHtml) + noActiveNote + psCompletedSectionHtml('staffing', completedJobs, cardHtml);
 }
 
 // A clean read-only display row for the Event section — reuses the pre-existing
