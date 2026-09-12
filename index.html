@@ -12704,22 +12704,36 @@ function invFmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(2); }
 // (invActivitySectionHtml, below) renders every entry identically to a single color+size's own
 // History, just with an added item-identity line up front since the global feed spans every
 // color/item at once instead of one already-known size.
+// Rewritten for plain-language clarity after direct feedback ("confusingly written," "does 0 or
+// 3 mean balloons or bags?") — every single number now names its own unit right next to it,
+// never relying on a unit mentioned earlier in the sentence to carry forward. Backstock is always
+// in bags/whatever invUnitLabel() says (sealed, shelf-counted units); a balloon count is always
+// explicitly called out as "individual balloons," a genuinely different unit, on its own line.
 function invTxnDetailHtml(t) {
   const date = new Date(t.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const unit = invUnitLabel(); // 'bags' or 'balloons' — whatever this business currently tracks Backstock in
   const sign = t.delta > 0 ? '+' : '';
-  const usageNote = (t.balloonsUsed != null && t.perBagAtTime != null) ? ` (${t.balloonsUsed} balloons used, ${t.perBagAtTime}/standard package)` : '';
+  const backstockLine = `${sign}${invFmtQty(t.delta)} ${unit} — Backstock is now ${invFmtQty(t.newBalance)} ${unit}`;
+  const usageNote = (t.balloonsUsed != null && t.perBagAtTime != null)
+    ? `<div style="color:var(--text-secondary);">${invFmtQty(t.balloonsUsed)} individual balloon${t.balloonsUsed === 1 ? '' : 's'} used (this size's bag holds ${t.perBagAtTime})</div>`
+    : '';
+  const returnedNote = (t.balloonsReturned != null)
+    ? `<div style="color:var(--text-secondary);">${invFmtQty(t.balloonsReturned)} individual balloon${t.balloonsReturned === 1 ? '' : 's'} returned</div>`
+    : '';
   const remainderNote = (t.remainderBefore != null && t.remainderAfter != null)
-    ? `<div style="color:var(--text-secondary);">Pending usage: ${t.remainderBefore} → ${t.remainderAfter} balloon${t.remainderAfter === 1 ? '' : 's'}</div>`
+    ? `<div style="color:var(--text-secondary);">Balloons saved up toward the next full bag: ${t.remainderBefore} → ${t.remainderAfter}</div>`
     : '';
   const openBinNote = t.openBinConfirmed
-    ? `<div style="color:var(--text-secondary);">Confirmed used from an uncounted Open Bin — Backstock unaffected</div>`
+    ? `<div style="color:var(--text-secondary);">Confirmed from the Open Bin — didn't come out of sealed Backstock</div>`
     : '';
   return `<div style="display:flex; justify-content:space-between; align-items:baseline;">
       <span style="font-weight:700;">${t.jobName ? psEscape(t.jobName) : psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</span>
       <span style="color:var(--text-tertiary); font-size:11px;">${date}</span>
     </div>
     ${t.jobName ? `<div style="color:var(--text-secondary);">${psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</div>` : ''}
-    <div>${sign}${invFmtQty(t.delta)} ${invUnitLabel()}${usageNote} — Balance: ${invFmtQty(t.newBalance)}</div>
+    <div>${backstockLine}</div>
+    ${usageNote}
+    ${returnedNote}
     ${remainderNote}
     ${openBinNote}
     ${t.reference ? `<div style="color:var(--text-secondary);">Reference: ${psEscape(t.reference)}</div>` : ''}
