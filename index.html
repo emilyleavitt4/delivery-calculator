@@ -3669,8 +3669,8 @@ function psSyntheticTaskId(productionItemId, kind) {
 }
 // Each entry carries its own `phase` now (defaulting to 'prep' in the sync below when omitted) —
 // generalized from a prep-only helper so the one existing synthetic-task mechanism can also cover
-// real Finish & Pack work (see the 'packextras' entry), instead of that work living as
-// disconnected static prose outside the task system.
+// real Inflate & Build work (see the 'buildstep:<index>' entries below), instead of that work
+// living as disconnected static prose outside the task system.
 function psSyntheticPrepTasksFor(line, recipe) {
   const tasks = [];
   if (line.topperNote && line.topperNote.trim()) {
@@ -3705,10 +3705,11 @@ function psSyntheticPrepTasksFor(line, recipe) {
     }
   });
   // Was static italic prose ("Pack extras of each size/color.") floating outside the task system
-  // entirely — now real Finish & Pack work, checkable/cross-out/counted like everything else in
-  // that phase, per the batch instruction that this should behave like other real Production tasks
-  // rather than a special hardcoded checkbox.
-  tasks.push({ kind: 'packextras', phase: 'finish', text: 'Pack extras of each size/color.' });
+  // entirely — now a real, checkable task like everything else here. Lives in 'prep' (not
+  // 'finish') per direct request: packing extras happens right after pulling the balloons for this
+  // item, while everything's already out — down in Finish & Pack, it meant getting everything back
+  // out a second time much later.
+  tasks.push({ kind: 'packextras', phase: 'prep', text: 'Pack extras of each size/color.' });
   return tasks;
 }
 // Called at item creation AND whenever an edit could change what this item's synthetic tasks
@@ -7655,18 +7656,20 @@ function psProductionBodyHtml(job) {
 
   // Rental-classified import items (see the Mapping Layer / IM_CLASSIFICATIONS) land in
   // job.rentalItems instead of productionItems — they're gear to gather and bring back, not
-  // something to build, so they get their own pull/pack/return checklist instead of a pull
-  // list + build-detail card.
+  // something to build, so they get their own pull/pack checklist instead of a pull list +
+  // build-detail card. Returned lives in its OWN section further down (see below, after Finish &
+  // Pack) — reported directly: Returned is real post-event/strike work, and bundling it in here
+  // alongside pre-event Pulled/Packed meant this block could never read "done" until well after
+  // the job itself was actually finished.
   const rentalItems = job.rentalItems || [];
   if (rentalItems.length > 0) {
-    html += `<div class="section-label">Rentals — pull / pack / return</div>`;
+    html += `<div class="section-label">Rentals — pull / pack</div>`;
     rentalItems.forEach(item => {
       html += `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
         <div style="font-size:14px; font-weight:700; margin-bottom:6px;">${psEscape(item.name)} <span style="font-weight:400; color:var(--text-secondary);">× ${item.qty}</span></div>
         <div style="display:flex; gap:16px; font-size:13px;">
           <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.pulled ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','pulled',this.checked)"> Pulled</label>
           <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.packed ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','packed',this.checked)"> Packed</label>
-          <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.returned ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','returned',this.checked)"> Returned</label>
         </div>
       </div>`;
     });
@@ -7694,6 +7697,20 @@ function psProductionBodyHtml(job) {
   }
 
   if (job.productionItems.length > 0) html += psPhaseSectionHtml(job, 'finish');
+
+  // Its own section, after Finish & Pack (the last pre-event stage) — see the comment on the
+  // pull/pack block above for why Returned was split out on its own. Same job.rentalItems records,
+  // same psToggleRentalStatus mutation, just rendered from a later point in the job so it reads as
+  // what-happens-after-the-event rather than part of getting ready for it.
+  if (rentalItems.length > 0) {
+    html += `<div class="section-label">Rentals — return <span style="font-weight:400; text-transform:none; color:var(--text-secondary); font-size:12px;">(after the event)</span></div>`;
+    rentalItems.forEach(item => {
+      html += `<div style="padding:6px 0; border-top:0.5px solid var(--border); display:flex; align-items:center; justify-content:space-between; font-size:13px;">
+        <div>${psEscape(item.name)} <span style="font-weight:400; color:var(--text-secondary);">× ${item.qty}</span></div>
+        <label style="display:flex; align-items:center; gap:4px; flex-shrink:0;"><input type="checkbox" ${item.returned ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','returned',this.checked)"> Returned</label>
+      </div>`;
+    });
+  }
 
   html += `<div class="no-print">`;
   if (readOnly) {
