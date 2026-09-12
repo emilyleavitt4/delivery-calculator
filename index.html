@@ -6173,6 +6173,15 @@ function psGetColorSplitMode(key, line) {
 }
 function psSetColorSplitMode(key, mode) {
   psColorSplitModeStore[key] = mode;
+  if (mode === 'exact') {
+    const [jobId, idxStr] = key.split('|');
+    const job = psFindJob(jobId);
+    const line = job && job.productionItems[Number(idxStr)];
+    // Re-fills against whatever the percentage draft looks like RIGHT NOW, not whatever it was
+    // when Edit first opened — switching modes after adjusting the sliders should show the split
+    // that's actually on screen, not a stale one.
+    if (line) psFillColorCountDefaults(key, line);
+  }
   psWithFormPreserved(key, psRenderProductionJobs);
 }
 // One { [size]: count } row per color, in the exact same order as psColorDraftStore[key] — a
@@ -6186,6 +6195,41 @@ function psInitColorCountDraft(line) {
     const row = {};
     SIZE_ORDER.forEach(size => { row[size] = (saved && Number.isFinite(saved[size])) ? saved[size] : ''; });
     return row;
+  });
+}
+// Direct request: switching to Exact counts showed an all-blank grid even when the job was
+// already running a real, working percentage/even split — meaning re-entering that whole split by
+// hand was the only way to then tweak just one cell (e.g. "0 Cocoa Brown at 17\", a few more of
+// the others"). Fills every still-blank cell with what the CURRENT split (the live percentage
+// draft, or an even split if none) actually calculates for that color+size, per ONE unit of
+// Quantity — mirroring psComputeJobRequirements's own pct-branch math exactly (Math.round(total *
+// pct/100), or psColorCount's even-split ceil), just evaluated at qty=1 since Exact counts are
+// always per-unit (see psColorExactCountsHtml's own label). Never touches a cell that already
+// holds a real value, including an explicit 0 someone typed — only ever fills '' — so this is safe
+// to call repeatedly (on opening Edit, on switching modes, on adding a color) without ever
+// clobbering a deliberate override.
+function psFillColorCountDefaults(key, line) {
+  const counts = psColorCountDraftStore[key];
+  const colors = psColorDraftStore[key] || line.colors || [];
+  if (!counts || counts.length !== colors.length || colors.length === 0) return;
+  const r = psLineRecipe(line);
+  if (!r) return;
+  // qty=1: Exact counts are per-ONE-unit (multiplied by line.qty at requirement time), so the
+  // default shown here must be too — not the full-job total psSizeOverrideEditorHtml shows.
+  const totalsResult = psComputeTotals(r, 1, line.customLinear);
+  if (!totalsResult.valid) return;
+  const n = colors.length;
+  const dist = psDistDraftStore[key];
+  const distEntries = (dist && dist.length === n) ? dist : null;
+  SIZE_ORDER.forEach(size => {
+    const total = totalsResult.sizes[size];
+    if (!Number.isFinite(total) || total <= 0) return;
+    colors.forEach((name, idx) => {
+      if (counts[idx][size] !== '') return;
+      const pct = distEntries && Number.isFinite(distEntries[idx].pct) ? distEntries[idx].pct : null;
+      const qty = Number.isFinite(pct) ? Math.round(total * (pct / 100)) : psColorCount(total, n);
+      if (qty > 0) counts[idx][size] = qty;
+    });
   });
 }
 // Adding/removing a color row triggers a full psRenderProductionJobs(), which would otherwise
@@ -6221,6 +6265,10 @@ function psAddColorDraftRow(key) {
     const row = {};
     SIZE_ORDER.forEach(size => { row[size] = ''; });
     psColorCountDraftStore[key].push(row);
+    const [jobId, idxStr] = key.split('|');
+    const job = psFindJob(jobId);
+    const line = job && job.productionItems[Number(idxStr)];
+    if (line) psFillColorCountDefaults(key, line);
   }
   psWithFormPreserved(key, psRenderProductionJobs);
 }
@@ -6536,6 +6584,7 @@ function psStartEditItem(jobId, idx, phase) {
   psColorDraftStore[key] = [...line.colors];
   psDistDraftStore[key] = psInitDistDraft(line);
   psColorCountDraftStore[key] = psInitColorCountDraft(line);
+  psFillColorCountDefaults(key, line);
   psColorSplitModeStore[key] = line.colorSplitMode === 'exact' ? 'exact' : 'pct';
   psTopperDraftStore[key] = psInitTopperDraft(line);
   psEditingItemKey = key;
@@ -7194,6 +7243,20 @@ function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
     }
   }
   html += `</div>`;
+  // Reported directly, real inventory: "we DID have enough — I need a way to override it if it
+  // says out of stock but we do actually have some." "Out of stock" only happens when the Open
+  // Bin status is itself 'Empty' — so if that's wrong, the actual data that needs fixing is the
+  // Open Bin status, not a separate override concept. Reuses invUpdateSizeField exactly as
+  // Inventory's own Open Bin select already does (same non-admin-gated "fast, informal action"
+  // this status has always been) — correcting it here immediately re-evaluates this row through
+  // the exact same Maybe logic every other color already gets, Yes/Missing-N flow included.
+  if (row.status === 'short' && !readOnly && row.system === 'standardLatex' && row.openStatus === 'Empty') {
+    html += `<div class="no-print" style="margin:-2px 0 4px 26px; font-size:11px; color:var(--text-secondary);">
+      Open Bin says Empty — not right?
+      <button class="icon-btn" style="width:auto; padding:1px 6px; font-size:11px;" onclick="psPrepCorrectOpenBin('${job.id}','${row.inventoryItemId}','${invAttr(row.size)}','Partial')">Mark Partial</button>
+      <button class="icon-btn" style="width:auto; padding:1px 6px; font-size:11px;" onclick="psPrepCorrectOpenBin('${job.id}','${row.inventoryItemId}','${invAttr(row.size)}','Full')">Mark Full</button>
+    </div>`;
+  }
   html += psPrepRowDetailHtml(row);
   return html;
 }
@@ -12143,7 +12206,10 @@ function psReviewPullRows(job) {
         const shortfall = stillNeeded - available;
         return Object.assign({}, row, { alreadyPulled, stillNeeded, available, shortfall, openStatus, status: 'maybeShort' });
       }
-      return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'short' });
+      // openStatus included even for a definite 'short' (not just 'maybeShort') so the Prep row
+      // can offer a direct correction when that status is itself the thing that's wrong (see
+      // psReviewPullRowHtml's own comment on why "Out of stock" only happens when it's 'Empty').
+      return Object.assign({}, row, { alreadyPulled, stillNeeded, available, openStatus, status: 'short' });
     }
     return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'ready' });
   }).sort((a, b) => INV_SIZES.indexOf(a.size) - INV_SIZES.indexOf(b.size) || (a.color || '').localeCompare(b.color || ''));
@@ -12288,6 +12354,17 @@ async function psReviewPullConfirmRow(jobId, rowKey, qty) {
     delete psReviewPullBusyKeys[busyKey];
     psRenderProductionJobs();
   }
+}
+
+// Corrects a color+size's Open Bin status directly from a "short" Prep row, for exactly the case
+// psReviewPullRowHtml's own correction UI targets: "Out of stock" only happens when openStatus is
+// 'Empty' — if that's wrong (real stock exists), the fix is the Open Bin status itself, not a
+// separate override. Reuses invUpdateSizeField exactly as Inventory's own Open Bin select does —
+// same plain, non-admin-gated save — then re-renders so this row re-evaluates through the normal
+// Maybe logic immediately.
+function psPrepCorrectOpenBin(jobId, itemId, size, newStatus) {
+  invUpdateSizeField(itemId, size, 'openStatus', newStatus);
+  psRenderProductionJobs();
 }
 
 // ─── Prep checkbox = the real ledger Pull control (see the batch instruction: "not a cosmetic
