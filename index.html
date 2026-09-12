@@ -3447,7 +3447,17 @@ function psApplySizeOverride(totals, line) {
 const PS_FORMULA_KINDS = [
   { value: 'classic', label: 'Classic — one blended rate' },
   { value: 'freeform', label: 'Freeform — a rate per balloon size' },
+  // The "genuinely different shape" this file's own comment anticipated — a flat per-unit count
+  // instead of a linear-footage rate at all, for things like a Topiary (always 12x 11") or an
+  // Accent Pop (always 1x 18", 5x 11", 4x 5") that were never footage-driven to begin with. See
+  // PS_FOOTAGE_FORMULA_KINDS below — 'fixed' is deliberately excluded from it, since there's no
+  // footage concept anywhere in this formula for a per-job override to apply to.
+  { value: 'fixed', label: 'Fixed count — a set number of balloons per unit, no footage' },
 ];
+// The subset of PS_FORMULA_KINDS that actually uses linear footage (psComputeTotals multiplies by
+// `linear` for these two, and only these two) — used to gate the per-job footage override field
+// (psFootageEditorHtml) separately from "is this a real formula at all" (PS_FORMULA_KINDS itself).
+const PS_FOOTAGE_FORMULA_KINDS = ['classic', 'freeform'];
 
 // Returns { sizes: {[prodSize]: count}, valid: boolean, reason?: string }. `valid` is false
 // whenever the underlying formula, footage, or rate isn't real and usable. `reason` is a short,
@@ -3464,6 +3474,20 @@ const PS_FORMULA_KINDS = [
 // comparisons are always false) and reached Review & Pull as an actionable "Ready — Pull NaN" row.
 function psComputeTotals(recipe, qty, customLinear) {
   if (!PS_FORMULA_KINDS.some(k => k.value === recipe.formula)) return { sizes: {}, valid: false, reason: 'missing-formula' };
+  if (!Number.isFinite(qty)) return { sizes: {}, valid: false, reason: 'missing-footage' };
+  // 'fixed' is a flat count per ONE unit, by size (e.g. a Topiary is always 12x 11" — there's no
+  // footage anywhere in this formula, and customLinear/topperFt never apply to it at all). Handled
+  // entirely separately from the linear-footage formulas below, before `linear` is ever computed.
+  if (recipe.formula === 'fixed') {
+    const counts = recipe.fixedCounts || {};
+    const hasAnyCount = SIZE_ORDER.some(size => Number.isFinite(counts[size]) && counts[size] > 0);
+    if (!hasAnyCount) return { sizes: {}, valid: false, reason: 'missing-rate' };
+    const totals = {};
+    SIZE_ORDER.forEach(size => {
+      if (Number.isFinite(counts[size]) && counts[size] > 0) totals[size] = Math.round(counts[size] * qty);
+    });
+    return { sizes: totals, valid: true };
+  }
   // A job-instance footage override (customLinear) always wins when present, regardless of
   // whether the template is customLinear:true (footage always entered per job, e.g. Garland
   // 25+ ft) or a fixed-length preset (e.g. Freeform Garland – 12 ft) — a business can now correct
@@ -5992,6 +6016,7 @@ function psLineLabel(line, recipe) {
 // length" items are the one exception — they never set line.customLinear, instead baking the
 // typed footage straight into their frozen customRecipe.linearFt, so that's the fallback.
 function psLineFootageText(line, r) {
+  if (r.formula === 'fixed') return 'Fixed count'; // no footage concept at all for this formula
   const ft = (typeof line.customLinear === 'number' && line.customLinear > 0) ? line.customLinear
     : (typeof r.linearFt === 'number' && r.linearFt > 0) ? r.linearFt : null;
   return ft ? `${ft} ft` : '—';
@@ -6321,18 +6346,18 @@ function psTopperColorEditorHtml(key) {
 // deleting and re-adding the item (losing its tasks/colorDist/sizeOverride/label along with it).
 // Blank means "use whatever it would otherwise use" — the template's own fixed length, or nothing
 // if this is a customLinear template with no footage entered yet — never a forced value. Rendered
-// for ANY formula that has a footage concept at all (every entry in PS_FORMULA_KINDS — see
-// psComputeTotals, which always multiplies by `linear` regardless of formula), not only once a
-// linearFt/customLinear value already happens to be set — a template saved with neither (formula
-// chosen, footage never configured) is exactly the "Needs Configuration — Missing footage" case,
-// and psInvalidFormulaMessage explicitly promises this per-job field as the fix ("...or the actual
-// footage entered for this job"). Gating on an already-valid linearFt made that promise false: a
-// job whose frozen customRecipe (see psSnapshotTemplate) never got a footage value had no way to
-// enter one here, since editing the live template afterward never reaches an already-added line's
-// own frozen copy. A future non-linear-footage formula naturally isn't in PS_FORMULA_KINDS's
-// footage-using set and gets no footage field at all.
+// for any formula that has a footage concept at all (PS_FOOTAGE_FORMULA_KINDS — Classic/Freeform,
+// which psComputeTotals always multiplies by `linear` — deliberately NOT the same as
+// "is this a real formula at all," since 'fixed' is a real, valid formula with no footage concept
+// anywhere in it), not only once a linearFt/customLinear value already happens to be set — a
+// template saved with neither (formula chosen, footage never configured) is exactly the "Needs
+// Configuration — Missing footage" case, and psInvalidFormulaMessage explicitly promises this
+// per-job field as the fix ("...or the actual footage entered for this job"). Gating on an
+// already-valid linearFt made that promise false: a job whose frozen customRecipe (see
+// psSnapshotTemplate) never got a footage value had no way to enter one here, since editing the
+// live template afterward never reaches an already-added line's own frozen copy.
 function psFootageEditorHtml(line, r, sanitizedKey) {
-  if (!PS_FORMULA_KINDS.some(k => k.value === r.formula)) return '';
+  if (!PS_FOOTAGE_FORMULA_KINDS.includes(r.formula)) return '';
   const currentOverride = (typeof line.customLinear === 'number' && line.customLinear > 0) ? line.customLinear : '';
   const placeholder = typeof r.linearFt === 'number' ? String(r.linearFt) : 'e.g. 12';
   const hint = typeof r.linearFt === 'number' ? `blank uses the template's own ${r.linearFt} ft` : 'the footage entered for this job';
@@ -8307,6 +8332,18 @@ function ptFormulaEditorHtml(t) {
       ${SIZE_ORDER.map(size => `<div class="settings-field" style="margin-bottom:0; min-width:70px;"><label>${psEscape(size)}</label><input type="number" step="0.1" min="0" value="${Number.isFinite(rates[size]) ? rates[size] : ''}" onchange="ptUpdateRateField('${t.id}','${size}', this.value)"></div>`).join('')}
     </div>
     ${!hasAnyRate ? `<div style="font-size:11px; color:var(--warning-text); background:var(--warning-bg); padding:6px 8px; border-radius:var(--radius-sm); margin:-0.3rem 0 0.6rem;"><i class="fa-solid fa-triangle-exclamation"></i> No rate entered for any size yet — this template can't compute a balloon count until at least one is set.</div>` : ''}`;
+  } else if (t.formula === 'fixed') {
+    // A flat count per ONE unit, by size — no footage anywhere in this formula (see
+    // psComputeTotals's own 'fixed' branch and PS_FOOTAGE_FORMULA_KINDS). For a Topiary that's
+    // always 12x 11", or an Accent Pop that's always 1x 18" + 5x 11" + 4x 5" — reported directly as
+    // decor that was never linear-footage-shaped to begin with.
+    const counts = t.fixedCounts || {};
+    const hasAnyCount = SIZE_ORDER.some(size => Number.isFinite(counts[size]) && counts[size] > 0);
+    html += `<div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Balloons per ONE unit, by size <span style="font-weight:400;">(blank = none of that size — multiplied by Quantity when this template is used)</span></div>
+    <div class="row" style="flex-wrap:wrap; gap:8px; margin-bottom:0.6rem;">
+      ${SIZE_ORDER.map(size => `<div class="settings-field" style="margin-bottom:0; min-width:70px;"><label>${psEscape(size)}</label><input type="number" step="1" min="0" value="${Number.isFinite(counts[size]) && counts[size] > 0 ? counts[size] : ''}" onchange="ptUpdateFixedCountField('${t.id}','${size}', this.value)"></div>`).join('')}
+    </div>
+    ${!hasAnyCount ? `<div style="font-size:11px; color:var(--warning-text); background:var(--warning-bg); padding:6px 8px; border-radius:var(--radius-sm); margin:-0.3rem 0 0.6rem;"><i class="fa-solid fa-triangle-exclamation"></i> No count entered for any size yet — this template can't compute a balloon count until at least one is set.</div>` : ''}`;
   }
   return html;
 }
@@ -8353,17 +8390,17 @@ function ptTemplateFieldsEditorHtml(t) {
       <option value="specialty" ${t.library === 'specialty' ? 'selected' : ''}>Custom / Specialty — reusable design, kept out of the main picker list</option>
     </select>
   </div>
-  <div class="settings-field" style="margin-bottom:0.6rem;"><label>Linear feet</label><input type="number" step="0.5" min="0" value="${t.linearFt || ''}" ${t.customLinear ? 'disabled placeholder="entered per job"' : ''} onchange="ptUpdateField('${t.id}','linearFt', this.value)"></div>
+  ${t.formula === 'fixed' ? '' : `<div class="settings-field" style="margin-bottom:0.6rem;"><label>Linear feet</label><input type="number" step="0.5" min="0" value="${t.linearFt || ''}" ${t.customLinear ? 'disabled placeholder="entered per job"' : ''} onchange="ptUpdateField('${t.id}','linearFt', this.value)"></div>
   <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); margin-bottom:0.6rem;">
     <input type="checkbox" ${t.customLinear ? 'checked' : ''} onchange="ptUpdateField('${t.id}','customLinear', this.checked)">
     Footage is entered per job (not a fixed size)
-  </label>
+  </label>`}
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pattern / design <span style="font-weight:400;">(optional — production info only, doesn't affect the math)</span></label>
     <input type="text" list="pt-pattern-suggestions" value="${invAttr(t.pattern || '')}" placeholder="e.g. 3-color spiral, ombré" onchange="ptUpdateField('${t.id}','pattern', this.value)">
     <datalist id="pt-pattern-suggestions">${ptPatternSuggestions().map(p => `<option value="${invAttr(p)}">`).join('')}</datalist>
   </div>
   ${ptFormulaEditorHtml(t)}
-  ${ptTopperEditorHtml(t)}
+  ${t.formula === 'fixed' ? '' : ptTopperEditorHtml(t)}
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Build instructions</label><textarea rows="3" onchange="ptUpdateField('${t.id}','buildInstructions', this.value)">${psEscape(t.buildInstructions)}</textarea></div>
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Equipment list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','equipmentList', this.value)">${psEscape(t.equipmentList.join('\n'))}</textarea></div>
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pack list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','packList', this.value)">${psEscape(t.packList.join('\n'))}</textarea></div>
@@ -8476,6 +8513,19 @@ function ptUpdateRateField(templateId, size, value) {
   ptRenderList();
   ptSaveLibrary();
 }
+// One balloon size's count in a 'fixed'-formula template — blank deletes that size's entry
+// entirely (meaning "this template doesn't use this size," same convention as ptUpdateRateField's
+// own blank-means-omit rule), a whole number otherwise. No "customized" flag to set here — 'fixed'
+// has no shared/category default to diverge from the way freeform's rates do.
+function ptUpdateFixedCountField(templateId, size, value) {
+  const t = RECIPES.find(r => r.id === templateId);
+  if (!t) return;
+  if (!t.fixedCounts || typeof t.fixedCounts !== 'object') t.fixedCounts = {};
+  if (value === '') delete t.fixedCounts[size];
+  else t.fixedCounts[size] = Math.max(0, Math.round(parseFloat(value)) || 0);
+  ptRenderList();
+  ptSaveLibrary();
+}
 
 // A template task's own row editor (see ptTaskPhaseEditorHtml) — one row per task, each mutated
 // in place by its own stable id. Deliberately NOT a "one big textarea, rebuild the whole list on
@@ -8516,6 +8566,7 @@ function ptSetupMissingReason(t) {
   if (!t.display || !t.display.trim() || t.display.trim() === 'New template') return 'name';
   if (!PS_FORMULA_KINDS.some(k => k.value === t.formula)) return 'formula';
   if (t.formula === 'freeform' && !SIZE_ORDER.some(size => Number.isFinite((t.rates || {})[size]))) return 'rate';
+  if (t.formula === 'fixed' && !SIZE_ORDER.some(size => Number.isFinite((t.fixedCounts || {})[size]) && (t.fixedCounts || {})[size] > 0)) return 'rate';
   return null;
 }
 function ptCanCompleteSetup(t) {
@@ -8531,7 +8582,7 @@ function ptCompleteSetup(id) {
   const reason = ptSetupMissingReason(t);
   if (reason === 'name') { alert('Give this template a real name before completing setup.'); return; }
   if (reason === 'formula') { alert('Choose a calculation method (Formula) before completing setup.'); return; }
-  if (reason === 'rate') { alert('Enter at least one balloon-per-ft rate before completing setup.'); return; }
+  if (reason === 'rate') { alert(t.formula === 'fixed' ? 'Enter at least one balloon count before completing setup.' : 'Enter at least one balloon-per-ft rate before completing setup.'); return; }
   if (!confirm(`Mark "${t.display}" as ready to use? It will become selectable for new production items and imports.`)) return;
   delete t.needsSetup;
   ptRenderList();
