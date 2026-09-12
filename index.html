@@ -6643,13 +6643,32 @@ function psTaskFlagClarification(jobId, taskId) {
   if (!trimmed) return;
   psAddFeedback(jobId, 'task', taskId, 'needsClarification', trimmed);
 }
+// The warning-triangle badge next to a task with an open clarification used to be a plain, static
+// icon — only a hover title tooltip, nothing to click. Reported directly ("nothing happens when I
+// click"). There was also, once you look, no OTHER way to ever see or resolve it again after its
+// one-time Home-screen notification (psRenderStaffNotifBanner) got dismissed — psResolveFeedback
+// already existed but nothing on this screen ever called it for a task-scoped entry. Clicking the
+// badge now surfaces the actual open question(s) and offers to resolve it right there.
+function psTaskClarificationClick(jobId, taskId) {
+  const job = psFindJob(jobId);
+  if (!job || psJobArchived(job)) return;
+  const openClar = psOpenClarifications(job, 'task', taskId);
+  if (!openClar.length) return;
+  const summary = openClar.map(c => `"${c.text}" — asked by ${c.who || 'someone'}`).join('\n\n');
+  if (!confirm(`${summary}\n\nMark resolved?`)) return;
+  const note = prompt('Optional: add a short answer/resolution note') || '';
+  openClar.forEach(c => psResolveFeedback(jobId, c.id, note));
+}
 function psTaskRowHtml(job, task, itemLabel) {
   const readOnly = psJobArchived(job);
   const done = task.status === 'done';
   const held = task.status === 'hold';
   const openClar = psOpenClarifications(job, 'task', task.id);
+  const clarTitle = psEscape(openClar.map(c => c.text).join(' / '));
   const clarBadge = openClar.length
-    ? `<i class="fa-solid fa-triangle-exclamation" style="color:var(--warning-text); flex-shrink:0;" title="${psEscape(openClar.map(c => c.text).join(' / '))}"></i>`
+    ? (readOnly
+      ? `<i class="fa-solid fa-triangle-exclamation" style="color:var(--warning-text); flex-shrink:0;" title="${clarTitle}"></i>`
+      : `<button class="icon-btn no-print" style="width:auto; padding:2px 4px; flex-shrink:0; background:none; border:none;" title="${clarTitle} — click to view/resolve" onclick="psTaskClarificationClick('${job.id}','${task.id}')"><i class="fa-solid fa-triangle-exclamation" style="color:var(--warning-text);"></i></button>`)
     : '';
   return `<div class="ps-check-row${done ? ' done' : ''}"${held ? ' style="opacity:0.55;"' : ''}>
     <input type="checkbox" ${done ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psSetTaskStatus('${job.id}','${task.id}', this.checked ? 'done' : 'ready')">
