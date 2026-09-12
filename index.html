@@ -3551,6 +3551,31 @@ function psGoToProductionTemplate(templateId) {
   ptRenderShell();
 }
 
+// The direct fix for a line stuck on "Needs Configuration" because its FROZEN customRecipe
+// predates a template fix that would have solved it — e.g. a template that's since been switched
+// to the Fixed count formula (real per-size counts, no footage needed at all), while this
+// already-added item is still carrying its old, incomplete footage-based snapshot from before
+// that change. "Fix template" alone can't reach this: psSnapshotTemplate deliberately freezes a
+// full copy at add-time so an ordinary template edit never retroactively changes an already-built
+// job (see its own comment) — which is exactly right for a job whose math was already correct and
+// built, but leaves a NEVER-successfully-computed item with no way back except re-adding it from
+// scratch. This re-snapshots the CURRENT live template onto the line in place — only customRecipe
+// changes; every job-specific override that already lives directly on the line (colors,
+// colorDist/colorCounts, sizeOverride, customLinear, topper rows, qty, design, location,
+// modifiers, itemLabel) is untouched, since none of those are stored inside customRecipe at all.
+function psResyncItemToTemplate(jobId, productionItemId) {
+  const job = psFindJob(jobId);
+  if (!job || psJobArchived(job)) return;
+  const line = (job.productionItems || []).find(l => l.id === productionItemId);
+  if (!line) return;
+  const liveRecipe = RECIPES.find(r => r.id === line.recipeId);
+  if (!liveRecipe) { alert("This template no longer exists in your Production Templates — it may have been deleted, so there's nothing to sync this item to."); return; }
+  if (!confirm(`Update this item to match the CURRENT "${liveRecipe.display}" template settings (formula, rates/counts, topper)?\n\nColors, quantity, and any other edits already made to this specific item stay exactly as they are — only the underlying template settings refresh.`)) return;
+  line.customRecipe = psSnapshotTemplate(liveRecipe);
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+
 // Deep-copies a production template (RECIPES entry) into a self-contained snapshot suitable
 // for embedding on a job item as `line.customRecipe` — baking in psTopperFt's resolved value
 // and, for classic-formula templates, the current FORMULAS.classicPerFt, so this specific job
@@ -12269,7 +12294,10 @@ function psReviewPullRowHtml(job, row, readOnly) {
         ${rpBadge('Needs Configuration')}
       </div>
       <div style="font-size:12px; color:var(--warning-text); margin-top:4px;">${psEscape(psInvalidFormulaMessage(row.reason))} This will recompute automatically once fixed.</div>
-      ${row.templateId ? `<div class="rp-actions"><button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psGoToProductionTemplate('${row.templateId}')">Fix template</button></div>` : ''}
+      ${row.templateId ? `<div class="rp-actions">
+        <button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psGoToProductionTemplate('${row.templateId}')">Fix template</button>
+        <button class="icon-btn" style="width:auto; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="psResyncItemToTemplate('${job.id}','${row.productionItemId}')" title="If the template's own settings were already fixed since this item was added, this brings THIS item up to date with them">Use current template settings</button>
+      </div>` : ''}
     </div>`;
   }
 
