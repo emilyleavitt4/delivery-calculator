@@ -8468,7 +8468,7 @@ function ptFormulaEditorHtml(t) {
     const hasAnyRate = SIZE_ORDER.some(size => Number.isFinite(rates[size]));
     html += `<div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Balloons per ft, per size <span style="font-weight:400;">(blank = this template doesn't use that size)</span></div>
     <div class="row" style="flex-wrap:wrap; gap:8px; margin-bottom:0.6rem;">
-      ${SIZE_ORDER.map(size => `<div class="settings-field" style="margin-bottom:0; min-width:70px;"><label>${psEscape(size)}</label><input type="number" step="0.1" min="0" value="${Number.isFinite(rates[size]) ? rates[size] : ''}" onchange="ptUpdateRateField('${t.id}','${size}', this.value)"></div>`).join('')}
+      ${SIZE_ORDER.map(size => `<div class="settings-field" style="margin-bottom:0; min-width:70px;"><label>${psEscape(size)}</label><input type="number" step="0.1" min="0" value="${Number.isFinite(rates[size]) ? rates[size] : ''}" onchange="ptUpdateRateField('${t.id}','${psJsKeyAttr(size)}', this.value)"></div>`).join('')}
     </div>
     ${!hasAnyRate ? `<div style="font-size:11px; color:var(--warning-text); background:var(--warning-bg); padding:6px 8px; border-radius:var(--radius-sm); margin:-0.3rem 0 0.6rem;"><i class="fa-solid fa-triangle-exclamation"></i> No rate entered for any size yet — this template can't compute a balloon count until at least one is set.</div>` : ''}`;
   } else if (t.formula === 'fixed') {
@@ -8480,7 +8480,7 @@ function ptFormulaEditorHtml(t) {
     const hasAnyCount = SIZE_ORDER.some(size => Number.isFinite(counts[size]) && counts[size] > 0);
     html += `<div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Balloons per ONE unit, by size <span style="font-weight:400;">(blank = none of that size — multiplied by Quantity when this template is used)</span></div>
     <div class="row" style="flex-wrap:wrap; gap:8px; margin-bottom:0.6rem;">
-      ${SIZE_ORDER.map(size => `<div class="settings-field" style="margin-bottom:0; min-width:70px;"><label>${psEscape(size)}</label><input type="number" step="1" min="0" value="${Number.isFinite(counts[size]) && counts[size] > 0 ? counts[size] : ''}" onchange="ptUpdateFixedCountField('${t.id}','${size}', this.value)"></div>`).join('')}
+      ${SIZE_ORDER.map(size => `<div class="settings-field" style="margin-bottom:0; min-width:70px;"><label>${psEscape(size)}</label><input type="number" step="1" min="0" value="${Number.isFinite(counts[size]) && counts[size] > 0 ? counts[size] : ''}" onchange="ptUpdateFixedCountField('${t.id}','${psJsKeyAttr(size)}', this.value)"></div>`).join('')}
     </div>
     ${!hasAnyCount ? `<div style="font-size:11px; color:var(--warning-text); background:var(--warning-bg); padding:6px 8px; border-radius:var(--radius-sm); margin:-0.3rem 0 0.6rem;"><i class="fa-solid fa-triangle-exclamation"></i> No count entered for any size yet — this template can't compute a balloon count until at least one is set.</div>` : ''}`;
   }
