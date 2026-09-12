@@ -3309,7 +3309,10 @@ async function psImportInvoicePdf(file) {
 // obvious garbage before ever calling the backend; the callable function independently
 // re-validates both server-side and is what actually builds the real fetch URL (see
 // functions/index.js) — this client-side check is not the security boundary.
-const PS_17HATS_URL_RE = /^https:\/\/([a-z0-9-]{1,63})\.17hats\.com\/p#\/i\/([A-Za-z0-9]{6,20})\/?$/;
+// Reported directly: a real invoice link (…/p#/i/ZrQA_cgAXBNa) was rejected as "not a 17hats
+// link" — the token character class only allowed letters and digits, but a genuine 17hats token
+// can contain an underscore (and, by the same URL-safe-token logic, plausibly a hyphen too).
+const PS_17HATS_URL_RE = /^https:\/\/([a-z0-9-]{1,63})\.17hats\.com\/p#\/i\/([A-Za-z0-9_-]{6,20})\/?$/;
 function ps17hatsParseUrl(url) {
   const m = (url || '').trim().match(PS_17HATS_URL_RE);
   return m ? { subdomain: m[1], token: m[2] } : null;

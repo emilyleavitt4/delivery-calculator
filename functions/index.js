@@ -23,7 +23,10 @@ const { normalizeInvoice } = require('./normalize');
 // literal fetch URL. No business is hardcoded here — any 17hats subdomain shape is accepted,
 // matching Balloon Code's intent to support more than one balloon business.
 const SUBDOMAIN_RE = /^[a-z0-9-]{1,63}$/;
-const TOKEN_RE = /^[A-Za-z0-9]{6,20}$/;
+// A real 17hats invoice token can contain an underscore (e.g. ZrQA_cgAXBNa, confirmed against a
+// real invoice link) — the original letters/digits-only class rejected genuine links. Widened to
+// match the client-side check (PS_17HATS_URL_RE in index.html), which must stay in sync with this.
+const TOKEN_RE = /^[A-Za-z0-9_-]{6,20}$/;
 const FETCH_TIMEOUT_MS = 10000;
 
 exports.fetch17hatsInvoice = onCall(async (request) => {
