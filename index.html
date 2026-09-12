@@ -6618,6 +6618,99 @@ function psTaskRowHtml(job, task, itemLabel) {
     ${!done ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psSetTaskStatus('${job.id}','${task.id}', '${held ? 'ready' : 'hold'}')">${held ? 'Resume' : 'Hold'}</button>` : ''}`}
   </div>`;
 }
+// ─── Resolving a "general note" color to real Specialty Latex / Foil inventory, from Prep ───
+//
+// A color marked "general note" during Import Review (colorGeneralNotes) was, until now, a
+// permanent dead end — irResolveColorToBusinessInventory (the same job.colorResolutions mechanism
+// this uses) only ever existed inside Import Review, so a color that got marked general-note (or
+// simply wasn't offered a real match) at import time had no way to ever become a real, ledger-
+// backed pull without re-importing the whole job. Reported directly: "we just pull it and it
+// doesn't subtract" — checking a general-note task was always meant to be a manual reminder only,
+// by design, but there was no path from there to something that actually does subtract.
+//
+// Resolving removes the color from colorGeneralNotes (so psLineBalloonColors stops excluding it
+// from the requirement loop) and sets job.colorResolutions — the EXACT same {system, itemId, size}
+// shape psStandardLatexRequirement already reads for a business-owned resolution, so this needs no
+// new requirement-computation logic at all, only a new place to set it. psSyncSyntheticPrepTasks
+// then naturally drops the now-stale "pull manually" task on its own (colorGeneralNotes no longer
+// contains this key, so psSyntheticPrepTasksFor's next call simply doesn't regenerate it).
+//
+// Scoped to Specialty Latex and Foil (invGenericItemOptionsHtml's remaining two color-bearing
+// systems — Add-Ons/Framework aren't colors and would never sensibly match a color name) via a
+// typeable search rather than a giant dropdown, matching the Orders picker's own established
+// pattern (invOrderItemSearch/invOrderItemPick) — one shared UX for "search a business item list,
+// resolve to its real id," not a third bespoke picker.
+let psNoteResolverOpen = {}; // { [jobId|lineId|noteKey]: true } — which resolver search boxes are open
+// Recovers the general-note color key a synthetic task represents, or null for any other task —
+// deliberately parsed from the task's own deterministic id (psSyntheticTaskId(lineId,'note:'+key))
+// rather than a stored field, since a plain job.tasks entry never carries `kind` past creation time.
+function psNoteTaskColorKey(line, task) {
+  if (!task.synthetic) return null;
+  const prefix = line.id + ':synthetic:note:';
+  if (!task.id.startsWith(prefix)) return null;
+  return task.id.slice(prefix.length);
+}
+function psNoteResolverKey(jobId, lineId, noteKey) { return jobId + '|' + lineId + '|' + noteKey; }
+function psToggleNoteResolver(jobId, lineId, noteKey) {
+  const key = psNoteResolverKey(jobId, lineId, noteKey);
+  psNoteResolverOpen[key] = !psNoteResolverOpen[key];
+  psRenderProductionJobs();
+}
+function psGeneralNoteResolverHtml(job, line, noteKey) {
+  const key = psNoteResolverKey(job.id, line.id, noteKey);
+  const sanitizedKey = key.replace(/[^a-zA-Z0-9]/g, '-');
+  if (!psNoteResolverOpen[key]) {
+    return `<div class="no-print" style="margin:0 0 6px 26px;"><button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;" onclick="psToggleNoteResolver('${psJsKeyAttr(job.id)}','${psJsKeyAttr(line.id)}','${psJsKeyAttr(noteKey)}')"><i class="fa-solid fa-link"></i> Resolve to Specialty Latex / Foil inventory</button></div>`;
+  }
+  const inputId = 'ps-note-resolve-' + sanitizedKey;
+  return `<div class="no-print" style="margin:0 0 6px 26px; max-width:320px;">
+    <div style="position:relative;">
+      <input type="text" id="${inputId}" placeholder="Search Specialty Latex or Foil…"
+        oninput="psNoteResolverSearch('${psJsKeyAttr(job.id)}','${psJsKeyAttr(line.id)}','${psJsKeyAttr(noteKey)}', this.value)"
+        onfocus="psNoteResolverSearch('${psJsKeyAttr(job.id)}','${psJsKeyAttr(line.id)}','${psJsKeyAttr(noteKey)}', this.value)"
+        onblur="invHideColorSuggestionsSoon('${inputId}')">
+      <div id="${inputId}-suggest" class="inv-color-suggest" style="display:none;"></div>
+    </div>
+    <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; margin-top:4px;" onclick="psToggleNoteResolver('${psJsKeyAttr(job.id)}','${psJsKeyAttr(line.id)}','${psJsKeyAttr(noteKey)}')">Cancel</button>
+  </div>`;
+}
+function psNoteResolverBusinessItems() {
+  const rows = [];
+  ['specialtyLatex', 'foil'].forEach(system => {
+    const sys = invSystemFor(system);
+    (sys.listItems ? sys.listItems() : []).forEach(item => rows.push({ system, item }));
+  });
+  return rows;
+}
+function psNoteResolverSearch(jobId, lineId, noteKey, value) {
+  const key = psNoteResolverKey(jobId, lineId, noteKey);
+  const inputId = 'ps-note-resolve-' + key.replace(/[^a-zA-Z0-9]/g, '-');
+  const container = document.getElementById(inputId + '-suggest');
+  if (!container) return;
+  const q = value.trim().toLowerCase();
+  if (!q) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  const matches = psNoteResolverBusinessItems()
+    .filter(({ system, item }) => invSystemFor(system).displayLabel(item).toLowerCase().includes(q))
+    .slice(0, 8);
+  if (matches.length === 0) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  container.innerHTML = matches.map(({ system, item }) =>
+    `<div class="inv-color-suggest-item" onmousedown="event.preventDefault(); psResolveNoteToBusinessItem('${psJsKeyAttr(jobId)}','${psJsKeyAttr(lineId)}','${psJsKeyAttr(noteKey)}','${system}','${psJsKeyAttr(item.id)}')">${psEscape(invSystemFor(system).displayLabel(item))} <span style="opacity:0.6;">(${psEscape(invSystemFor(system).label)})</span></div>`
+  ).join('');
+  container.style.display = 'block';
+}
+function psResolveNoteToBusinessItem(jobId, lineId, noteKey, system, itemId) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  const line = (job.productionItems || []).find(l => l.id === lineId);
+  if (!line) return;
+  line.colorGeneralNotes = (line.colorGeneralNotes || []).filter(n => n !== noteKey);
+  if (!job.colorResolutions) job.colorResolutions = {};
+  job.colorResolutions[noteKey] = { system, itemId, size: null };
+  psSyncSyntheticPrepTasks(job, line.id, line, psLineRecipe(line));
+  delete psNoteResolverOpen[psNoteResolverKey(jobId, lineId, noteKey)];
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
 // { [jobId|phase]: true|false } — expand state only, never persisted (matches every other
 // in-memory expand/collapse map in this file, e.g. ptExpandedTemplates). No explicit entry means
 // "use the phase's own sensible default" (see psPhaseDefaultExpanded) rather than always
@@ -7109,7 +7202,11 @@ function psPrepSectionHtml(job) {
         html += `<div style="font-size:12px; color:var(--text-secondary); padding:1px 0;">${psEscape(mod.label)}${qtyText}${trackedNote}</div>`;
       });
       html += psPrepItemChecklistHtml(job, rows, readOnly);
-      prepTasks.forEach(t => { html += psTaskRowHtml(job, t, null); });
+      prepTasks.forEach(t => {
+        html += psTaskRowHtml(job, t, null);
+        const noteKey = psNoteTaskColorKey(line, t);
+        if (noteKey && !readOnly) html += psGeneralNoteResolverHtml(job, line, noteKey);
+      });
       html += `</div>`;
       if (!readOnly) html += psItemInventoryExclusionEditorHtml(job, line);
       html += psPrepMissingNoteHtml(job, line, readOnly);
