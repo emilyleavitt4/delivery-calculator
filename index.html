@@ -12239,13 +12239,6 @@ function psReviewPullRows(job) {
       // itself, and never lets anything actually get pulled off a guess (see
       // psPrepConfirmOpenBin, the only path that can turn this into a real confirmed pull).
       const openStatus = sd.openStatus;
-      // Once a real loose count has ever been entered (via a plain Adjust/Receive) or this exact
-      // job/item/size already got one Yes/Missing-N answer (see openBinAlreadyConfirmed below),
-      // looseBalloons stops meaning "never counted" and starts meaning "this many, for real" —
-      // an actual human count must never be overridden by the qualitative status, or "Maybe"
-      // would keep reoffering itself after someone already told the truth. Only a genuinely
-      // never-touched 0 is treated as "uncounted."
-      const looseCounted = !!sd.looseBalloons;
       // A job that already got one real Yes/Missing-N answer about this exact open bin (see
       // psPrepConfirmOpenBin) never gets asked again for the same pull — that bin's contents are
       // already spoken for by that answer, so re-offering "Maybe" here would suggest checking the
@@ -12254,8 +12247,19 @@ function psReviewPullRows(job) {
       // list (see invStandardLatexOutstandingSplit), so a job that changed its mind can ask
       // "Maybe" again fresh; only a still-outstanding confirmation (full or the leftover from a
       // Missing-N partial one) blocks re-asking.
+      //
+      // Reported directly against real data: Fashion White showed "Out of stock" with Open Bin
+      // still set to Partial and a real prior loose count of 13 on file — "it should be a maybe
+      // and record how many are missing, not out of stock." A standing sd.looseBalloons count used
+      // to block "Maybe" here (on the theory that a real human count should never be second-
+      // guessed), but that count is ordinary Inventory data, not a per-job confirmation — an open
+      // bin keeps changing after it's set, so a stale count locking this into "Out of stock"
+      // forever directly contradicts the very rule stated above (ANY non-Empty status earns
+      // "Maybe," no matter the shortfall size). Only psPrepConfirmOpenBin's own per-job answer
+      // (openBinAlreadyConfirmed) is specific and final enough to skip asking again — a general
+      // looseBalloons count no longer is.
       const openBinAlreadyConfirmed = invStandardLatexOutstandingSplit(job.id, row.inventoryItemId, row.size).fromOpenBin > 0;
-      if (!looseCounted && !openBinAlreadyConfirmed && openStatus !== 'Empty') {
+      if (!openBinAlreadyConfirmed && openStatus !== 'Empty') {
         const shortfall = stillNeeded - available;
         return Object.assign({}, row, { alreadyPulled, stillNeeded, available, shortfall, openStatus, status: 'maybeShort' });
       }
