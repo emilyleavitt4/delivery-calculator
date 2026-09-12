@@ -3696,7 +3696,7 @@ function psSyncSyntheticPrepTasks(job, productionItemId, line, recipe) {
 // actually changed something, so once a job is caught up this becomes a no-op comparison on every
 // later render rather than a repeated write. Never touches a completed (read-only) job.
 function psBackfillSyntheticTasksIfNeeded(job) {
-  if (job.status === 'completed') return;
+  if (psJobArchived(job)) return;
   let changed = false;
   (job.productionItems || []).forEach(line => {
     const recipe = psLineRecipe(line);
@@ -3751,7 +3751,7 @@ function psUpdateTaskField(jobId, taskId, field, value) {
   // controls (see psTaskRowHtml/psPhaseSectionHtml's readOnly gating), this is the backstop at
   // the one function that actually changes a task, matching the same defense-in-depth pattern
   // used everywhere else a completed job must not be mutated (e.g. psReviewPullConfirmRow).
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const task = psFindTask(job, taskId);
   if (!task) return;
   if (field === 'priority') task.priority = !!value;
@@ -3828,7 +3828,7 @@ function psAddFeedback(jobId, scope, scopeId, kind, text) {
   const job = psFindJob(jobId);
   // Backstop matching every other completed-job guard added this pass — psFeedbackSectionHtml
   // already hides the add form once a job is Completed.
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const trimmed = (text || '').trim();
   if (!trimmed) return;
   const actor = invResolveActor(); // honest fallback to bare email or 'Unknown' — never invents a person
@@ -3851,7 +3851,7 @@ function psAddFeedback(jobId, scope, scopeId, kind, text) {
 // meaningful for 'needsClarification'; a no-op on any other kind (nothing to resolve).
 function psResolveFeedback(jobId, feedbackId, resolutionNote) {
   const job = psFindJob(jobId);
-  if (job && job.status === 'completed') return;
+  if (job && psJobArchived(job)) return;
   const item = job && (job.feedback || []).find(f => f.id === feedbackId);
   if (!item || item.kind !== 'needsClarification') return;
   const actor = invResolveActor();
@@ -3865,7 +3865,7 @@ function psResolveFeedback(jobId, feedbackId, resolutionNote) {
 // A small safety valve for "resolved by mistake" — reopens exactly like it was never resolved.
 function psReopenFeedback(jobId, feedbackId) {
   const job = psFindJob(jobId);
-  if (job && job.status === 'completed') return;
+  if (job && psJobArchived(job)) return;
   const item = job && (job.feedback || []).find(f => f.id === feedbackId);
   if (!item || item.kind !== 'needsClarification') return;
   item.status = 'open';
@@ -3877,7 +3877,7 @@ function psReopenFeedback(jobId, feedbackId) {
 }
 function psDeleteFeedback(jobId, feedbackId) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const item = (job.feedback || []).find(f => f.id === feedbackId);
   if (!item) return;
   if (!confirm('Delete this note? This can\'t be undone.')) return;
@@ -3953,7 +3953,7 @@ function psFeedbackSectionHtml(job, scope, scopeId, formKey, title, kinds) {
   // A Completed job keeps full feedback/clarification history visible but stops accepting new
   // entries or resolve/reopen actions -- the same read-only convention psReviewPullSectionHtml
   // already uses for a finished job.
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   const entries = psJobFeedback(job, scope, scopeId);
   let html = `<div class="section-label">${psEscape(title)}</div>`;
   if (entries.length === 0) {
@@ -3977,19 +3977,28 @@ function psFeedbackSectionHtml(job, scope, scopeId, formKey, title, kinds) {
 // logistics, shown in Event Schedule & Staffing) — plus a shared status. Jobs persist in
 // Firestore so they build up into a real, ongoing schedule rather than resetting each session.
 
+// Production's own build-progress label — purely informational (see psCycleStatus). Cycling it
+// never archives, locks, or hides the job from anywhere; "Completed" here just means "the build
+// checklist is done," a genuinely different fact from psJobArchived below.
 const STATUS_ORDER = ['not_started', 'in_progress', 'waiting', 'completed'];
 const STATUS_LABELS = { not_started: 'Not Started', in_progress: 'In Progress', waiting: 'Waiting', completed: 'Completed' };
 
 // Staffing tracks a different thing than Production — whether the crew is locked in yet,
-// not build progress — so it gets its own, simpler two-state status.
-// 'tentative' and 'complete' added per explicit request — a job that's still tentative (client
-// hasn't fully confirmed) or fully done needs its own state here, not just Open/Scheduled.
-// 'complete' is the one value with a real side effect (see psCycleStaffStatus): it also marks
-// job.status = 'completed', which is what actually archives the job into the collapsed
-// "Completed" section already shared by both Production and Staffing — "mark complete" from
-// either screen has the same one real effect, not two independent completion concepts.
+// not build progress — so it gets its own status. 'tentative' and 'complete' added per explicit
+// request — a job that's still tentative (client hasn't fully confirmed) or fully done needs its
+// own state here, not just Open/Scheduled.
 const STAFF_STATUS_ORDER = ['open', 'tentative', 'scheduled', 'complete'];
 const STAFF_STATUS_LABELS = { open: 'Open Availability', tentative: 'Tentative', scheduled: 'Scheduled', complete: 'Complete' };
+// The ONE real "is this whole job done and archived everywhere" signal — deliberately NOT
+// job.status (Production's own build-progress label). Reported directly: checking things off on
+// the Production checklist until job.status hit 'completed' was archiving the job off Staffing's
+// schedule too, even though the actual event/staffing work often isn't done yet when the building
+// is. Now driven entirely by job.staffingStatus reaching 'complete' (via Staffing's own status
+// button, psCycleStaffStatus) — the single choke point read-only gates and the "Completed"
+// collapsed section (Production and Staffing both) already check throughout this file.
+function psJobArchived(job) {
+  return !!job && job.staffingStatus === 'complete';
+}
 
 let JOBS = [];
 let psExpandedProduction = null;
@@ -4228,7 +4237,7 @@ function psAddLinkAttachment(jobId, context, url, title, productionItemId) {
   const job = psFindJob(jobId);
   // Backstop matching every other completed-job guard added this pass — psAttachmentsSectionHtml
   // already hides the add controls once a job is Completed.
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const trimmedUrl = (url || '').trim();
   if (!trimmedUrl) return;
   const fullUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmedUrl) ? trimmedUrl : 'https://' + trimmedUrl;
@@ -4255,7 +4264,7 @@ async function psHandleAttachmentUpload(jobId, context, fileInput, productionIte
   const file = fileInput.files[0];
   if (!file) return;
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const statusElId = 'att-upload-status-' + jobId + '-' + (productionItemId || context);
   const statusEl = document.getElementById(statusElId);
   if (statusEl) { statusEl.textContent = 'Uploading…'; statusEl.style.display = 'block'; statusEl.className = ''; }
@@ -4291,7 +4300,7 @@ async function psHandleAttachmentUpload(jobId, context, fileInput, productionIte
 
 function psUpdateAttachmentField(jobId, attId, field, value) {
   const job = psFindJob(jobId);
-  if (job && job.status === 'completed') return;
+  if (job && psJobArchived(job)) return;
   const att = job && (job.attachments || []).find(a => a.id === attId);
   if (!att) return;
   att[field] = value;
@@ -4299,7 +4308,7 @@ function psUpdateAttachmentField(jobId, attId, field, value) {
 }
 function psToggleAttachmentLocation(jobId, attId, loc, checked) {
   const job = psFindJob(jobId);
-  if (job && job.status === 'completed') return;
+  if (job && psJobArchived(job)) return;
   const att = job && (job.attachments || []).find(a => a.id === attId);
   if (!att) return;
   att.displayLocations = att.displayLocations || [];
@@ -4309,7 +4318,7 @@ function psToggleAttachmentLocation(jobId, attId, loc, checked) {
 }
 function psDeleteAttachment(jobId, attId) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const att = (job.attachments || []).find(a => a.id === attId);
   if (!att) return;
   if (!confirm(`Delete "${att.title || att.fileName}"? This can't be undone.`)) return;
@@ -4325,7 +4334,7 @@ function psDeleteAttachment(jobId, attId) {
 // unlock already used everywhere else in the app for sensitive content (there's no separate
 // per-user role system here to hook into instead).
 function psAttachmentsSectionHtml(job, context) {
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   const all = job.attachments || [];
   // Item-scoped references (see psItemReferenceHtml) live with their decor item, never here too —
   // otherwise the same reference photo would double-appear in the generic job/event list.
@@ -4434,7 +4443,7 @@ function psSubmitItemRefLink(jobId, lineId) {
   psAddLinkAttachment(jobId, 'production', urlEl.value, titleEl ? titleEl.value : '', lineId);
 }
 function psItemReferenceHtml(job, line) {
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   const refs = (job.attachments || []).filter(a => a.productionItemId === line.id);
   const first = refs[0];
   let html = `<div class="no-print" style="flex-shrink:0; text-align:right;">`;
@@ -4481,7 +4490,7 @@ function psItemReferenceHtml(job, line) {
 // form); Production's own attachments block has no equivalent free-text notes field today, so
 // context === 'production' renders attachments only.
 function psNotesAttachmentsSectionHtml(job, context) {
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   let html = '';
   if (context === 'event') {
     const s = job.staffing || {};
@@ -4546,7 +4555,7 @@ function psRenderAllJobViews() {
 function wqTaskRows(statusFilter) {
   const rows = [];
   JOBS.forEach(job => {
-    if (job.status === 'completed') return;
+    if (psJobArchived(job)) return;
     (job.tasks || []).forEach(task => {
       if (task.status !== statusFilter) return;
       const line = (job.productionItems || []).find(l => l.id === task.productionItemId);
@@ -4707,6 +4716,13 @@ function wqRenderQueue() {
   root.innerHTML = html;
 }
 
+// Reported directly: marking Production's own checklist "Completed" was archiving the job off
+// Staffing's schedule too — the two are genuinely separate facts (production/build work can
+// finish days before the actual event, which still needs to show up for staffing until IT is
+// done) and were wrongly sharing one field. job.status is now PURELY Production's own informational
+// label (Not Started / In Progress / Waiting / Completed) — cycling it never locks the job or
+// removes it from anything. See psJobArchived for the one real "is this whole job done everywhere"
+// signal, which now lives entirely on job.staffingStatus instead.
 function psCycleStatus(jobId) {
   const job = psFindJob(jobId);
   if (!job) return;
@@ -4714,21 +4730,15 @@ function psCycleStatus(jobId) {
   psSaveJob(job);
 }
 
-// 'complete' and job.status = 'completed' are kept in lockstep both ways: landing on 'complete'
-// here archives the job (see the "Completed" collapsed section shared by Production/Staffing),
-// and cycling back OFF 'complete' un-archives it again — the same symmetric un-archive Production's
-// own status cycle already gives for free, just reachable from this button too. `current` treats
-// an already-completed job (however it got that way — including from Production's own status
-// button) as sitting at 'complete' regardless of its raw staffingStatus value, so the cycle always
-// continues from what psStatusBtnHtml is actually showing rather than some stale prior value.
+// Cycles job.staffingStatus alone now — no more syncing job.status in either direction (see
+// psCycleStatus's own comment on why the two were split apart). Landing on 'complete' is what
+// actually archives the job (psJobArchived) and locks it read-only everywhere; cycling back off
+// 'complete' un-archives it, with no effect on Production's own separate status label either way.
 function psCycleStaffStatus(jobId) {
   const job = psFindJob(jobId);
   if (!job) return;
-  const current = job.status === 'completed' ? 'complete' : (job.staffingStatus || 'open');
-  const next = STAFF_STATUS_ORDER[(STAFF_STATUS_ORDER.indexOf(current) + 1) % STAFF_STATUS_ORDER.length];
-  job.staffingStatus = next;
-  if (next === 'complete') job.status = 'completed';
-  else if (current === 'complete') job.status = 'not_started';
+  const current = job.staffingStatus || 'open';
+  job.staffingStatus = STAFF_STATUS_ORDER[(STAFF_STATUS_ORDER.indexOf(current) + 1) % STAFF_STATUS_ORDER.length];
   psSaveJob(job);
 }
 
@@ -4766,14 +4776,14 @@ function psUpdateJobField(jobId, field, value) {
   const job = psFindJob(jobId);
   // Backstop matching every other completed-job guard added this pass — both Production's and
   // Staffing's own UI already hide the editable fields that call this once a job is Completed.
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   job[field] = value;
   psSaveJob(job);
 }
 
 function psUpdateStaffingField(jobId, field, value) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   if (!job.staffing) job.staffing = {};
   job.staffing[field] = value;
   psSaveJob(job);
@@ -4781,7 +4791,7 @@ function psUpdateStaffingField(jobId, field, value) {
 
 function psToggleRentalStatus(jobId, itemId, field, checked) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed' || !job.rentalItems) return;
+  if (!job || psJobArchived(job) || !job.rentalItems) return;
   const item = job.rentalItems.find(i => i.id === itemId);
   if (!item) return;
   item[field] = checked;
@@ -5863,7 +5873,7 @@ function psStatusBtnHtml(job, view) {
     // An explicitly completed/archived job always wins, ahead of the derived Short/Overstaffed/
     // Fully-staffed compatibility path below — a job that's done doesn't need its staffing gap
     // status recomputed and shown instead, that would just look like it un-completed itself.
-    if (job.status === 'completed') {
+    if (psJobArchived(job)) {
       return `<button class="ps-status-btn ps-staffstatus-complete" onclick="event.stopPropagation(); psCycleStaffStatus('${job.id}')">${STAFF_STATUS_LABELS.complete}</button>`;
     }
     // Compatibility path: once a real staffing occurrence is configured (peopleNeeded > 0), the
@@ -5982,8 +5992,8 @@ function psRenderProductionJobs() {
   const jobs = psSortedJobs();
   if (jobs.length === 0) { container.innerHTML = ''; empty.style.display = 'block'; return; }
   empty.style.display = 'none';
-  const activeJobs = jobs.filter(j => j.status !== 'completed');
-  const completedJobs = jobs.filter(j => j.status === 'completed');
+  const activeJobs = jobs.filter(j => !psJobArchived(j));
+  const completedJobs = jobs.filter(j => psJobArchived(j));
   const cardHtml = job => {
     const expanded = psExpandedProduction === job.id;
     const body = expanded ? `<div class="ps-job-body">${psProductionBodyHtml(job)}</div>` : '';
@@ -6437,7 +6447,7 @@ function psColorPickerHtml(key, draft) {
 let psEditingItemPhase = null;
 function psStartEditItem(jobId, idx, phase) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const line = job.productionItems[idx];
   const key = psColorDraftKey(jobId, idx);
   psColorDraftStore[key] = [...line.colors];
@@ -6463,7 +6473,7 @@ function psCancelEditItem() {
 }
 function psSaveEditItem(jobId, idx) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const line = job.productionItems[idx];
   const r = psLineRecipe(line);
   const key = psColorDraftKey(jobId, idx);
@@ -6602,7 +6612,7 @@ function psTaskFlagClarification(jobId, taskId) {
   psAddFeedback(jobId, 'task', taskId, 'needsClarification', trimmed);
 }
 function psTaskRowHtml(job, task, itemLabel) {
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   const done = task.status === 'done';
   const held = task.status === 'hold';
   const openClar = psOpenClarifications(job, 'task', task.id);
@@ -6860,7 +6870,7 @@ function psItemProgressBadgeHtml(job, productionItemId) {
 // qty itself is edited (see psSaveEditItem), so this can never silently exceed what was booked.
 function psSetCompletedQty(jobId, idx, value) {
   const job = psFindJob(jobId);
-  if (job && job.status === 'completed') return; // same completed-job backstop as psUpdateTaskField
+  if (job && psJobArchived(job)) return; // same completed-job backstop as psUpdateTaskField
   const line = job && job.productionItems[idx];
   if (!line) return;
   const bookedQty = Math.max(1, Math.round(line.qty) || 1);
@@ -6873,7 +6883,7 @@ function psSetCompletedQty(jobId, idx, value) {
 // item gets the "N of M" stepper, matching the exact wording used everywhere else this progress
 // is shown (psItemProgressBadgeHtml).
 function psCompletedQtyControlHtml(job, idx, line) {
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   const bookedQty = Math.max(1, Math.round(line.qty) || 1);
   const completed = Math.max(0, Math.min(bookedQty, line.completedQty || 0));
   if (bookedQty <= 1) {
@@ -6964,7 +6974,7 @@ function psPrepRowDetailHtml(row) {
 // for this same job/item/size.
 async function psPrepConfirmOpenBin(jobId, rowKey, usedAmount) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed' || !(usedAmount >= 0)) return;
+  if (!job || psJobArchived(job) || !(usedAmount >= 0)) return;
   const row = psReviewPullRows(job).find(r => r.key === rowKey);
   if (!row || row.kind !== 'item') return;
   const busyKey = jobId + '|' + rowKey;
@@ -7125,7 +7135,7 @@ function psPrepMissingNoteHtml(job, line, readOnly) {
   return html;
 }
 function psPrepSectionHtml(job) {
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   const expanded = psPhaseExpanded(job.id, 'prep');
   const info = psPrepStatusInfo(job);
   const hasItems = job.productionItems.length > 0;
@@ -7413,7 +7423,7 @@ function psItemFeedbackTriggersHtml(job, line, readOnly) {
   return html;
 }
 function psBuildSectionHtml(job) {
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   const expanded = psPhaseExpanded(job.id, 'build');
   const info = psBuildStatusInfo(job);
   const hasItems = job.productionItems.length > 0;
@@ -7445,8 +7455,8 @@ function psProductionBodyHtml(job) {
   // notes) but must never accept new operational mutation — caught during the Batch 2 regression
   // pass: this whole body had no such gate at all, unlike every other completed-job-aware section
   // added this session (Review & Pull, Feedback, Attachments, Staffing). Threaded through as a
-  // plain local rather than re-deriving job.status === 'completed' at every call site below.
-  const readOnly = job.status === 'completed';
+  // plain local rather than re-deriving psJobArchived(job) at every call site below.
+  const readOnly = psJobArchived(job);
   psBackfillSyntheticTasksIfNeeded(job);
   let html = '';
 
@@ -7543,7 +7553,7 @@ function psItemFieldsChanged(jobId) {
 
 function psAddItemToJob(jobId) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   // psItemOptionsHtml already excludes needsSetup templates from this dropdown's options — this
   // is the same independent-guard pattern as psApplyReviewDraftToEvent, not trusting the UI alone.
   const recipe = psReadyRecipes().find(r => r.id === document.getElementById('pi-item-' + jobId).value);
@@ -7573,7 +7583,7 @@ function psAddItemToJob(jobId) {
 
 function psRemoveItemFromJob(jobId, idx) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const removed = job.productionItems[idx];
   job.productionItems.splice(idx, 1);
   // Drops every task instance for this line — including any synthetic Prep tasks (topper/pull
@@ -7585,7 +7595,7 @@ function psRemoveItemFromJob(jobId, idx) {
 
 function psUpdateItemNotes(jobId, idx, value) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   job.productionItems[idx].notes = value;
   psSaveJob(job);
 }
@@ -7604,7 +7614,7 @@ function psUpdateItemNotes(jobId, idx, value) {
 function psNewModifierId() { return 'mod_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 function psAddModifier(jobId, idx) {
   const job = psFindJob(jobId);
-  if (job && job.status === 'completed') return;
+  if (job && psJobArchived(job)) return;
   const line = job && job.productionItems[idx];
   if (!line) return;
   if (!line.modifiers) line.modifiers = [];
@@ -7618,7 +7628,7 @@ function psFindModifier(job, idx, modId) {
 }
 function psUpdateModifierField(jobId, idx, modId, field, value) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const mod = psFindModifier(job, idx, modId);
   if (!mod) return;
   if (field === 'qty') mod.qty = parseFloat(value) || 0;
@@ -7638,7 +7648,7 @@ function psParseInventoryRefValue(value) {
 }
 function psSetModifierInventoryRef(jobId, idx, modId, value) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const mod = psFindModifier(job, idx, modId);
   if (!mod) return;
   mod.inventoryRef = psParseInventoryRefValue(value);
@@ -7647,7 +7657,7 @@ function psSetModifierInventoryRef(jobId, idx, modId, value) {
 }
 function psRemoveModifier(jobId, idx, modId) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const line = job.productionItems[idx];
   if (!line) return;
   line.modifiers = (line.modifiers || []).filter(m => m.id !== modId);
@@ -11713,7 +11723,7 @@ function psComputeJobRequirements(job) {
 function psComputeInventoryRequirements() {
   const requirements = [];
   JOBS.forEach(job => {
-    if (job.status === 'completed') return; // matches Production/Staffing's own definition of "no longer upcoming"
+    if (psJobArchived(job)) return; // matches Production/Staffing's own definition of "no longer upcoming"
     requirements.push(...psComputeJobRequirements(job));
   });
   return requirements;
@@ -12053,7 +12063,7 @@ function psReviewPullAlwaysMatch(jobId, colorName, colorId) {
 function psToggleInventoryExclusion(jobId, requirementKey, excluded) {
   if (!invAdminUnlocked) return;
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   if (!job.inventoryExclusions) job.inventoryExclusions = {};
   if (excluded) job.inventoryExclusions[requirementKey] = true;
   else delete job.inventoryExclusions[requirementKey];
@@ -12065,7 +12075,7 @@ function psToggleInventoryExclusion(jobId, requirementKey, excluded) {
 function psToggleItemInventoryExclusion(jobId, productionItemId, excluded) {
   if (!invAdminUnlocked) return;
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   if (!job.itemInventoryExclusions) job.itemInventoryExclusions = {};
   if (excluded) job.itemInventoryExclusions[productionItemId] = true;
   else delete job.itemInventoryExclusions[productionItemId];
@@ -12077,7 +12087,7 @@ function psToggleItemInventoryExclusion(jobId, productionItemId, excluded) {
 // ever lists already-RESOLVED requirements (a real inventoryItemId) — there's nothing to exclude
 // about an unresolved color or a broken formula, those are decisions, not requirements yet.
 function psItemInventoryExclusionEditorHtml(job, line) {
-  if (!invAdminUnlocked || job.status === 'completed') return '';
+  if (!invAdminUnlocked || psJobArchived(job)) return '';
   const reqs = psComputeJobRequirements(job).filter(r => r.productionItemId === line.id && r.inventoryItemId);
   if (reqs.length === 0) return '';
   const allExcluded = !!(job.itemInventoryExclusions && job.itemInventoryExclusions[line.id]);
@@ -12105,7 +12115,7 @@ async function psReviewPullConfirmRow(jobId, rowKey, qty) {
   // Completed jobs are read-only here — see psReviewPullSectionHtml, which never renders a pull
   // button once a job is Completed. This is the backstop for that rule at the one point that
   // actually moves inventory, so it holds even if something else ever calls this directly.
-  if (!job || job.status === 'completed' || !(qty > 0)) return;
+  if (!job || psJobArchived(job) || !(qty > 0)) return;
   const row = psReviewPullRows(job).find(r => r.key === rowKey);
   if (!row || row.kind !== 'item') return;
   const busyKey = jobId + '|' + rowKey;
@@ -12160,7 +12170,7 @@ function psPrepCheckPull(jobId, rowKey) {
 // to account for there.
 async function psPrepReturnPull(jobId, rowKey) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const row = psReviewPullRows(job).find(r => r.key === rowKey);
   if (!row || row.kind !== 'item' || !(row.alreadyPulled > 0)) return;
   const amount = row.alreadyPulled;
@@ -12194,7 +12204,7 @@ async function psPrepReturnPull(jobId, rowKey) {
 // already supports multiple entries per transaction) rather than one call per row.
 async function psReviewPullConfirmAllReady(jobId) {
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return; // same backstop as psReviewPullConfirmRow
+  if (!job || psJobArchived(job)) return; // same backstop as psReviewPullConfirmRow
   const rows = psReviewPullRows(job).filter(r => r.status === 'ready');
   if (rows.length === 0) return;
   const busyKey = jobId + '|__all__';
@@ -22600,8 +22610,8 @@ function psRenderStaffingJobs() {
   const jobs = psSortedJobs();
   if (jobs.length === 0) { container.innerHTML = ''; empty.style.display = 'block'; return; }
   empty.style.display = 'none';
-  const activeJobs = jobs.filter(j => j.status !== 'completed');
-  const completedJobs = jobs.filter(j => j.status === 'completed');
+  const activeJobs = jobs.filter(j => !psJobArchived(j));
+  const completedJobs = jobs.filter(j => psJobArchived(j));
   const cardHtml = job => {
     const expanded = psExpandedStaffing === job.id;
     const body = expanded ? `<div class="ps-job-body">${psStaffingBodyHtml(job)}</div>` : '';
@@ -22767,7 +22777,7 @@ function psOccSetPeopleNeeded(jobId, type, value) {
   // Backstop for the same completed-job rule the render side already enforces (psOccCardHtml
   // hides these controls once a job is Completed) — caught during the Batch 2 regression pass,
   // matching every other completed-job guard added this pass.
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const occ = psOccEnsure(job, type);
   occ.peopleNeeded = Math.max(0, Math.round(parseFloat(value)) || 0);
   psSaveJob(job);
@@ -22776,7 +22786,7 @@ function psOccSetPeopleNeeded(jobId, type, value) {
 function psOccSetOverride(jobId, type, field, value) {
   if (!invAdminUnlocked) return;
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const occ = psOccEnsure(job, type);
   occ[field] = (value || '').trim() || null;
   psSaveJob(job);
@@ -22790,7 +22800,7 @@ function psOccToggleMyAvailability(jobId, type) {
   const email = psMyEmail();
   if (!email) { alert("Sign in to mark yourself available."); return; }
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed') return;
+  if (!job || psJobArchived(job)) return;
   const occ = psOccEnsure(job, type);
   if (occ.available[email]) delete occ.available[email];
   else occ.available[email] = { at: Date.now() };
@@ -22806,7 +22816,7 @@ function psOccToggleMyAvailability(jobId, type) {
 function psOccSetScheduled(jobId, type, email, scheduled) {
   if (!invAdminUnlocked) return;
   const job = psFindJob(jobId);
-  if (!job || job.status === 'completed' || !email) return;
+  if (!job || psJobArchived(job) || !email) return;
   const occ = psOccEnsure(job, type);
   const key = email.toLowerCase();
   const wasScheduled = !!occ.scheduled[key];
@@ -22934,7 +22944,7 @@ function psOccCardHtml(job, type) {
   const occ = psOccOf(job, type);
   const { date, time } = psOccDateTime(job, type);
   const counts = psOccCounts(job, type);
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   const myEmail = psMyEmail();
   const iAmAvailable = !!(myEmail && occ.available[myEmail]);
 
@@ -23022,7 +23032,7 @@ function psStaffOccurrencesHtml(job) {
 function psOpenJobsRows() {
   const rows = [];
   JOBS.forEach(job => {
-    if (job.status === 'completed') return;
+    if (psJobArchived(job)) return;
     STAFF_OCC_TYPES.forEach(type => {
       if (!psOccExists(job, type)) return;
       const counts = psOccCounts(job, type);
@@ -23068,7 +23078,7 @@ function psRenderOpenJobs() {
 // screen and Production's own per-item/task sections read and write the exact same job data.
 function psStaffingBodyHtml(job) {
   const s = job.staffing || {};
-  const readOnly = job.status === 'completed';
+  const readOnly = psJobArchived(job);
   let html = `<div class="section-label" style="margin-top:0.5rem;">Event</div>`;
 
   if (!readOnly && psEventEditOpen === job.id) {
