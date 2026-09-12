@@ -23207,9 +23207,36 @@ function psBreadcrumbTail(view) {
   }
   return [{ label: viewLabel, onClick: null }];
 }
+// Whether `view`'s own <div class="view"> currently carries showView's 'active' class — the
+// real, single source of truth for "what's actually on screen," never inferred from which
+// function happened to run most recently.
+function psIsViewActive(view) {
+  const el = document.getElementById('view-' + view);
+  return !!el && el.classList.contains('active');
+}
+// Root cause of a real reported bug: the breadcrumb showed a totally unrelated screen's trail
+// (e.g. Foil's "Letters & Numbers > Letters" while actually on Event Schedule & Staffing, or
+// Supplies' own trail while on Home). Several screens (Foil, Specialty Latex, Add-Ons/Extras,
+// Assets, Supplies) call psRenderBreadcrumb(theirOwnView) directly from their own render
+// function — not just from setTopBar/showView — so their breadcrumb tail can refresh live when a
+// sub-tab or drilldown changes without a full navigation. Those render functions, though, also run
+// from plenty of places that have nothing to do with actually being on screen — a background
+// Firestore snapshot listener, a boot-time shell render, another screen's own re-render calling
+// them incidentally — and their only guard was "does this screen's root <div> exist in the DOM,"
+// which is always true once a screen has ever been visited (showView only toggles a CSS class, it
+// never removes the div). So any of those background calls would silently overwrite the shared
+// breadcrumb-row with a stale screen's trail, even while a completely different screen was the one
+// actually on screen. Fixed at the one shared choke point instead of patching each call site (and
+// every future one): psRenderBreadcrumb now simply refuses to touch the DOM at all unless `view`
+// is the view actually marked active right now — the legitimate call from setTopBar (which runs
+// AFTER showView has already applied the 'active' class to the new view) is unaffected.
 function psRenderBreadcrumb(view) {
   const el = document.getElementById('breadcrumb-row');
   if (!el) return;
+  // A stale/background call naming a real view that isn't actually the one on screen right now —
+  // ignore it outright rather than touching the shared breadcrumb-row at all, so it can't clobber
+  // whichever OTHER screen's correct breadcrumb (or correctly-hidden state) is currently showing.
+  if (view && !psIsViewActive(view)) return;
   if (!view || view === 'home' || view === 'settings' || !TOOL_META[view]) { el.style.display = 'none'; el.innerHTML = ''; return; }
   const ancestors = psBreadcrumbAncestors(view);
   const segments = [{ label: 'Home', onClick: "showView('home')" }];
