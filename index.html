@@ -3531,7 +3531,7 @@ function psComputeTotals(recipe, qty, customLinear) {
 function psInvalidFormulaMessage(reason) {
   if (reason === 'missing-formula') return "Needs configuration — this template doesn't have a calculation method chosen yet.";
   if (reason === 'missing-footage') return 'Missing footage — this template needs a fixed length, or the actual footage entered for this job.';
-  if (reason === 'missing-rate') return 'Formula incomplete — no balloon-count rate is configured for this template yet.';
+  if (reason === 'missing-rate') return "Formula incomplete — this template has no rate or count configured for any size yet, and no Size mix override has been entered for this job. Fix the template, or enter the real counts under this item's own Size mix.";
   return 'Quantity unavailable — this template needs configuration before it can be calculated.';
 }
 
@@ -6402,12 +6402,19 @@ function psFootageEditorHtml(line, r, sanitizedKey) {
 // Always shows all 5 balloon sizes, not just the ones the formula currently produces — a job can
 // add a size the template wouldn't otherwise include (e.g. a few 5" accents on a Classic Column)
 // as well as reduce/zero one out. Blank = use the calculated default shown as the placeholder.
+// Reported directly: this used to hide entirely whenever the underlying formula couldn't compute
+// (missing footage/rate/fixed-count) — exactly backwards, since a manual override is precisely the
+// escape hatch for "the template's own math is broken, let me just type the real numbers" (see
+// psComputeJobRequirements's own matching fix, which now lets a real override here fully
+// substitute for a broken formula instead of only ever layering on top of a working one).
 function psSizeOverrideEditorHtml(line, r, sanitizedKey) {
   const totalsResult = psComputeTotals(r, line.qty, line.customLinear);
-  if (!totalsResult.valid) return '';
   let html = `<div class="settings-field"><label>Size mix <span style="font-weight:400;">(optional — overrides the calculated count for this job only; blank uses the calculated default)</span></label>`;
+  if (!totalsResult.valid) {
+    html += `<div style="font-size:11px; color:var(--warning-text); margin:-2px 0 6px;">This template can't calculate a default yet (${psEscape(psInvalidFormulaMessage(totalsResult.reason))}) — enter the real counts below to pull for this job anyway.</div>`;
+  }
   SIZE_ORDER.forEach(size => {
-    const defaultVal = totalsResult.sizes[size] || 0;
+    const defaultVal = totalsResult.valid ? (totalsResult.sizes[size] || 0) : 0;
     const overrideVal = line.sizeOverride && Number.isFinite(line.sizeOverride[size]) ? line.sizeOverride[size] : '';
     const safeSize = size.replace(/"/g, 'in');
     html += `<div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
@@ -11668,12 +11675,19 @@ function psComputeJobRequirements(job) {
       });
     } else {
       const totalsResult = psComputeTotals(recipe, line.qty, line.customLinear);
-      // A broken formula config (missing footage, missing/non-numeric rates) must surface as an
-      // explicit, actionable "needs configuration" requirement — never silently disappear, and
-      // never let an invalid (NaN) total reach the requirement list below, where every existing
-      // "<= 0" skip-guard would fail to catch it (NaN comparisons are always false), letting it
-      // slide all the way to Review & Pull as a false "Ready" row with an actionable Pull button.
-      if (!totalsResult.valid) {
+      // A broken formula config (missing footage, missing/non-numeric rates or fixed-counts) must
+      // surface as an explicit, actionable "needs configuration" requirement — never silently
+      // disappear, and never let an invalid (NaN) total reach the requirement list below, where
+      // every existing "<= 0" skip-guard would fail to catch it (NaN comparisons are always
+      // false), letting it slide all the way to Review & Pull as a false "Ready" row with an
+      // actionable Pull button. EXCEPT when a real manual Size mix override already exists on this
+      // line (psSizeOverrideEditorHtml) — a real, reported gap: that field exists specifically so
+      // a business can type the actual numbers when the template's own math can't be trusted, but
+      // it was previously only ever APPLIED on top of an already-valid calculation, never able to
+      // fully substitute for a broken one — leaving someone with real numbers typed in and still
+      // stuck on "Needs Configuration" with literally no way to make it compute from this job.
+      const hasManualSizeOverride = line.sizeOverride && Object.keys(line.sizeOverride).some(size => Number.isFinite(line.sizeOverride[size]) && line.sizeOverride[size] > 0);
+      if (!totalsResult.valid && !hasManualSizeOverride) {
         requirements.push({
           jobId: job.id, productionItemId, colorId: null, inventoryItemId: null, brand: '',
           color: '', size: '', qty: 0, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
@@ -11682,7 +11696,7 @@ function psComputeJobRequirements(job) {
         });
         return;
       }
-      const totals = psApplySizeOverride(totalsResult.sizes, line);
+      const totals = psApplySizeOverride(totalsResult.valid ? totalsResult.sizes : {}, line);
       // Colors marked "general note" during import (see irMarkColorGeneralNote) never generate an
       // inventory requirement here — they're not resolvable Standard Latex colors, and treating one
       // as an unresolved color would wrongly invite "add this to your Color Library." They're still
