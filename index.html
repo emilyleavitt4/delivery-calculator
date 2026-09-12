@@ -881,7 +881,9 @@
   .ps-status-completed { background: var(--success); color: #fff; }
   .ps-status-optional { background: transparent; color: var(--text-tertiary); border: 0.5px solid var(--border-strong); }
   .ps-staffstatus-open { background: var(--warning-bg); color: var(--warning-text); }
+  .ps-staffstatus-tentative { background: var(--warning-bg); color: var(--warning-text); border: 0.5px dashed var(--warning-text); }
   .ps-staffstatus-scheduled { background: var(--brand-seafoam); color: #fff; }
+  .ps-staffstatus-complete { background: var(--success); color: #fff; }
 
   /* INVENTORY COLOR LIST — a dense list for potentially 100+ rows, unlike the few-and-larger
      Production job cards, so each row is a thin divider rather than its own margined card. */
@@ -1717,26 +1719,14 @@
   </div><!-- end view-production -->
 
   <!-- ═══════════════════════════════════════ EVENT SCHEDULE & STAFFING VIEW -->
+  <!-- No manual "New job" form here — per explicit request, jobs on this screen always arrive via
+       Import (or already exist from Production); Production keeps its own manual-create disclosure
+       (psToggleManualJobForm('production')) untouched, since that request was Staffing-only. -->
   <div class="view" id="view-staffing">
-    <div class="section-label" style="margin-top:0">New job</div>
-    <div class="card no-print">
-      <div class="row">
-        <div class="settings-field" style="margin-bottom:0">
-          <label>Client / Event name</label>
-          <input type="text" id="pj-new-name-staffing" placeholder="e.g. Smith Baby Shower">
-        </div>
-        <div class="settings-field" style="margin-bottom:0">
-          <label>Event date</label>
-          <input type="text" id="pj-new-date-staffing" placeholder="e.g. July 20, 2026">
-        </div>
-      </div>
-      <button class="save-btn" onclick="psCreateManualJob('staffing')">Create job</button>
-    </div>
-
-    <div class="section-label">Jobs</div>
+    <div class="section-label" style="margin-top:0">Jobs</div>
     <div id="ps-staffing-job-list"></div>
     <div id="ps-staffing-empty" class="card" style="text-align:center; color:var(--text-secondary); display:none;">
-      No jobs yet. Import an invoice or start one above.
+      No jobs yet. Import an invoice to get started.
     </div>
   </div><!-- end view-staffing -->
 
@@ -3954,8 +3944,14 @@ const STATUS_LABELS = { not_started: 'Not Started', in_progress: 'In Progress', 
 
 // Staffing tracks a different thing than Production — whether the crew is locked in yet,
 // not build progress — so it gets its own, simpler two-state status.
-const STAFF_STATUS_ORDER = ['open', 'scheduled'];
-const STAFF_STATUS_LABELS = { open: 'Open Availability', scheduled: 'Scheduled' };
+// 'tentative' and 'complete' added per explicit request — a job that's still tentative (client
+// hasn't fully confirmed) or fully done needs its own state here, not just Open/Scheduled.
+// 'complete' is the one value with a real side effect (see psCycleStaffStatus): it also marks
+// job.status = 'completed', which is what actually archives the job into the collapsed
+// "Completed" section already shared by both Production and Staffing — "mark complete" from
+// either screen has the same one real effect, not two independent completion concepts.
+const STAFF_STATUS_ORDER = ['open', 'tentative', 'scheduled', 'complete'];
+const STAFF_STATUS_LABELS = { open: 'Open Availability', tentative: 'Tentative', scheduled: 'Scheduled', complete: 'Complete' };
 
 let JOBS = [];
 let psExpandedProduction = null;
@@ -4680,11 +4676,21 @@ function psCycleStatus(jobId) {
   psSaveJob(job);
 }
 
+// 'complete' and job.status = 'completed' are kept in lockstep both ways: landing on 'complete'
+// here archives the job (see the "Completed" collapsed section shared by Production/Staffing),
+// and cycling back OFF 'complete' un-archives it again — the same symmetric un-archive Production's
+// own status cycle already gives for free, just reachable from this button too. `current` treats
+// an already-completed job (however it got that way — including from Production's own status
+// button) as sitting at 'complete' regardless of its raw staffingStatus value, so the cycle always
+// continues from what psStatusBtnHtml is actually showing rather than some stale prior value.
 function psCycleStaffStatus(jobId) {
   const job = psFindJob(jobId);
   if (!job) return;
-  const current = job.staffingStatus || 'open';
-  job.staffingStatus = STAFF_STATUS_ORDER[(STAFF_STATUS_ORDER.indexOf(current) + 1) % STAFF_STATUS_ORDER.length];
+  const current = job.status === 'completed' ? 'complete' : (job.staffingStatus || 'open');
+  const next = STAFF_STATUS_ORDER[(STAFF_STATUS_ORDER.indexOf(current) + 1) % STAFF_STATUS_ORDER.length];
+  job.staffingStatus = next;
+  if (next === 'complete') job.status = 'completed';
+  else if (current === 'complete') job.status = 'not_started';
   psSaveJob(job);
 }
 
@@ -5816,6 +5822,12 @@ function irSplitItem(id) {
 // ─── SHARED JOB CARD HEADER (used by both Production and Staffing) ───
 function psStatusBtnHtml(job, view) {
   if (view === 'staffing') {
+    // An explicitly completed/archived job always wins, ahead of the derived Short/Overstaffed/
+    // Fully-staffed compatibility path below — a job that's done doesn't need its staffing gap
+    // status recomputed and shown instead, that would just look like it un-completed itself.
+    if (job.status === 'completed') {
+      return `<button class="ps-status-btn ps-staffstatus-complete" onclick="event.stopPropagation(); psCycleStaffStatus('${job.id}')">${STAFF_STATUS_LABELS.complete}</button>`;
+    }
     // Compatibility path: once a real staffing occurrence is configured (peopleNeeded > 0), the
     // header shows the DERIVED status instead of the old manual toggle — legacy job.staffingStatus
     // data is never deleted, it just stops being what's displayed once real occurrence data
@@ -22873,8 +22885,11 @@ function psStaffingBodyHtml(job) {
 
   html += psStaffOccurrencesHtml(job);
   html += psNotesAttachmentsSectionHtml(job, 'event');
+  // Needs Clarification is deliberately NOT shown at the job level here, per explicit request —
+  // not needed for install/event scheduling. Production's own per-item/per-task Needs
+  // Clarification triggers (psAdditionalNotesHtml, psTaskRowHtml) are untouched; this only removes
+  // the job-wide one that used to sit alongside Team Feedback on this screen.
   html += psFeedbackSectionHtml(job, 'job', null, 'staff-job-feedback', 'Team Feedback', ['teamFeedback', 'noteForNextTime']);
-  html += psFeedbackSectionHtml(job, 'job', null, 'staff-job-clarify', 'Needs Clarification', ['needsClarification']);
   return html;
 }
 
