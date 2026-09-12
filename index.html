@@ -6075,11 +6075,19 @@ function psColorDistEditorHtml(key) {
 // LOCKED RECORD": an imported 12 ft garland that actually needs to become 14 ft no longer requires
 // deleting and re-adding the item (losing its tasks/colorDist/sizeOverride/label along with it).
 // Blank means "use whatever it would otherwise use" — the template's own fixed length, or nothing
-// if this is a customLinear template with no footage entered yet — never a forced value. Only
-// rendered for a formula that actually has a footage concept (a fixed linearFt, or customLinear)
-// — a future non-linear-footage formula naturally has neither and gets no footage field at all.
+// if this is a customLinear template with no footage entered yet — never a forced value. Rendered
+// for ANY formula that has a footage concept at all (every entry in PS_FORMULA_KINDS — see
+// psComputeTotals, which always multiplies by `linear` regardless of formula), not only once a
+// linearFt/customLinear value already happens to be set — a template saved with neither (formula
+// chosen, footage never configured) is exactly the "Needs Configuration — Missing footage" case,
+// and psInvalidFormulaMessage explicitly promises this per-job field as the fix ("...or the actual
+// footage entered for this job"). Gating on an already-valid linearFt made that promise false: a
+// job whose frozen customRecipe (see psSnapshotTemplate) never got a footage value had no way to
+// enter one here, since editing the live template afterward never reaches an already-added line's
+// own frozen copy. A future non-linear-footage formula naturally isn't in PS_FORMULA_KINDS's
+// footage-using set and gets no footage field at all.
 function psFootageEditorHtml(line, r, sanitizedKey) {
-  if (typeof r.linearFt !== 'number' && !r.customLinear) return '';
+  if (!PS_FORMULA_KINDS.some(k => k.value === r.formula)) return '';
   const currentOverride = (typeof line.customLinear === 'number' && line.customLinear > 0) ? line.customLinear : '';
   const placeholder = typeof r.linearFt === 'number' ? String(r.linearFt) : 'e.g. 12';
   const hint = typeof r.linearFt === 'number' ? `blank uses the template's own ${r.linearFt} ft` : 'the footage entered for this job';
