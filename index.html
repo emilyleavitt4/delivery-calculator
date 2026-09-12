@@ -5986,9 +5986,9 @@ function psGetColorDraft(key, fallback) {
 // starts even — matching qcState.colors' own "reset to even" default for a newly added color.
 function psInitDistDraft(line) {
   if (line.colorDist && line.colorDist.length === line.colors.length) {
-    return line.colorDist.map(cd => ({ pct: cd.pct }));
+    return line.colorDist.map(cd => ({ pct: cd.pct, locked: !!cd.locked }));
   }
-  const draft = line.colors.map(() => ({ pct: 0 }));
+  const draft = line.colors.map(() => ({ pct: 0, locked: false }));
   distDistributeEvenly(draft);
   return draft;
 }
@@ -6044,8 +6044,8 @@ function psAddColorDraftRow(key) {
   // distribution editor is visible) — the "Add an item" form's brand-new-item color picker never
   // has one, and doesn't need one until the item exists to edit.
   if (psDistDraftStore[key]) {
-    psDistDraftStore[key].push({ pct: 0 });
-    distDistributeEvenly(psDistDraftStore[key]);
+    psDistDraftStore[key].push({ pct: 0, locked: false });
+    distDistributeEvenly(psDistDraftStore[key]); // locked-aware — leaves any already-locked colors untouched
   }
   if (psColorCountDraftStore[key]) {
     const row = {};
@@ -6113,6 +6113,18 @@ function psDistDistributeEvenly(key) {
   distDistributeEvenly(items);
   psWithFormPreserved(key, psRenderProductionJobs);
 }
+// Per direct request: "I know I want one color to be 35% — when I adjust other numbers, don't
+// shift what I already put in." Locking a color freezes its own pct against every OTHER color's
+// slider/number/"Distribute evenly" touching it (see distScaleToSum/distDistributeEvenly's own
+// locked-aware rescaling) — the locked row's own inputs are disabled while locked, so the only way
+// to change a locked color's own value is to unlock it first. Purely a UI/session convenience atop
+// existing colorDist percentages — no new math concept beyond "this one doesn't get rescaled."
+function psToggleColorLock(key, idx) {
+  const dist = psDistDraftStore[key];
+  if (!dist || !dist[idx]) return;
+  dist[idx].locked = !dist[idx].locked;
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
 // Only meaningful with 2+ colors — a single color always gets 100% of every size, exactly like
 // Production's default (no colorDist) behavior already assumes. Two modes: the original
 // percentage split (a share of whatever the formula/Size-mix calculates), or exact counts (a
@@ -6139,11 +6151,13 @@ function psColorDistEditorHtml(key, line) {
   } else {
     draft.forEach((name, idx) => {
       const pct = dist[idx] ? dist[idx].pct : 0;
+      const locked = !!(dist[idx] && dist[idx].locked);
       html += `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+        <button type="button" class="icon-btn" style="padding:4px; flex-shrink:0; ${locked ? 'color:var(--accent);' : 'color:var(--text-tertiary);'}" onclick="psToggleColorLock('${key}', ${idx})" title="${locked ? 'Locked — click to unlock' : 'Lock this percentage so other colors never shift it'}"><i class="fa-solid ${locked ? 'fa-lock' : 'fa-lock-open'}"></i></button>
         <div style="flex:0 0 100px; font-size:12px; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${invAttr(name)}">${psEscape(name || 'Color ' + (idx + 1))}</div>
-        <input type="range" min="0" max="100" step="1" value="${pct}" id="pi-dist-slider-${sanitizedKey}-${idx}" style="flex:1; accent-color: var(--brand-blue);" onpointerdown="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onchange="psDistEndEdit()">
+        <input type="range" min="0" max="100" step="1" value="${pct}" id="pi-dist-slider-${sanitizedKey}-${idx}" style="flex:1; accent-color: var(--brand-blue);" ${locked ? 'disabled' : ''} onpointerdown="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onchange="psDistEndEdit()">
         <div style="display:flex; align-items:center; gap:2px; flex-shrink:0;">
-          <input type="number" min="0" max="100" value="${pct}" id="pi-dist-num-${sanitizedKey}-${idx}" style="width:52px; text-align:right;" onfocus="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onblur="psDistEndEdit()">
+          <input type="number" min="0" max="100" value="${pct}" id="pi-dist-num-${sanitizedKey}-${idx}" style="width:52px; text-align:right;" ${locked ? 'disabled' : ''} onfocus="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onblur="psDistEndEdit()">
           <span style="font-size:12px; color:var(--text-secondary);">%</span>
         </div>
       </div>`;
@@ -6376,7 +6390,7 @@ function psSaveEditItem(jobId, idx) {
   // percentage into its slot.
   const rawColors = psColorDraftStore[key] || [];
   const rawDist = psDistDraftStore[key] || [];
-  const pairs = rawColors.map((c, i) => ({ name: c.trim(), pct: rawDist[i] ? rawDist[i].pct : null })).filter(p => p.name);
+  const pairs = rawColors.map((c, i) => ({ name: c.trim(), pct: rawDist[i] ? rawDist[i].pct : null, locked: !!(rawDist[i] && rawDist[i].locked) })).filter(p => p.name);
   if (pairs.length === 0) { alert('Enter at least one color.'); return; }
   const colors = pairs.map(p => p.name);
   const qty = parseFloat(document.getElementById('pi-edit-qty-' + sanitizedKey).value) || 1;
@@ -6431,7 +6445,7 @@ function psSaveEditItem(jobId, idx) {
     line.colorCounts = colorCounts;
     delete line.colorDist;
   } else if (colors.length > 1 && pairs.every(p => Number.isFinite(p.pct))) {
-    line.colorDist = pairs.map(p => ({ name: p.name, pct: p.pct }));
+    line.colorDist = pairs.map(p => ({ name: p.name, pct: p.pct, locked: p.locked }));
     delete line.colorCounts;
   } else {
     delete line.colorDist;
@@ -7616,36 +7630,52 @@ function qcSetQty(val) {
 // exactly rather than drifting by a point or two. Shared by the Quantity Calculator's color
 // sliders and Production's per-job color-distribution editor (see psColorDistEditorHtml) — one
 // proportional-rescale algorithm, not two independently-maintained copies of the same math.
+// Per Emily's request: an item with `.locked` true is left completely untouched — its .pct never
+// changes here — and only the UNLOCKED items are rescaled to absorb whatever's left of `target`
+// after subtracting the locked ones' own values. The Quantity Calculator never sets `.locked` on
+// anything, so every item there is always in the unlocked branch and this behaves exactly as
+// before for it — locking is a Production-only concept riding on the same shared math.
 function distScaleToSum(items, target) {
   if (items.length === 0) return;
   target = Math.max(0, target);
-  if (target === 0) { items.forEach(c => { c.pct = 0; }); return; }
-  const sumOld = items.reduce((s, c) => s + c.pct, 0);
+  const locked = items.filter(c => c.locked);
+  const unlocked = items.filter(c => !c.locked);
+  if (unlocked.length === 0) return; // everything locked — nothing left to adjust
+  const lockedSum = locked.reduce((s, c) => s + c.pct, 0);
+  const remaining = Math.max(0, target - lockedSum);
+  if (remaining === 0) { unlocked.forEach(c => { c.pct = 0; }); return; }
+  const sumOld = unlocked.reduce((s, c) => s + c.pct, 0);
   let raw;
   if (sumOld <= 0) {
-    raw = items.map(() => target / items.length);
+    raw = unlocked.map(() => remaining / unlocked.length);
   } else {
-    raw = items.map(c => c.pct / sumOld * target);
+    raw = unlocked.map(c => c.pct / sumOld * remaining);
   }
   const rounded = raw.map(v => Math.round(v));
-  const drift = target - rounded.reduce((a, b) => a + b, 0);
+  const drift = remaining - rounded.reduce((a, b) => a + b, 0);
   if (drift !== 0) {
     let idxMax = 0;
     for (let k = 1; k < raw.length; k++) if (raw[k] > raw[idxMax]) idxMax = k;
     rounded[idxMax] += drift;
   }
-  items.forEach((c, k) => { c.pct = Math.max(0, rounded[k]); });
+  unlocked.forEach((c, k) => { c.pct = Math.max(0, rounded[k]); });
 }
 
 // Splits 100% evenly across `items` — the "reset to even" behavior, used both as the default for
 // a freshly-added color/row and as its own button. Shared with Production's per-job color-split
-// editor (see distScaleToSum's own comment on why this lives outside qcState).
+// editor (see distScaleToSum's own comment on why this lives outside qcState). Locked-aware for
+// the same reason distScaleToSum is: a locked color keeps its own pct, and the 100% - (locked
+// total) remainder is what actually gets split evenly across the unlocked ones.
 function distDistributeEvenly(items) {
-  const n = items.length;
-  if (n === 0) return;
-  const base = Math.floor(100 / n);
-  let leftover = 100 - base * n;
-  items.forEach(c => { c.pct = base + (leftover > 0 ? 1 : 0); if (leftover > 0) leftover--; });
+  const locked = items.filter(c => c.locked);
+  const unlocked = items.filter(c => !c.locked);
+  if (unlocked.length === 0) return;
+  const lockedSum = locked.reduce((s, c) => s + c.pct, 0);
+  const remaining = Math.max(0, 100 - lockedSum);
+  const n = unlocked.length;
+  const base = Math.floor(remaining / n);
+  let leftover = remaining - base * n;
+  unlocked.forEach(c => { c.pct = base + (leftover > 0 ? 1 : 0); if (leftover > 0) leftover--; });
 }
 function qcDistributeEvenly() {
   distDistributeEvenly(qcState.colors);
