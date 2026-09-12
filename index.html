@@ -997,7 +997,7 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
   import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
-  import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot, writeBatch, runTransaction } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+  import { getFirestore, collection, doc, setDoc, getDoc, deleteDoc, onSnapshot, writeBatch, runTransaction, query, where } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
   import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
   import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-functions.js";
 
@@ -1330,7 +1330,20 @@
   // classification, actor resolution) live alongside the rest of the inv* functions instead of
   // inside this module block, matching how every other Firestore op in this app is a thin wrapper.
   const inventoryTransactionsRef = collection(db, 'businesses', BUSINESS_ID, 'inventoryTransactions');
-  window.fbOnSnapshotInventoryTransactions = (onNext, onError) => onSnapshot(inventoryTransactionsRef, onNext, onError);
+  // This collection only ever grows — every Pull/Return/Adjust/Receive ever recorded, forever —
+  // and an unbounded listener re-reads the WHOLE thing on every single page load, getting more
+  // expensive with every day of real use (a real, reported read-cost issue). A pure recent-N cap
+  // was ruled out: invBalloonsPulledForJob/invLegacyBalloonsPooledForJob (the actual pull-tracking
+  // math behind every checkbox) need every transaction for as long as its job stays open, and a
+  // count-based cutoff could silently drop a still-active job's own history the moment enough
+  // OTHER activity happened elsewhere. A time-based floor doesn't have that failure mode — any job
+  // still realistically "open" is nowhere near a year old — and costs nothing today (querying
+  // "created within the last year" returns the exact same rows an unbounded query would, for as
+  // long as the whole history is itself under a year old); it only starts capping growth once the
+  // business has genuinely been running long enough for it to matter.
+  const INV_TRANSACTIONS_RETENTION_MS = 365 * 24 * 60 * 60 * 1000; // ~12 months
+  const inventoryTransactionsRecentQuery = () => query(inventoryTransactionsRef, where('createdAt', '>=', Date.now() - INV_TRANSACTIONS_RETENTION_MS));
+  window.fbOnSnapshotInventoryTransactions = (onNext, onError) => onSnapshot(inventoryTransactionsRecentQuery(), onNext, onError);
   window.fbRunTransaction = (updater) => runTransaction(db, updater);
   window.fbInventoryItemRef = (id) => doc(inventoryItemsRef, id);
   window.fbInventoryTransactionRef = (id) => doc(inventoryTransactionsRef, id);
