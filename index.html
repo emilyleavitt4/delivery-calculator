@@ -5968,6 +5968,13 @@ function psToggleAddItemForm(jobId) {
 // distDistributeEvenly) rather than a second, independently-maintained copy of that math.
 let psDistDraftStore = {};
 let psDistDragBaseline = null;
+// Parallel to psColorDraftStore/psDistDraftStore, same 1:1-by-index alignment — the exact-count
+// alternative to percentage splitting (see psColorSplitModeStore/psInitColorCountDraft below).
+let psColorCountDraftStore = {};
+// One { color, size, qty } row per topper color on this line (see psInitTopperDraft) — parallel
+// in spirit to the body's color draft, but never percentage-split: a topper's few balloons are
+// simple enough to just type a literal count for, one row per color.
+let psTopperDraftStore = {};
 
 function psColorDraftKey(jobId, idx) { return jobId + '|' + (idx === undefined ? 'new' : idx); }
 function psGetColorDraft(key, fallback) {
@@ -5984,6 +5991,32 @@ function psInitDistDraft(line) {
   const draft = line.colors.map(() => ({ pct: 0 }));
   distDistributeEvenly(draft);
   return draft;
+}
+// Which split mode this line's edit form is currently showing — 'pct' (the default percentage
+// split) or 'exact' (a literal count per size, per color — see the "this pattern is custom" case
+// psComputeJobRequirements branches on). Purely a UI-session concern; the line's own saved
+// colorSplitMode is what psSaveEditItem actually persists.
+let psColorSplitModeStore = {};
+function psGetColorSplitMode(key, line) {
+  if (!(key in psColorSplitModeStore)) psColorSplitModeStore[key] = line.colorSplitMode === 'exact' ? 'exact' : 'pct';
+  return psColorSplitModeStore[key];
+}
+function psSetColorSplitMode(key, mode) {
+  psColorSplitModeStore[key] = mode;
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
+// One { [size]: count } row per color, in the exact same order as psColorDraftStore[key] — a
+// color added/removed there is kept in step here as well (see psAddColorDraftRow/
+// psRemoveColorDraftRow), the same "sibling drafts stay in lockstep" discipline psDistDraftStore
+// already follows. Seeded from the line's saved colorCounts when it still lines up 1:1 with the
+// line's current colors; otherwise every color starts blank (never guessed).
+function psInitColorCountDraft(line) {
+  return (line.colors || []).map(name => {
+    const saved = line.colorCounts && line.colorCounts[name];
+    const row = {};
+    SIZE_ORDER.forEach(size => { row[size] = (saved && Number.isFinite(saved[size])) ? saved[size] : ''; });
+    return row;
+  });
 }
 // Adding/removing a color row triggers a full psRenderProductionJobs(), which would otherwise
 // reset the rest of the still-open "Add an item" form (item/qty/design/location) back to
@@ -6014,6 +6047,11 @@ function psAddColorDraftRow(key) {
     psDistDraftStore[key].push({ pct: 0 });
     distDistributeEvenly(psDistDraftStore[key]);
   }
+  if (psColorCountDraftStore[key]) {
+    const row = {};
+    SIZE_ORDER.forEach(size => { row[size] = ''; });
+    psColorCountDraftStore[key].push(row);
+  }
   psWithFormPreserved(key, psRenderProductionJobs);
 }
 function psRemoveColorDraftRow(key, idx) {
@@ -6025,6 +6063,8 @@ function psRemoveColorDraftRow(key, idx) {
     dist.splice(idx, 1);
     if (dist.length > 0) distScaleToSum(dist, 100);
   }
+  const counts = psColorCountDraftStore[key];
+  if (counts && counts.length > idx) counts.splice(idx, 1);
   psWithFormPreserved(key, psRenderProductionJobs);
 }
 function psUpdateColorDraftRow(key, idx, value) {
@@ -6074,28 +6114,131 @@ function psDistDistributeEvenly(key) {
   psWithFormPreserved(key, psRenderProductionJobs);
 }
 // Only meaningful with 2+ colors — a single color always gets 100% of every size, exactly like
-// Production's default (no colorDist) behavior already assumes.
-function psColorDistEditorHtml(key) {
+// Production's default (no colorDist) behavior already assumes. Two modes: the original
+// percentage split (a share of whatever the formula/Size-mix calculates), or exact counts (a
+// literal number per color per size, per one unit of Quantity — for a genuinely custom pattern
+// that was never percentage-shaped to begin with, e.g. "12 fuchsia, 8 rose..." rather than
+// "25%/17%..."). Switching modes only changes which draft psSaveEditItem reads from — it never
+// clears the other mode's draft, so flipping back and forth while still deciding doesn't lose work.
+function psColorSplitModeToggleHtml(key, mode) {
+  return `<div class="trip-toggle" style="margin-bottom:6px;">
+    <button type="button" class="trip-btn ${mode === 'pct' ? 'active' : ''}" onclick="psSetColorSplitMode('${key}','pct')">By percentage</button>
+    <button type="button" class="trip-btn ${mode === 'exact' ? 'active' : ''}" onclick="psSetColorSplitMode('${key}','exact')">Exact counts</button>
+  </div>`;
+}
+function psColorDistEditorHtml(key, line) {
   const draft = psColorDraftStore[key] || [];
   const dist = psDistDraftStore[key];
   if (draft.length <= 1 || !dist || dist.length !== draft.length) return '';
+  const mode = psGetColorSplitMode(key, line);
   const sanitizedKey = key.replace(/\|/g, '-');
-  let html = `<div class="settings-field"><label>Color distribution <span style="font-weight:400;">(optional — overrides the default equal split for this job only)</span></label>`;
-  draft.forEach((name, idx) => {
-    const pct = dist[idx] ? dist[idx].pct : 0;
-    html += `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-      <div style="flex:0 0 100px; font-size:12px; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${invAttr(name)}">${psEscape(name || 'Color ' + (idx + 1))}</div>
-      <input type="range" min="0" max="100" step="1" value="${pct}" id="pi-dist-slider-${sanitizedKey}-${idx}" style="flex:1; accent-color: var(--brand-blue);" onpointerdown="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onchange="psDistEndEdit()">
-      <div style="display:flex; align-items:center; gap:2px; flex-shrink:0;">
-        <input type="number" min="0" max="100" value="${pct}" id="pi-dist-num-${sanitizedKey}-${idx}" style="width:52px; text-align:right;" onfocus="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onblur="psDistEndEdit()">
-        <span style="font-size:12px; color:var(--text-secondary);">%</span>
-      </div>
+  let html = `<div class="settings-field"><label>Color split <span style="font-weight:400;">(optional — overrides the default equal split for this job only)</span></label>`;
+  html += psColorSplitModeToggleHtml(key, mode);
+  if (mode === 'exact') {
+    html += psColorExactCountsHtml(key, draft);
+  } else {
+    draft.forEach((name, idx) => {
+      const pct = dist[idx] ? dist[idx].pct : 0;
+      html += `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+        <div style="flex:0 0 100px; font-size:12px; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${invAttr(name)}">${psEscape(name || 'Color ' + (idx + 1))}</div>
+        <input type="range" min="0" max="100" step="1" value="${pct}" id="pi-dist-slider-${sanitizedKey}-${idx}" style="flex:1; accent-color: var(--brand-blue);" onpointerdown="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onchange="psDistEndEdit()">
+        <div style="display:flex; align-items:center; gap:2px; flex-shrink:0;">
+          <input type="number" min="0" max="100" value="${pct}" id="pi-dist-num-${sanitizedKey}-${idx}" style="width:52px; text-align:right;" onfocus="psDistBeginEdit('${key}', ${idx})" oninput="psDistApplyPct('${key}', ${idx}, this.value)" onblur="psDistEndEdit()">
+          <span style="font-size:12px; color:var(--text-secondary);">%</span>
+        </div>
+      </div>`;
+    });
+    html += `<div style="display:flex; justify-content:space-between; align-items:center;">
+      <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px;" onclick="psDistDistributeEvenly('${key}')"><i class="fa-solid fa-scale-balanced"></i> Distribute evenly</button>
+      <span style="font-size:12px; color:var(--text-secondary);">Total: <span id="pi-dist-total-${sanitizedKey}">${dist.reduce((s, c) => s + (c.pct || 0), 0)}%</span></span>
     </div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+// A literal count per size for each color, entered per ONE unit of Quantity (see
+// psComputeJobRequirements's 'exact' branch, which multiplies by line.qty) — for a pattern that
+// was never a percentage split of a calculated total to begin with. Blank means "none of this
+// size for this color," not zero-as-a-forced-value; a row with nothing filled in contributes no
+// requirement at all rather than an explicit 0. Shows all 5 sizes for every color, same as the
+// aggregate Size-mix editor, so a color can pick up an off-formula size the same way that one can.
+function psUpdateColorCount(key, idx, size, value) {
+  const counts = psColorCountDraftStore[key];
+  if (counts && counts[idx]) counts[idx][size] = value;
+}
+function psColorExactCountsHtml(key, draft) {
+  const counts = psColorCountDraftStore[key];
+  if (!counts || counts.length !== draft.length) return '';
+  const sanitizedKey = key.replace(/\|/g, '-');
+  let html = `<div style="font-size:11px; color:var(--text-secondary); margin:-2px 0 8px;">Count per size, for ONE unit of Quantity — multiplied automatically if Quantity is more than 1.</div>`;
+  draft.forEach((name, idx) => {
+    html += `<div style="margin-bottom:8px;">
+      <div style="font-size:12px; font-weight:600; margin-bottom:4px;">${psEscape(name || 'Color ' + (idx + 1))}</div>
+      <div style="display:flex; flex-wrap:wrap; gap:8px;">`;
+    SIZE_ORDER.forEach(size => {
+      const val = counts[idx] && counts[idx][size] !== undefined ? counts[idx][size] : '';
+      const safeSize = size.replace(/"/g, 'in');
+      html += `<div style="display:flex; align-items:center; gap:4px;">
+        <span style="font-size:11px; color:var(--text-secondary);">${psEscape(size)}</span>
+        <input type="number" min="0" step="1" value="${val}" style="width:56px;" id="pi-count-${sanitizedKey}-${idx}-${safeSize}" placeholder="0" oninput="psUpdateColorCount('${key}', ${idx}, '${psJsKeyAttr(size)}', this.value)">
+      </div>`;
+    });
+    html += `</div></div>`;
   });
-  html += `<div style="display:flex; justify-content:space-between; align-items:center;">
-    <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px;" onclick="psDistDistributeEvenly('${key}')"><i class="fa-solid fa-scale-balanced"></i> Distribute evenly</button>
-    <span style="font-size:12px; color:var(--text-secondary);">Total: <span id="pi-dist-total-${sanitizedKey}">${dist.reduce((s, c) => s + (c.pct || 0), 0)}%</span></span>
-  </div></div>`;
+  return html;
+}
+// One { color, size, qty } row per topper color — never percentage-split like the body (a
+// topper's few balloons are simple enough to just type a literal count for). qty is per ONE unit
+// of Quantity, same convention and reason as the exact-count body override, and multiplied by
+// line.qty in psComputeJobRequirements. Reuses psColorBrandChoiceHtml as-is for brand
+// disambiguation — it only needs a job key and a color name, so a topper color that happens to
+// share a name across brands gets the exact same "which for this job?" picker the body does.
+function psInitTopperDraft(line) {
+  if (line.topper && line.topper.length) {
+    return line.topper.map(t => ({ color: t.color || '', size: t.size || '', qty: Number.isFinite(t.qty) ? t.qty : '' }));
+  }
+  return [{ color: '', size: '', qty: '' }];
+}
+function psAddTopperRow(key) {
+  (psTopperDraftStore[key] = psTopperDraftStore[key] || []).push({ color: '', size: '', qty: '' });
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
+function psRemoveTopperRow(key, idx) {
+  const draft = psTopperDraftStore[key];
+  if (!draft) return;
+  draft.splice(idx, 1);
+  if (draft.length === 0) draft.push({ color: '', size: '', qty: '' });
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
+function psUpdateTopperField(key, idx, field, value) {
+  const draft = psTopperDraftStore[key];
+  if (draft && draft[idx]) draft[idx][field] = value;
+}
+function psTopperRowHtml(key, idx, row, canRemove) {
+  const sanitizedKey = key.replace(/\|/g, '-');
+  const inputId = 'pi-topper-color-' + sanitizedKey + '-' + idx;
+  return `<div style="margin-bottom:8px;">
+    <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+      <div style="position:relative; flex:1; min-width:140px;">
+        <input type="text" id="${inputId}" value="${psEscape(row.color)}" placeholder="Topper color..."
+          oninput="psUpdateTopperField('${key}', ${idx}, 'color', this.value); invShowColorSuggestions('${inputId}')"
+          onblur="invHideColorSuggestionsSoon('${inputId}')">
+        <div id="${inputId}-suggest" class="inv-color-suggest" style="display:none;"></div>
+      </div>
+      <select style="width:auto;" onchange="psUpdateTopperField('${key}', ${idx}, 'size', this.value)">
+        <option value="">Size…</option>
+        ${SIZE_ORDER.map(size => `<option value="${psEscape(size)}" ${row.size === size ? 'selected' : ''}>${psEscape(size)}</option>`).join('')}
+      </select>
+      <input type="number" min="0" step="1" placeholder="Qty" style="width:70px;" value="${row.qty}" oninput="psUpdateTopperField('${key}', ${idx}, 'qty', this.value)">
+      <button class="icon-btn" style="padding:4px;" onclick="psRemoveTopperRow('${key}', ${idx})" ${canRemove ? '' : 'disabled'} aria-label="Remove topper color"><i class="fa-solid fa-trash"></i></button>
+    </div>
+    ${row.color.trim() ? psColorBrandChoiceHtml(key, row.color) : ''}
+  </div>`;
+}
+function psTopperColorEditorHtml(key) {
+  const draft = psTopperDraftStore[key] || [];
+  let html = draft.map((row, idx) => psTopperRowHtml(key, idx, row, draft.length > 1)).join('');
+  html += `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="psAddTopperRow('${key}')"><i class="fa-solid fa-plus"></i> Add another topper color</button>`;
   return html;
 }
 // A job-instance footage override, editable regardless of whether the template is a fixed length
@@ -6201,12 +6344,21 @@ function psStartEditItem(jobId, idx, phase) {
   const key = psColorDraftKey(jobId, idx);
   psColorDraftStore[key] = [...line.colors];
   psDistDraftStore[key] = psInitDistDraft(line);
+  psColorCountDraftStore[key] = psInitColorCountDraft(line);
+  psColorSplitModeStore[key] = line.colorSplitMode === 'exact' ? 'exact' : 'pct';
+  psTopperDraftStore[key] = psInitTopperDraft(line);
   psEditingItemKey = key;
   psEditingItemPhase = phase || 'build';
   psRenderProductionJobs();
 }
 function psCancelEditItem() {
-  if (psEditingItemKey) { delete psColorDraftStore[psEditingItemKey]; delete psDistDraftStore[psEditingItemKey]; }
+  if (psEditingItemKey) {
+    delete psColorDraftStore[psEditingItemKey];
+    delete psDistDraftStore[psEditingItemKey];
+    delete psColorCountDraftStore[psEditingItemKey];
+    delete psColorSplitModeStore[psEditingItemKey];
+    delete psTopperDraftStore[psEditingItemKey];
+  }
   psEditingItemKey = null;
   psEditingItemPhase = null;
   psRenderProductionJobs();
@@ -6258,14 +6410,36 @@ function psSaveEditItem(jobId, idx) {
   // psInitDistDraft/psAddColorDraftRow/psRemoveColorDraftRow keep the two arrays in lockstep, but
   // this is the same "never let a bad number reach a saved job" discipline used everywhere else in
   // this file) it falls back to the existing equal-split default rather than saving garbage.
-  if (colors.length > 1 && pairs.every(p => Number.isFinite(p.pct))) {
+  const splitMode = psGetColorSplitMode(key, line);
+  line.colorSplitMode = splitMode;
+  if (splitMode === 'exact') {
+    // Exact mode fully replaces the percentage split — zipped positionally with the color draft,
+    // same "a blank color row drops its own data with it" rule as the percentage pairs above.
+    const rawCounts = psColorCountDraftStore[key] || [];
+    const colorCounts = {};
+    rawColors.forEach((c, i) => {
+      const name = c.trim();
+      if (!name) return;
+      const row = rawCounts[i] || {};
+      const bySize = {};
+      SIZE_ORDER.forEach(size => {
+        const n = parseFloat(row[size]);
+        if (Number.isFinite(n) && n > 0) bySize[size] = n;
+      });
+      if (Object.keys(bySize).length > 0) colorCounts[name] = bySize;
+    });
+    line.colorCounts = colorCounts;
+    delete line.colorDist;
+  } else if (colors.length > 1 && pairs.every(p => Number.isFinite(p.pct))) {
     line.colorDist = pairs.map(p => ({ name: p.name, pct: p.pct }));
+    delete line.colorCounts;
   } else {
     delete line.colorDist;
+    delete line.colorCounts;
   }
 
   const sizeOverride = {};
-  if (r) {
+  if (r && splitMode !== 'exact') {
     SIZE_ORDER.forEach(size => {
       const el = document.getElementById('pi-sizeov-' + sanitizedKey + '-' + size.replace(/"/g, 'in'));
       if (!el) return;
@@ -6277,12 +6451,23 @@ function psSaveEditItem(jobId, idx) {
   }
   if (Object.keys(sizeOverride).length > 0) line.sizeOverride = sizeOverride; else delete line.sizeOverride;
 
+  // A topper's own color(s) — real inventory, not just a build note (see topperNote just below
+  // for the separate free-text instruction). A row needs a color AND a size to count; qty
+  // defaults to 0 (contributes nothing) rather than rejecting the row outright.
+  const topperRows = (psTopperDraftStore[key] || [])
+    .map(t => ({ color: (t.color || '').trim(), size: t.size || '', qty: parseFloat(t.qty) }))
+    .filter(t => t.color && t.size && Number.isFinite(t.qty) && t.qty > 0);
+  if (topperRows.length > 0) line.topper = topperRows; else delete line.topper;
+
   // topperNote is the one of the three synthetic-task sources that's actually editable here —
   // keeps that task's wording current without touching its status if someone already checked it.
   psSyncSyntheticPrepTasks(job, line.id, line, r);
 
   delete psColorDraftStore[key];
   delete psDistDraftStore[key];
+  delete psColorCountDraftStore[key];
+  delete psColorSplitModeStore[key];
+  delete psTopperDraftStore[key];
   psEditingItemKey = null;
   psEditingItemPhase = null;
   psSaveJob(job);
@@ -6872,13 +7057,17 @@ function psItemEditFormHtml(job, line, idx, r, editKey, sanitizedEditKey) {
         <label>Colors</label>
         ${psColorPickerHtml(editKey, psGetColorDraft(editKey, line.colors))}
       </div>
-      ${psColorDistEditorHtml(editKey)}
-      ${psSizeOverrideEditorHtml(line, r, sanitizedEditKey)}
+      ${psColorDistEditorHtml(editKey, line)}
+      ${psGetColorSplitMode(editKey, line) === 'exact' ? '' : psSizeOverrideEditorHtml(line, r, sanitizedEditKey)}
       <div class="row">
         <div class="settings-field" style="margin-bottom:0"><label>Design (optional)</label><input type="text" id="pi-edit-design-${sanitizedEditKey}" value="${psEscape(line.design || '')}"></div>
         <div class="settings-field" style="margin-bottom:0"><label>Location (optional)</label><input type="text" id="pi-edit-location-${sanitizedEditKey}" value="${psEscape(line.location || '')}"></div>
       </div>
-      ${psTopperFt(r) ? `<div class="settings-field"><label>Topper balloons (optional note)</label><input type="text" id="pi-edit-topper-${sanitizedEditKey}" value="${psEscape(line.topperNote || '')}"></div>` : ''}
+      ${psTopperFt(r) ? `<div class="settings-field">
+        <label>Topper balloons <span style="font-weight:400;">(color, size, and count per ONE unit of Quantity — tracked and pulled as real inventory)</span></label>
+        ${psTopperColorEditorHtml(editKey)}
+      </div>
+      <div class="settings-field"><label>Topper build note (optional)</label><input type="text" id="pi-edit-topper-${sanitizedEditKey}" placeholder="e.g. twist into a spiral" value="${psEscape(line.topperNote || '')}"></div>` : ''}
       ${psModifierEditorHtml(job, idx, line)}
       <div style="display:flex; gap:8px; margin-bottom:0.75rem;">
         <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="psSaveEditItem('${job.id}', ${idx})">Save changes</button>
@@ -11091,106 +11280,139 @@ function psIsRequirementExcluded(job, req) {
   if (job.itemInventoryExclusions && job.itemInventoryExclusions[req.productionItemId]) return true;
   return !!(job.inventoryExclusions && job.inventoryExclusions[psRequirementKey(req)]);
 }
+// A single balloon-color requirement, resolved against Standard Latex (or a business-owned
+// non-Standard-Latex identity, via job.colorResolutions) — factored out of the main color/size
+// loop below so the exact same resolution logic (job-scoped brand pick, exact-name Library
+// match, "can't attribute precisely" unresolved flag) serves every source of a color+size need:
+// the formula-driven percentage split, the exact-count override, and a topper. One shared fact
+// about what a color name resolves to for this job, never three slightly-different copies of it.
+function psStandardLatexRequirement(job, productionItemId, itemLabel, colorName, invSize, qty) {
+  const isPlaceholder = colorName === 'Unspecified';
+  const nameKey = colorName.trim().toLowerCase();
+  const resolution = !isPlaceholder && job.colorResolutions && job.colorResolutions[nameKey];
+
+  if (resolution && resolution.system && resolution.system !== 'standardLatex') {
+    const bizReq = {
+      jobId: job.id, productionItemId, system: resolution.system,
+      colorId: null, inventoryItemId: resolution.itemId, brand: '',
+      color: colorName, size: resolution.size || invSize,
+      qty, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
+      source: { jobId: job.id, jobName: job.jobName || '', itemLabel },
+      unresolved: false,
+    };
+    bizReq.excluded = psIsRequirementExcluded(job, bizReq);
+    return bizReq;
+  }
+
+  const matches = isPlaceholder ? [] : clEntriesByExactName(colorName);
+  const resolvedEntry = resolution && resolution.colorId && COLOR_LIBRARY.find(e => e.id === resolution.colorId);
+  const libraryEntry = resolvedEntry || (matches.length === 1 ? matches[0] : null);
+  const unresolved = !isPlaceholder && !libraryEntry;
+  const invItem = libraryEntry ? INVENTORY_ITEMS.find(i => i.colorId === libraryEntry.id) : null;
+
+  const stdReq = {
+    jobId: job.id,
+    productionItemId,
+    system: 'standardLatex',
+    colorId: libraryEntry ? libraryEntry.id : null,
+    inventoryItemId: invItem ? invItem.id : null,
+    brand: libraryEntry ? libraryEntry.brand : '',
+    color: libraryEntry ? libraryEntry.colorName : colorName,
+    size: invSize,
+    qty,
+    unit: 'balloon',
+    requiredBy: job.eventDate || '',
+    category: 'balloon',
+    source: { jobId: job.id, jobName: job.jobName || '', itemLabel },
+    unresolved,
+    candidates: unresolved ? matches : undefined,
+  };
+  stdReq.excluded = psIsRequirementExcluded(job, stdReq);
+  return stdReq;
+}
+
 function psComputeJobRequirements(job) {
   const requirements = [];
   (job.productionItems || []).forEach((line, lineIdx) => {
     const recipe = psLineRecipe(line);
     if (!recipe) return;
     const productionItemId = line.id || (job.id + ':' + lineIdx); // older items predate the id field
-    const totalsResult = psComputeTotals(recipe, line.qty, line.customLinear);
-    // A broken formula config (missing footage, missing/non-numeric rates) must surface as an
-    // explicit, actionable "needs configuration" requirement — never silently disappear, and
-    // never let an invalid (NaN) total reach the requirement list below, where every existing
-    // "<= 0" skip-guard would fail to catch it (NaN comparisons are always false), letting it
-    // slide all the way to Review & Pull as a false "Ready" row with an actionable Pull button.
-    if (!totalsResult.valid) {
-      requirements.push({
-        jobId: job.id, productionItemId, colorId: null, inventoryItemId: null, brand: '',
-        color: '', size: '', qty: 0, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
-        source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
-        unresolved: false, formulaInvalid: true, formulaInvalidReason: totalsResult.reason, templateId: recipe.id || null,
+    const itemLabel = psLineLabel(line, recipe);
+
+    // Exact per-color-per-size counts (line.colorSplitMode === 'exact') fully replace the
+    // formula/footage-driven calculation below — "this pattern is custom" means the Classic/
+    // Freeform rate table never applies here at all, not just that its output gets over-ridden
+    // after the fact. Entered per ONE unit of Quantity (see psColorCountDraftStore/
+    // psSaveEditItem) and multiplied by line.qty here, matching how the formula path already
+    // scales a per-ft rate by qty — so raising Quantity later scales a custom pattern exactly
+    // the same way it already scales a calculated one, with no separate mental model to learn.
+    if (line.colorSplitMode === 'exact' && line.colorCounts && Object.keys(line.colorCounts).length) {
+      Object.keys(line.colorCounts).forEach(colorName => {
+        const bySize = line.colorCounts[colorName] || {};
+        Object.keys(bySize).forEach(prodSize => {
+          const invSize = INV_SIZE_FROM_PRODUCTION[prodSize];
+          if (!invSize) return;
+          const perUnit = bySize[prodSize];
+          if (!Number.isFinite(perUnit) || perUnit <= 0) return;
+          const qty = Math.round(perUnit * (line.qty || 1));
+          if (qty <= 0) return;
+          requirements.push(psStandardLatexRequirement(job, productionItemId, itemLabel, colorName, invSize, qty));
+        });
       });
-      return;
+    } else {
+      const totalsResult = psComputeTotals(recipe, line.qty, line.customLinear);
+      // A broken formula config (missing footage, missing/non-numeric rates) must surface as an
+      // explicit, actionable "needs configuration" requirement — never silently disappear, and
+      // never let an invalid (NaN) total reach the requirement list below, where every existing
+      // "<= 0" skip-guard would fail to catch it (NaN comparisons are always false), letting it
+      // slide all the way to Review & Pull as a false "Ready" row with an actionable Pull button.
+      if (!totalsResult.valid) {
+        requirements.push({
+          jobId: job.id, productionItemId, colorId: null, inventoryItemId: null, brand: '',
+          color: '', size: '', qty: 0, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
+          source: { jobId: job.id, jobName: job.jobName || '', itemLabel },
+          unresolved: false, formulaInvalid: true, formulaInvalidReason: totalsResult.reason, templateId: recipe.id || null,
+        });
+        return;
+      }
+      const totals = psApplySizeOverride(totalsResult.sizes, line);
+      // Colors marked "general note" during import (see irMarkColorGeneralNote) never generate an
+      // inventory requirement here — they're not resolvable Standard Latex colors, and treating one
+      // as an unresolved color would wrongly invite "add this to your Color Library." They're still
+      // surfaced, just in Production's own Pull section (see psLineBalloonColors), not here.
+      const rawColors = line.colors && line.colors.length ? line.colors : ['Unspecified'];
+      const colors = psLineBalloonColors({ colors: rawColors, colorGeneralNotes: line.colorGeneralNotes });
+      if (colors.length > 0) {
+        const nColors = colors.length;
+        Object.keys(totals).forEach(prodSize => {
+          const invSize = INV_SIZE_FROM_PRODUCTION[prodSize];
+          if (!invSize) return;
+          const total = totals[prodSize];
+          if (!Number.isFinite(total) || total <= 0) return;
+
+          const distEntries = (line.colorDist && line.colorDist.length) ? line.colorDist : colors.map(name => ({ name, pct: null }));
+          distEntries.forEach(cd => {
+            const qty = (typeof cd.pct === 'number' && Number.isFinite(cd.pct)) ? Math.round(total * (cd.pct / 100)) : psColorCount(total, nColors);
+            if (!Number.isFinite(qty) || qty <= 0) return;
+            requirements.push(psStandardLatexRequirement(job, productionItemId, itemLabel, cd.name, invSize, qty));
+          });
+        });
+      }
     }
-    const totals = psApplySizeOverride(totalsResult.sizes, line);
-    // Colors marked "general note" during import (see irMarkColorGeneralNote) never generate an
-    // inventory requirement here — they're not resolvable Standard Latex colors, and treating one
-    // as an unresolved color would wrongly invite "add this to your Color Library." They're still
-    // surfaced, just in Production's own Pull section (see psLineBalloonColors), not here.
-    const rawColors = line.colors && line.colors.length ? line.colors : ['Unspecified'];
-    const colors = psLineBalloonColors({ colors: rawColors, colorGeneralNotes: line.colorGeneralNotes });
-    if (colors.length === 0) return; // every color on this line was a general note — nothing balloon-inventory-shaped to require
-    const nColors = colors.length;
 
-    Object.keys(totals).forEach(prodSize => {
-      const invSize = INV_SIZE_FROM_PRODUCTION[prodSize];
+    // A topper's own color(s) — tracked as real inventory just like the body, not just a build
+    // note (see line.topperNote for the separate free-text instruction, kept as-is alongside
+    // this). Entered per ONE unit of Quantity, same convention and same reason as the exact-count
+    // body override above — one topper per column/arch, scaling automatically with Quantity.
+    (line.topper || []).forEach(t => {
+      if (!t.color || !t.color.trim() || !t.size) return;
+      const invSize = INV_SIZE_FROM_PRODUCTION[t.size];
       if (!invSize) return;
-      const total = totals[prodSize];
-      if (!Number.isFinite(total) || total <= 0) return;
-
-      const distEntries = (line.colorDist && line.colorDist.length) ? line.colorDist : colors.map(name => ({ name, pct: null }));
-      distEntries.forEach(cd => {
-        const qty = (typeof cd.pct === 'number' && Number.isFinite(cd.pct)) ? Math.round(total * (cd.pct / 100)) : psColorCount(total, nColors);
-        if (!Number.isFinite(qty) || qty <= 0) return;
-
-        const isPlaceholder = cd.name === 'Unspecified';
-        const nameKey = cd.name.trim().toLowerCase();
-        // A job-scoped resolution (set via Import Review or Review & Pull) always wins over
-        // anything computed below — it's this specific job's own confirmed answer.
-        const resolution = !isPlaceholder && job.colorResolutions && job.colorResolutions[nameKey];
-
-        // A color resolved to a business-owned NON-Standard-Latex inventory record (e.g. "Cow
-        // Print" -> a Specialty Latex Printed item) — the generalized identity from the
-        // Production Requirement / Material Reference architecture, routed through the exact
-        // same requirement/Review & Pull/ledger pipeline as a Standard Latex color, just
-        // addressing a different system. Never requires a global manufacturer/catalog identity —
-        // itemId is that business's own permanent record id.
-        if (resolution && resolution.system && resolution.system !== 'standardLatex') {
-          const bizReq = {
-            jobId: job.id, productionItemId, system: resolution.system,
-            colorId: null, inventoryItemId: resolution.itemId, brand: '',
-            color: cd.name, size: resolution.size || null,
-            qty, unit: 'balloon', requiredBy: job.eventDate || '', category: 'balloon',
-            source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
-            unresolved: false,
-          };
-          bizReq.excluded = psIsRequirementExcluded(job, bizReq);
-          requirements.push(bizReq);
-          return;
-        }
-
-        // ── Standard Latex — exact existing resolution, untouched ──
-        // Resolve against the Color Library by exact name/alias — deliberately not the fuzzy
-        // Import Review matcher. A name shared by two+ brands can't be attributed to one of
-        // them without guessing, so that case is flagged rather than picking arbitrarily —
-        // and inventoryItemId stays null right along with colorId/brand in that case, rather
-        // than quietly picking whichever brand's Inventory row happens to match by name.
-        const matches = isPlaceholder ? [] : clEntriesByExactName(cd.name);
-        const resolvedEntry = resolution && resolution.colorId && COLOR_LIBRARY.find(e => e.id === resolution.colorId);
-        const libraryEntry = resolvedEntry || (matches.length === 1 ? matches[0] : null);
-        const unresolved = !isPlaceholder && !libraryEntry;
-        const invItem = libraryEntry ? INVENTORY_ITEMS.find(i => i.colorId === libraryEntry.id) : null;
-
-        const stdReq = {
-          jobId: job.id,
-          productionItemId,
-          system: 'standardLatex',
-          colorId: libraryEntry ? libraryEntry.id : null,
-          inventoryItemId: invItem ? invItem.id : null,
-          brand: libraryEntry ? libraryEntry.brand : '',
-          color: libraryEntry ? libraryEntry.colorName : cd.name,
-          size: invSize,
-          qty,
-          unit: 'balloon',
-          requiredBy: job.eventDate || '',
-          category: 'balloon',
-          source: { jobId: job.id, jobName: job.jobName || '', itemLabel: psLineLabel(line, recipe) },
-          unresolved, // multiple brands share this name (or it's not in the Library at all) — can't attribute precisely
-          candidates: unresolved ? matches : undefined, // every brand this name matches, for Review & Pull's resolution UI
-        };
-        stdReq.excluded = psIsRequirementExcluded(job, stdReq);
-        requirements.push(stdReq);
-      });
+      const perUnit = Number.isFinite(t.qty) ? t.qty : 0;
+      if (perUnit <= 0) return;
+      const qty = Math.round(perUnit * (line.qty || 1));
+      if (qty <= 0) return;
+      requirements.push(psStandardLatexRequirement(job, productionItemId, itemLabel + ' — Topper', t.color, invSize, qty));
     });
 
     // Job-instance add-ons/modifiers (e.g. "Red Starburst x6" on an arch) — a flat, directly-typed
