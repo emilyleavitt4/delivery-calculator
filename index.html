@@ -12774,15 +12774,237 @@ function invOrderLinePickerHtml() {
   </div>`;
   return html;
 }
+// ─── Invoice upload — bulk order entry for the real "whole pages of things at once" case ───
+//
+// One-line-at-a-time entry (invOrderLinePickerHtml above) is the right tool for a quick 2-3 item
+// order, but a real vendor shipment invoice can carry dozens of rows — this parses one instead of
+// making a person click through the manual picker that many times. Reuses psExtractPdfText
+// (already built and tested for Import Job's own PDF reading) for the PDF-to-text step; everything
+// downstream here is new and specific to a VENDOR STOCK invoice's shape (stock#/qty/unit/
+// description/price columns), a genuinely different document than the customer-job invoices
+// psParseInvoiceText already handles, so this is deliberately its own parser, not a reuse of that
+// one. Scoped to Standard Latex only for now — that's the concrete, real invoice shape this was
+// built and tested against; a Specialty Latex/Foil/Add-Ons vendor invoice would need its own
+// column-shape investigation before this could safely extend there, so it isn't guessed at here.
+//
+// Same "never guess a color, always let a human confirm" rule as everywhere else in this file
+// (clResolveName) — a row's color is auto-filled only on an exact, unambiguous Library match;
+// anything else is left for a manual pick, never silently assumed.
+let invInvoiceDraft = null; // { vendor, orderedDate, rows: [...] } while reviewing a parsed invoice, else null
+let invInvoiceMode = null; // 'upload' | 'paste' | null — which input method is showing
+
+// One data row of a Loftus-shaped stock invoice, reconstructed by psExtractPdfText as a single
+// text line: STOCK# QTY-SOLD QTY-SHIP QTY-B/O UNIT DESCRIPTION PRICE EXT-PRICE. QTY-SHIP (not
+// QTY-SOLD or QTY-B/O) is what's actually arriving, so that's the number this reads.
+const INV_INVOICE_ROW_RE = /^([A-Z0-9][A-Z0-9\-\/]{2,})\s+(\d+)\s+(\d+)\s+(\d+)\s+([A-Z]{2,4})\s+(.+?)\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})\s*$/;
+// A description like `11" DELUXE BLACK - 100 CT` or `5" DELUXE COSMO PINK` (the trailing pack-
+// count suffix is optional — not every row has one, and it's discarded either way since Standard
+// Package Qty is this business's own configured field, never inferred from an invoice).
+function invParseInvoiceDescription(desc) {
+  const m = (desc || '').match(/^(\d+)"\s*(.+)$/);
+  if (!m) return null;
+  const colorRaw = m[2].replace(/-?\s*\d+\s*CT\s*$/i, '').replace(/-\s*$/, '').trim();
+  if (!colorRaw) return null;
+  return { sizeRaw: m[1] + '"', colorRaw };
+}
+function invNewInvoiceRowId() { return 'invrow_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+// Parses raw extracted text into review rows — never touches COLOR_LIBRARY/INVENTORY_ITEMS/the
+// ledger itself; purely builds the draft psSubmitInvoiceOrder (below) later commits explicitly.
+function invBuildInvoiceDraftFromText(text) {
+  const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const rows = [];
+  let orderedDate = '';
+  lines.forEach(line => {
+    const dateMatch = !orderedDate && line.match(/INVOICE\s*DATE\D*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+    if (dateMatch) orderedDate = dateMatch[1];
+    const rowMatch = line.match(INV_INVOICE_ROW_RE);
+    if (!rowMatch) return;
+    const [, stockNumber, , qtyShip, , unit, description] = rowMatch;
+    const parsedDesc = invParseInvoiceDescription(description);
+    if (!parsedDesc) return; // not a size+color row — a subtotal/fee line etc. that happened to match the column shape
+    const invSize = INV_SIZE_FROM_PRODUCTION[parsedDesc.sizeRaw] || null;
+    const resolution = clResolveName(parsedDesc.colorRaw);
+    const item = resolution.status === 'resolved' ? INVENTORY_ITEMS.find(i => i.colorId === resolution.entry.id && i.active !== false) : null;
+    rows.push({
+      id: invNewInvoiceRowId(),
+      stockNumber, raw: description, sizeRaw: parsedDesc.sizeRaw, colorRaw: parsedDesc.colorRaw,
+      invSize, qty: parseInt(qtyShip, 10) || 0,
+      colorId: (resolution.status === 'resolved' && item) ? resolution.entry.id : null,
+      itemId: item ? item.id : null,
+      matchStatus: !invSize ? 'badSize' : (resolution.status === 'resolved' ? (item ? 'resolved' : 'noItem') : resolution.status), // 'resolved' | 'ambiguous' | 'none' | 'noItem' | 'badSize'
+      include: true,
+    });
+  });
+  return { vendor: '', orderedDate, rows };
+}
+async function invHandleInvoiceFile(fileInput) {
+  const file = fileInput.files[0];
+  if (!file) return;
+  try {
+    const text = await psExtractPdfText(file);
+    invInvoiceDraft = invBuildInvoiceDraftFromText(text);
+    if (invInvoiceDraft.rows.length === 0) {
+      alert("Couldn't find any recognizable line items in that PDF. If the layout is unusual, try \"Paste invoice text\" instead and paste the item table directly.");
+      invInvoiceDraft = null;
+    }
+    invInvoiceMode = null;
+  } catch (err) {
+    console.error('Invoice PDF read failed:', err);
+    alert("Couldn't read that PDF — try again, or paste the invoice text instead.");
+  }
+  fileInput.value = '';
+  invRenderOrdersSection();
+}
+function invParseInvoicePaste() {
+  const text = (document.getElementById('inv-invoice-paste') || {}).value || '';
+  invInvoiceDraft = invBuildInvoiceDraftFromText(text);
+  if (invInvoiceDraft.rows.length === 0) {
+    alert("Couldn't find any recognizable line items in that text. Each item line should look like a stock invoice row: a stock number, quantities, a unit, a size + color description, and prices.");
+    invInvoiceDraft = null;
+  }
+  invInvoiceMode = null;
+  invRenderOrdersSection();
+}
+function invOpenInvoiceMode(mode) {
+  invInvoiceMode = mode;
+  invRenderOrdersSection();
+}
+function invCancelInvoiceDraft() {
+  invInvoiceDraft = null;
+  invInvoiceMode = null;
+  invRenderOrdersSection();
+}
+function invInvoiceSetField(field, value) {
+  if (!invInvoiceDraft) return;
+  invInvoiceDraft[field] = value;
+}
+function invInvoiceSetRowColor(rowId, colorId) {
+  const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
+  if (!row) return;
+  if (!colorId) { row.colorId = null; row.itemId = null; row.matchStatus = 'none'; invRenderOrdersSection(); return; }
+  const entry = COLOR_LIBRARY.find(e => e.id === colorId);
+  const item = INVENTORY_ITEMS.find(i => i.colorId === colorId && i.active !== false);
+  row.colorId = colorId;
+  row.itemId = item ? item.id : null;
+  row.matchStatus = item ? 'resolved' : 'noItem';
+  invRenderOrdersSection();
+}
+function invInvoiceSetRowQty(rowId, value) {
+  const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
+  if (!row) return;
+  row.qty = parseFloat(value) || 0;
+}
+function invInvoiceSetRowInclude(rowId, checked) {
+  const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
+  if (!row) return;
+  row.include = checked;
+  invRenderOrdersSection();
+}
+function invInvoiceRemoveRow(rowId) {
+  if (!invInvoiceDraft) return;
+  invInvoiceDraft.rows = invInvoiceDraft.rows.filter(r => r.id !== rowId);
+  invRenderOrdersSection();
+}
+// Builds real order lines only from rows that are both included AND fully resolved (a real
+// colorId + a real Standard Latex Inventory item + a real qty) — anything else is reported and
+// skipped rather than silently guessed onto the order or silently dropped without a word.
+function invSubmitInvoiceOrder() {
+  if (!invInvoiceDraft) return;
+  const vendor = ((document.getElementById('inv-invoice-vendor') || {}).value || '').trim();
+  const date = ((document.getElementById('inv-invoice-date') || {}).value || '').trim();
+  const usable = invInvoiceDraft.rows.filter(r => r.include && r.itemId && r.invSize && r.qty > 0);
+  const skipped = invInvoiceDraft.rows.filter(r => r.include).length - usable.length;
+  if (usable.length === 0) { alert('No rows are ready to order yet — pick a color for at least one row.'); return; }
+  const lines = usable.map(r => {
+    const item = invFindItem(r.itemId);
+    const label = (item ? [item.brand, item.color].filter(Boolean).join(' ') : r.colorRaw) + ` — ${r.invSize}`;
+    return { system: 'standardLatex', itemId: r.itemId, size: r.invSize, qty: r.qty, label };
+  });
+  const order = { id: psNewInventoryOrderId(), vendor, orderedDate: date, status: 'ordered', receivedDate: '', lines };
+  invInvoiceDraft = null;
+  window.fbSaveInventoryOrder(order).then(() => {
+    if (skipped > 0) alert(`Added ${lines.length} line${lines.length === 1 ? '' : 's'} to the order. ${skipped} line${skipped === 1 ? '' : 's'} couldn't be matched and ${skipped === 1 ? 'was' : 'were'} skipped — add ${skipped === 1 ? 'it' : 'them'} manually if needed.`);
+  }).catch(err => {
+    console.error(err);
+    alert("Couldn't save that order — check your connection and try again.");
+  });
+  invRenderOrdersSection();
+}
+function invInvoiceMatchBadgeHtml(status) {
+  if (status === 'resolved') return `<span class="rp-badge rp-badge-ready">Matched</span>`;
+  if (status === 'ambiguous') return `<span class="rp-badge rp-badge-attention">Pick brand</span>`;
+  if (status === 'noItem') return `<span class="rp-badge rp-badge-attention">Not in Inventory</span>`;
+  if (status === 'badSize') return `<span class="rp-badge rp-badge-danger">Unknown size</span>`;
+  return `<span class="rp-badge rp-badge-danger">No match</span>`;
+}
+// Every active Standard Latex color, for the manual fix-up picker on a row that didn't
+// auto-resolve — plain alphabetical, not filtered by anything the row itself guessed.
+function invInvoiceColorOptionsHtml(selectedId) {
+  const sorted = COLOR_LIBRARY.filter(e => e.active !== false).sort((a, b) => a.colorName.localeCompare(b.colorName));
+  return `<option value="">— pick a color —</option>` + sorted.map(e => `<option value="${e.id}" ${e.id === selectedId ? 'selected' : ''}>${psEscape(e.colorName)}${e.brand ? ' (' + psEscape(e.brand) + ')' : ''}</option>`).join('');
+}
+function invInvoiceDraftHtml() {
+  const rows = invInvoiceDraft.rows;
+  const readyCount = rows.filter(r => r.include && r.itemId && r.invSize && r.qty > 0).length;
+  let html = `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Reviewed ${rows.length} line${rows.length === 1 ? '' : 's'} — fix any that didn't match before saving. Nothing is added to Inventory until you Mark Received on the saved order.</div>`;
+  html += `<div class="row">
+    <div class="settings-field" style="margin-bottom:0;"><label>Ordered from</label><input type="text" id="inv-invoice-vendor" placeholder="e.g. Loftus" value="${invAttr(invInvoiceDraft.vendor)}"></div>
+    <div class="settings-field" style="margin-bottom:0;"><label>Order date</label><input type="text" id="inv-invoice-date" placeholder="e.g. 9/8/26" value="${invAttr(invInvoiceDraft.orderedDate)}"></div>
+  </div>`;
+  html += `<div style="max-height:360px; overflow-y:auto; margin:0.5rem 0; border:0.5px solid var(--border); border-radius:var(--radius-sm);">`;
+  rows.forEach(r => {
+    html += `<div style="padding:6px 8px; border-bottom:0.5px solid var(--border);">
+      <div style="display:flex; align-items:flex-start; gap:6px;">
+        <input type="checkbox" ${r.include ? 'checked' : ''} style="margin-top:3px;" onchange="invInvoiceSetRowInclude('${r.id}', this.checked)">
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:12px; color:var(--text-secondary);">${psEscape(r.stockNumber)} — ${psEscape(r.raw)}</div>
+          <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:2px;">
+            ${invInvoiceMatchBadgeHtml(r.matchStatus)}
+            ${r.invSize ? `<span style="font-size:12px;">${psEscape(r.invSize)}</span>` : ''}
+            <select style="width:auto; min-width:160px;" onchange="invInvoiceSetRowColor('${r.id}', this.value)">${invInvoiceColorOptionsHtml(r.colorId)}</select>
+            <input type="number" min="0" value="${r.qty}" style="width:70px;" oninput="invInvoiceSetRowQty('${r.id}', this.value)">
+            <button class="icon-btn" style="padding:2px 6px;" onclick="invInvoiceRemoveRow('${r.id}')" aria-label="Remove row"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  });
+  html += `</div>`;
+  html += `<div style="display:flex; gap:8px;">
+    <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="invSubmitInvoiceOrder()">Save order (${readyCount} line${readyCount === 1 ? '' : 's'} ready)</button>
+    <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invCancelInvoiceDraft()">Cancel</button>
+  </div>`;
+  return html;
+}
+
 function invOrdersSectionHtml() {
   const pending = INVENTORY_ORDERS.filter(o => o.status === 'ordered' || o.status === 'backordered');
   let html = `<div class="section-label" style="margin-top:0;">Orders</div><div class="inv-orders-grid">`;
 
-  // Left pane — Add an Order
+  // Left pane — Add an Order. Three entry points: a quick manual composer for a small order (a
+  // few lines, picked one at a time), or reading a real vendor invoice — upload the PDF or paste
+  // its text — for the "whole pages of things at once" case a manual picker doesn't scale to.
   html += `<div class="card">
     <div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">Add an Order</div>`;
-  if (!invOrderDraft) {
-    html += `<button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenNewOrder()"><i class="fa-solid fa-cart-plus"></i> New order</button>`;
+  if (invInvoiceDraft) {
+    html += invInvoiceDraftHtml();
+  } else if (invInvoiceMode === 'upload') {
+    html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Upload the vendor's invoice PDF — it's read entirely in your browser, nothing is uploaded anywhere else.</div>
+      <input type="file" accept="application/pdf" onchange="invHandleInvoiceFile(this)">
+      <div style="margin-top:0.5rem;"><button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px;" onclick="invCancelInvoiceDraft()">Cancel</button></div>`;
+  } else if (invInvoiceMode === 'paste') {
+    html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Paste the invoice's item table (stock number, quantities, description, price columns).</div>
+      <textarea id="inv-invoice-paste" rows="6" style="width:100%; font-family:monospace; font-size:11px;" placeholder="B5-3014   3   3   0   BAG   11&quot; DELUXE BLACK - 100 CT   $12.67   $38.01"></textarea>
+      <div style="display:flex; gap:8px; margin-top:0.5rem;">
+        <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="invParseInvoicePaste()">Parse</button>
+        <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invCancelInvoiceDraft()">Cancel</button>
+      </div>`;
+  } else if (!invOrderDraft) {
+    html += `<div style="display:flex; flex-direction:column; gap:6px; align-items:flex-start;">
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenInvoiceMode('upload')"><i class="fa-solid fa-file-pdf"></i> Upload invoice</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenInvoiceMode('paste')"><i class="fa-solid fa-paste"></i> Paste invoice text</button>
+      <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="invOpenNewOrder()"><i class="fa-solid fa-cart-plus"></i> Add manually (a few items)</button>
+    </div>`;
   } else {
     html += `<div class="row">
       <div class="settings-field" style="margin-bottom:0;"><label>Ordered from</label><input type="text" id="inv-order-vendor-new" placeholder="e.g. Loftus" value="${invAttr(invOrderDraft.vendor)}" oninput="invOrderDraftSetField('vendor', this.value)"></div>
