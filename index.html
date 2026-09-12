@@ -1719,6 +1719,7 @@
 
   <!-- ═══════════════════════════════════════ PRODUCTION VIEW -->
   <div class="view" id="view-production">
+    <div id="ps-equipment-out-root"></div>
     <div class="section-label" style="margin-top:0">Jobs</div>
     <div id="ps-production-job-list"></div>
     <div id="ps-production-empty" class="card" style="text-align:center; color:var(--text-secondary); display:none;">
@@ -4833,7 +4834,13 @@ function psUpdateStaffingField(jobId, field, value) {
 
 function psToggleRentalStatus(jobId, itemId, field, checked) {
   const job = psFindJob(jobId);
-  if (!job || psJobArchived(job) || !job.rentalItems) return;
+  if (!job || !job.rentalItems) return;
+  // Pulled/Packed are pre-event facts, locked once the job is archived like everything else in
+  // Production — but Returned is deliberately exempt: it's real post-event/strike work that
+  // routinely happens AFTER a job is already marked complete (see the Equipment Out list, which
+  // exists specifically to check gear back in once a job has moved on), so locking it the same way
+  // would make the one checkbox that matters most here permanently unreachable.
+  if (field !== 'returned' && psJobArchived(job)) return;
   const item = job.rentalItems.find(i => i.id === itemId);
   if (!item) return;
   item[field] = checked;
@@ -6063,7 +6070,50 @@ function psCompletedSectionHtml(view, completedJobs, cardHtmlFn) {
   return html;
 }
 
+// Cross-job "what rental gear is currently out" list — direct feedback that a single job's own
+// collapsible card is the wrong place to check gear back in: finding and expanding whichever job
+// it came from is exactly the friction this replaces. Scans EVERY job, active or archived, since
+// gear coming back is routinely a post-completion event (see psToggleRentalStatus's own exemption
+// for 'returned') — a rental item only counts as "out" once it's actually left the building
+// (pulled) and hasn't come back yet (not returned); Packed-but-not-pulled isn't out yet.
+function psEquipmentOutRows() {
+  const rows = [];
+  JOBS.forEach(job => {
+    (job.rentalItems || []).forEach(item => {
+      if (item.pulled && !item.returned) {
+        rows.push({ jobId: job.id, jobName: job.jobName || 'Untitled job', itemId: item.id, itemName: item.name, qty: item.qty });
+      }
+    });
+  });
+  return rows;
+}
+function psRenderEquipmentOut() {
+  const root = document.getElementById('ps-equipment-out-root');
+  if (!root) return;
+  const rows = psEquipmentOutRows();
+  // Hidden entirely when nothing's out — this is a working list, not a permanent fixture that
+  // should sit there empty most of the time.
+  if (rows.length === 0) { root.innerHTML = ''; return; }
+  let html = `<div class="section-label" style="margin-top:0">Equipment out</div><div class="card no-print">`;
+  rows.forEach((r, i) => {
+    html += `<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 0;${i > 0 ? ' border-top:0.5px solid var(--border);' : ''}">
+      <div style="font-size:13px;">${psEscape(r.itemName)}${r.qty > 1 ? ` × ${r.qty}` : ''} <span style="color:var(--text-secondary);">— ${psEscape(r.jobName)}</span></div>
+      <label style="display:flex; align-items:center; gap:4px; flex-shrink:0; font-size:13px;"><input type="checkbox" onchange="psCheckInEquipment('${r.jobId}','${r.itemId}')"> Returned</label>
+    </div>`;
+  });
+  html += `</div>`;
+  root.innerHTML = html;
+}
+// Marking gear returned from this list only ever needs to go one way (check it in) — once checked,
+// the row's own job no longer has anything "out" for it, so it simply drops out of this list on
+// the next render rather than staying to offer an uncheck that would have nothing left to act on.
+function psCheckInEquipment(jobId, itemId) {
+  psToggleRentalStatus(jobId, itemId, 'returned', true);
+  psRenderEquipmentOut();
+}
+
 function psRenderProductionJobs() {
+  psRenderEquipmentOut();
   const container = document.getElementById('ps-production-job-list');
   const empty = document.getElementById('ps-production-empty');
   const jobs = psSortedJobs();
@@ -7657,10 +7707,10 @@ function psProductionBodyHtml(job) {
   // Rental-classified import items (see the Mapping Layer / IM_CLASSIFICATIONS) land in
   // job.rentalItems instead of productionItems — they're gear to gather and bring back, not
   // something to build, so they get their own pull/pack checklist instead of a pull list +
-  // build-detail card. Returned lives in its OWN section further down (see below, after Finish &
-  // Pack) — reported directly: Returned is real post-event/strike work, and bundling it in here
-  // alongside pre-event Pulled/Packed meant this block could never read "done" until well after
-  // the job itself was actually finished.
+  // build-detail card. Returned is deliberately NOT here at all — per direct feedback, checking
+  // gear back in shouldn't require finding and expanding whichever job it came from, so it lives
+  // in the cross-job "Equipment out" list at the top of Production instead (psRenderEquipmentOut),
+  // which also has to work AFTER this job is archived (see psToggleRentalStatus's own exemption).
   const rentalItems = job.rentalItems || [];
   if (rentalItems.length > 0) {
     html += `<div class="section-label">Rentals — pull / pack</div>`;
@@ -7697,20 +7747,6 @@ function psProductionBodyHtml(job) {
   }
 
   if (job.productionItems.length > 0) html += psPhaseSectionHtml(job, 'finish');
-
-  // Its own section, after Finish & Pack (the last pre-event stage) — see the comment on the
-  // pull/pack block above for why Returned was split out on its own. Same job.rentalItems records,
-  // same psToggleRentalStatus mutation, just rendered from a later point in the job so it reads as
-  // what-happens-after-the-event rather than part of getting ready for it.
-  if (rentalItems.length > 0) {
-    html += `<div class="section-label">Rentals — return <span style="font-weight:400; text-transform:none; color:var(--text-secondary); font-size:12px;">(after the event)</span></div>`;
-    rentalItems.forEach(item => {
-      html += `<div style="padding:6px 0; border-top:0.5px solid var(--border); display:flex; align-items:center; justify-content:space-between; font-size:13px;">
-        <div>${psEscape(item.name)} <span style="font-weight:400; color:var(--text-secondary);">× ${item.qty}</span></div>
-        <label style="display:flex; align-items:center; gap:4px; flex-shrink:0;"><input type="checkbox" ${item.returned ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','returned',this.checked)"> Returned</label>
-      </div>`;
-    });
-  }
 
   html += `<div class="no-print">`;
   if (readOnly) {
