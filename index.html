@@ -13537,6 +13537,34 @@ function invOrderDraftLineSetItem(itemId) {
   invOrderDraftLine.itemId = itemId;
   invRenderOrdersSection(); // a different item can mean different sizeOptions (e.g. a Foil charType) — rebuild that dropdown
 }
+// Reported directly: the Item field was one giant <select> listing every color/item in the
+// category (60+ entries for a full Standard Latex list) — "I need to be able to type 'rose' and
+// have Deluxe Rose/Pastel Rose/Pastel Dusk Rose/Rosewood pop up." Same typeable-autocomplete
+// pattern Production's own color fields already use (invShowColorSuggestions/
+// invPickColorSuggestion), just resolving to a real item id instead of a plain name string, since
+// invAddOrderLine needs the actual id to look up sizes/etc. Typing again after a selection clears
+// itemId until a suggestion is actually clicked — never guesses a match from partial text.
+function invOrderItemSearch(value) {
+  invOrderDraftLine.itemQuery = value;
+  invOrderDraftLine.itemId = '';
+  const container = document.getElementById('inv-order-item-search-suggest');
+  if (!container) return;
+  const q = value.trim().toLowerCase();
+  if (!q) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  const sys = invSystemFor(invOrderDraftLine.system);
+  const items = sys.listItems ? sys.listItems() : [];
+  const matches = items.filter(i => sys.displayLabel(i).toLowerCase().includes(q)).slice(0, 8);
+  if (matches.length === 0) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  container.innerHTML = matches.map(i =>
+    `<div class="inv-color-suggest-item" onmousedown="event.preventDefault(); invOrderItemPick('${psJsKeyAttr(i.id)}')">${psEscape(sys.displayLabel(i))}</div>`
+  ).join('');
+  container.style.display = 'block';
+}
+function invOrderItemPick(itemId) {
+  invOrderDraftLine.itemId = itemId;
+  invOrderDraftLine.itemQuery = '';
+  invRenderOrdersSection(); // a chosen item can mean different sizeOptions — rebuild that dropdown, same as the old select's onchange did
+}
 // Adding a line never touches the ledger — it only grows the in-memory draft. Nothing is real
 // until Save order writes the whole thing as one document; cancelling the draft discards every
 // line added so far, same as any other unsaved form in this app.
@@ -13585,20 +13613,22 @@ function invOrderStatusBadgeHtml(status) {
 // INV_SYSTEMS, no per-category special-casing in this function itself.
 function invOrderLinePickerHtml() {
   const sys = invSystemFor(invOrderDraftLine.system);
-  const items = sys.listItems ? sys.listItems() : [];
   const selectedItem = invOrderDraftLine.itemId ? sys.findItem(invOrderDraftLine.itemId) : null;
   const sizeOpts = selectedItem && sys.sizeOptions ? sys.sizeOptions(selectedItem) : null;
+  // Typeable, not a giant <select> of every color in the category — see invOrderItemSearch's own
+  // comment. The visible value is the resolved label once something's actually picked, otherwise
+  // whatever's currently typed.
+  const itemInputValue = selectedItem ? sys.displayLabel(selectedItem) : (invOrderDraftLine.itemQuery || '');
   let html = `<div class="row">
     <div class="settings-field" style="margin-bottom:0;"><label>Category</label>
       <select onchange="invOrderDraftLineSetSystem(this.value)">
         ${Object.keys(INV_SYSTEMS).map(key => `<option value="${key}" ${key === invOrderDraftLine.system ? 'selected' : ''}>${psEscape(INV_SYSTEMS[key].label)}</option>`).join('')}
       </select>
     </div>
-    <div class="settings-field" style="margin-bottom:0;"><label>Item</label>
-      <select onchange="invOrderDraftLineSetItem(this.value)">
-        <option value="">— select —</option>
-        ${items.map(i => `<option value="${invAttr(i.id)}" ${i.id === invOrderDraftLine.itemId ? 'selected' : ''}>${psEscape(sys.displayLabel(i))}</option>`).join('')}
-      </select>
+    <div class="settings-field" style="margin-bottom:0; position:relative;"><label>Item</label>
+      <input type="text" id="inv-order-item-search" placeholder="Start typing a color..." value="${invAttr(itemInputValue)}"
+        oninput="invOrderItemSearch(this.value)" onfocus="invOrderItemSearch(this.value)" onblur="invHideColorSuggestionsSoon('inv-order-item-search')">
+      <div id="inv-order-item-search-suggest" class="inv-color-suggest" style="display:none;"></div>
     </div>
   </div>`;
   if (sizeOpts) {
