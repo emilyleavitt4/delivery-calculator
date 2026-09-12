@@ -12808,6 +12808,36 @@ function invParseInvoiceDescription(desc) {
   return { sizeRaw: m[1] + '"', colorRaw };
 }
 function invNewInvoiceRowId() { return 'invrow_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+// clResolveName (an exact, unambiguous match) is still the ONLY thing that ever auto-fills a
+// row's color — that never guesses, and stays exactly as strict as it is everywhere else this
+// app resolves color text. This is purely for what a human sees NEXT when that didn't resolve:
+// ranked candidates to speed up the manual pick, never an auto-applied guess. An invoice's
+// wording is reliably a superset of the Library's own (e.g. "DELUXE COSMO PINK" vs. Library's
+// "Cosmo Pink") so a normalized substring match ranks well above a raw edit-distance score, which
+// alone would rank two totally different short names as deceptively "close." Checks aliases too,
+// keeping the entry's single BEST score across its name and every alias.
+function invFuzzyColorSuggestions(colorRaw, limit) {
+  const q = (colorRaw || '').trim().toLowerCase();
+  if (!q) return [];
+  const scoreAgainst = (text) => {
+    const t = (text || '').toLowerCase();
+    if (!t) return Infinity;
+    if (t === q) return 0;
+    if (t.includes(q) || q.includes(t)) return 1 + Math.abs(t.length - q.length) / 100;
+    return 2 + rcLevenshtein(q, t) / Math.max(q.length, t.length);
+  };
+  const scored = COLOR_LIBRARY.filter(e => e.active !== false).map(e => {
+    const best = Math.min(scoreAgainst(e.colorName), ...(e.aliases || []).map(scoreAgainst));
+    return { entry: e, score: best };
+  }).filter(s => s.score < 2.5); // beyond this, edit-distance matches are just noise, not real suggestions
+  return scored.sort((a, b) => a.score - b.score).slice(0, limit || 4).map(s => s.entry);
+}
+// "DELUXE COSMO PINK" -> "Deluxe Cosmo Pink" — a plain per-word capitalize is enough for how
+// these invoices are actually formatted (all-caps, space-separated words); never applied to
+// anything already in the Library, only to a brand-new color's suggested starting name.
+function invTitleCaseWords(text) {
+  return (text || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
 // Parses raw extracted text into review rows — never touches COLOR_LIBRARY/INVENTORY_ITEMS/the
 // ledger itself; purely builds the draft psSubmitInvoiceOrder (below) later commits explicitly.
 function invBuildInvoiceDraftFromText(text) {
@@ -12825,6 +12855,7 @@ function invBuildInvoiceDraftFromText(text) {
     const invSize = INV_SIZE_FROM_PRODUCTION[parsedDesc.sizeRaw] || null;
     const resolution = clResolveName(parsedDesc.colorRaw);
     const item = resolution.status === 'resolved' ? INVENTORY_ITEMS.find(i => i.colorId === resolution.entry.id && i.active !== false) : null;
+    const resolved = resolution.status === 'resolved' && item;
     rows.push({
       id: invNewInvoiceRowId(),
       stockNumber, raw: description, sizeRaw: parsedDesc.sizeRaw, colorRaw: parsedDesc.colorRaw,
@@ -12832,6 +12863,9 @@ function invBuildInvoiceDraftFromText(text) {
       colorId: (resolution.status === 'resolved' && item) ? resolution.entry.id : null,
       itemId: item ? item.id : null,
       matchStatus: !invSize ? 'badSize' : (resolution.status === 'resolved' ? (item ? 'resolved' : 'noItem') : resolution.status), // 'resolved' | 'ambiguous' | 'none' | 'noItem' | 'badSize'
+      // Ranked candidates for a fast manual pick — only computed when there's actually a decision
+      // to speed up; a confidently auto-resolved row has nothing to suggest.
+      suggestions: resolved ? [] : invFuzzyColorSuggestions(parsedDesc.colorRaw, 4),
       include: true,
     });
   });
@@ -12887,6 +12921,44 @@ function invInvoiceSetRowColor(rowId, colorId) {
   row.colorId = colorId;
   row.itemId = item ? item.id : null;
   row.matchStatus = item ? 'resolved' : 'noItem';
+  invRenderOrdersSection();
+}
+// Best-effort default for the "Add new color" brand field — an invoice's line items are almost
+// always all one brand, so reuse whatever brand the order's own already-resolved rows share
+// rather than making every new color re-type it. Purely a starting suggestion; always editable.
+function invInvoiceGuessBrand() {
+  if (!invInvoiceDraft) return '';
+  for (const r of invInvoiceDraft.rows) {
+    if (r.itemId) { const item = invFindItem(r.itemId); if (item && item.brand) return item.brand; }
+  }
+  return '';
+}
+let invInvoiceAddColorOpenFor = null; // the one row currently showing its "add new color" mini-form, or null
+function invInvoiceOpenAddColor(rowId) {
+  invInvoiceAddColorOpenFor = invInvoiceAddColorOpenFor === rowId ? null : rowId;
+  invRenderOrdersSection();
+}
+// Creates a REAL, permanent Color Library entry + Inventory item — exactly invAddColor's own
+// logic (clFindOrCreate's dedup, then the same duplicate-Inventory-item guard), just triggered
+// from mid-review instead of the Standard Latex screen, so a genuinely new color on an invoice
+// doesn't require backing out of the order to add it and starting over.
+function invInvoiceSubmitAddColor(rowId) {
+  const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
+  if (!row) return;
+  const nameEl = document.getElementById('inv-invoice-newcolor-name-' + rowId);
+  const brandEl = document.getElementById('inv-invoice-newcolor-brand-' + rowId);
+  const color = (nameEl && nameEl.value.trim()) || '';
+  const brand = (brandEl && brandEl.value.trim()) || '';
+  if (!color) { alert('Enter a color name first.'); return; }
+  const libraryEntry = clFindOrCreate(brand, color);
+  clSaveLibrary().catch(err => console.error('Color Library save failed:', err));
+  const existingItem = INVENTORY_ITEMS.find(i => i.colorId === libraryEntry.id && i.active !== false);
+  const item = existingItem || { id: psNewInventoryItemId(), color, brand, tier: 'misc', active: true, colorId: libraryEntry.id, sizes: invBlankSizeData() };
+  if (!existingItem) invSaveItem(item);
+  row.colorId = libraryEntry.id;
+  row.itemId = item.id;
+  row.matchStatus = 'resolved';
+  invInvoiceAddColorOpenFor = null;
   invRenderOrdersSection();
 }
 function invInvoiceSetRowQty(rowId, value) {
@@ -12953,6 +13025,7 @@ function invInvoiceDraftHtml() {
   </div>`;
   html += `<div style="max-height:360px; overflow-y:auto; margin:0.5rem 0; border:0.5px solid var(--border); border-radius:var(--radius-sm);">`;
   rows.forEach(r => {
+    const needsHelp = r.matchStatus !== 'resolved';
     html += `<div style="padding:6px 8px; border-bottom:0.5px solid var(--border);">
       <div style="display:flex; align-items:flex-start; gap:6px;">
         <input type="checkbox" ${r.include ? 'checked' : ''} style="margin-top:3px;" onchange="invInvoiceSetRowInclude('${r.id}', this.checked)">
@@ -12965,6 +13038,18 @@ function invInvoiceDraftHtml() {
             <input type="number" min="0" value="${r.qty}" style="width:70px;" oninput="invInvoiceSetRowQty('${r.id}', this.value)">
             <button class="icon-btn" style="padding:2px 6px;" onclick="invInvoiceRemoveRow('${r.id}')" aria-label="Remove row"><i class="fa-solid fa-xmark"></i></button>
           </div>
+          ${needsHelp && r.suggestions.length ? `<div style="display:flex; align-items:center; gap:4px; flex-wrap:wrap; margin-top:4px;">
+            <span style="font-size:11px; color:var(--text-tertiary);">Did you mean:</span>
+            ${r.suggestions.map(s => `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;" onclick="invInvoiceSetRowColor('${r.id}','${s.id}')">${psEscape(s.colorName)}${s.brand ? ' (' + psEscape(s.brand) + ')' : ''}</button>`).join('')}
+          </div>` : ''}
+          ${needsHelp ? (invInvoiceAddColorOpenFor === r.id ? `<div class="row" style="margin-top:4px;">
+              <div class="settings-field" style="margin-bottom:0;"><input type="text" id="inv-invoice-newcolor-name-${r.id}" placeholder="Color name" value="${invAttr(invTitleCaseWords(r.colorRaw))}"></div>
+              <div class="settings-field" style="margin-bottom:0; display:flex; gap:4px;">
+                <input type="text" id="inv-invoice-newcolor-brand-${r.id}" placeholder="Brand" value="${invAttr(invInvoiceGuessBrand())}" style="flex:1;">
+                <button class="save-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="invInvoiceSubmitAddColor('${r.id}')">Add</button>
+                <button class="icon-btn" style="width:auto; padding:4px 8px; font-size:11px;" onclick="invInvoiceOpenAddColor('${r.id}')">Cancel</button>
+              </div>
+            </div>` : `<button class="icon-btn no-print" style="width:auto; padding:2px 8px; font-size:11px; color:var(--text-secondary); margin-top:4px;" onclick="invInvoiceOpenAddColor('${r.id}')"><i class="fa-solid fa-plus"></i> Add new color</button>`) : ''}
         </div>
       </div>
     </div>`;
