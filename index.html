@@ -6659,6 +6659,20 @@ function psTaskClarificationClick(jobId, taskId) {
   const note = prompt('Optional: add a short answer/resolution note') || '';
   openClar.forEach(c => psResolveFeedback(jobId, c.id, note));
 }
+// Reported directly: resolving a clarification (psTaskClarificationClick) had nowhere for the
+// answer to actually land — it just flipped psResolveFeedback's status/resolutionNote fields with
+// no display surface anywhere, so the question and its answer both effectively vanished the moment
+// it was resolved. Now shown as a small indented note directly under the task it was about,
+// permanently (not just while open) — the Q&A is real, useful context for anyone looking at this
+// item later, not something that should disappear once answered.
+function psResolvedClarificationNotesHtml(job, task, readOnly) {
+  const resolved = psJobFeedback(job, 'task', task.id).filter(f => f.kind === 'needsClarification' && f.status === 'resolved');
+  if (!resolved.length) return '';
+  return resolved.map(f => `<div style="margin:2px 0 6px 26px; padding-left:8px; border-left:2px solid var(--border-strong); font-size:11px; color:var(--text-secondary); display:flex; justify-content:space-between; gap:8px;">
+    <div><b>Q:</b> ${psEscape(f.text)}${f.resolutionNote ? `<br><b>A:</b> ${psEscape(f.resolutionNote)}` : ''} <span style="color:var(--text-tertiary);">(resolved${f.resolvedBy ? ' by ' + psEscape(f.resolvedBy) : ''}${f.resolvedAt ? ' · ' + psFeedbackWhen(f.resolvedAt) : ''})</span></div>
+    ${readOnly ? '' : `<button class="icon-btn no-print" style="width:auto; padding:1px 5px; flex-shrink:0;" title="Delete this note" onclick="psDeleteFeedback('${job.id}','${f.id}')"><i class="fa-solid fa-xmark"></i></button>`}
+  </div>`).join('');
+}
 function psTaskRowHtml(job, task, itemLabel) {
   const readOnly = psJobArchived(job);
   const done = task.status === 'done';
@@ -6677,7 +6691,7 @@ function psTaskRowHtml(job, task, itemLabel) {
     ${readOnly ? '' : `<button class="icon-btn no-print" style="width:auto; padding:2px 6px; flex-shrink:0;" title="Flag a clarification" onclick="psTaskFlagClarification('${job.id}','${task.id}')"><i class="fa-regular fa-circle-question" style="color:var(--text-tertiary);"></i></button>
     <button class="icon-btn" style="width:auto; padding:2px 6px; flex-shrink:0;" title="${task.priority ? 'Do Next — click to unmark' : 'Do Next'}" onclick="psSetTaskPriority('${job.id}','${task.id}', ${task.priority ? 'false' : 'true'})"><i class="fa-${task.priority ? 'solid' : 'regular'} fa-star" style="color:${task.priority ? 'var(--warning-text)' : 'var(--text-tertiary)'};"></i></button>
     ${!done ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psSetTaskStatus('${job.id}','${task.id}', '${held ? 'ready' : 'hold'}')">${held ? 'Resume' : 'Hold'}</button>` : ''}`}
-  </div>`;
+  </div>${psResolvedClarificationNotesHtml(job, task, readOnly)}`;
 }
 // ─── Resolving a "general note" color to real Specialty Latex / Foil inventory, from Prep ───
 //
