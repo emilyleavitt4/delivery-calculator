@@ -3610,6 +3610,18 @@ function psSyntheticPrepTasksFor(line, recipe) {
   if (recipe && recipe.pullListNotes) {
     tasks.push({ kind: 'pullnote', phase: 'prep', text: recipe.pullListNotes });
   }
+  // Reported repeatedly: buildInstructions rendered as one run-on paragraph, and wasn't
+  // checkable. This is NOT "guessing" where step boundaries are (the concern the old plain-prose
+  // rendering was deliberately built to avoid) — it's respecting line breaks Emily already typed
+  // herself, one instruction per line, in the template's own Build Instructions field. Each
+  // non-blank line becomes its own real, checkable Inflate & Build task, kind 'buildstep:<index>'
+  // so re-syncing after a template wording edit updates that exact line's task text in place
+  // without disturbing its checked/priority state or any other line's.
+  if (recipe && recipe.buildInstructions) {
+    recipe.buildInstructions.split('\n').map(s => s.trim()).filter(Boolean).forEach((stepText, i) => {
+      tasks.push({ kind: 'buildstep:' + i, phase: 'build', text: stepText });
+    });
+  }
   (line.colorGeneralNotes || []).forEach(noteKey => {
     const original = (line.colors || []).find(c => c.trim().toLowerCase() === noteKey) || noteKey;
     tasks.push({ kind: 'note:' + noteKey, phase: 'prep', text: `${original} — not a Standard Latex color; pull manually (Specialty Latex, Foil, or elsewhere)` });
@@ -3646,6 +3658,27 @@ function psSyncSyntheticPrepTasks(job, productionItemId, line, recipe) {
     if (existing) existing.text = d.text;
     else job.tasks.push({ id, productionItemId, phase: d.phase || 'prep', text: d.text, dueOffsetDays: null, status: 'ready', priority: false, synthetic: true });
   });
+}
+// psSyncSyntheticPrepTasks only ever ran at item add/edit-save time — a job added BEFORE the
+// buildInstructions-per-line task source existed (or before a template's instructions were last
+// edited) would never pick up the new checkable lines just by being viewed. Called once per render
+// of an expanded job's body (psProductionBodyHtml) so every job self-heals onto the current
+// synthetic-task set the moment someone actually opens it — cheap (only the one expanded job, not
+// the whole list) and safe to call every render: it only writes back to Firestore when the sync
+// actually changed something, so once a job is caught up this becomes a no-op comparison on every
+// later render rather than a repeated write. Never touches a completed (read-only) job.
+function psBackfillSyntheticTasksIfNeeded(job) {
+  if (job.status === 'completed') return;
+  let changed = false;
+  (job.productionItems || []).forEach(line => {
+    const recipe = psLineRecipe(line);
+    if (!recipe) return;
+    const before = JSON.stringify((job.tasks || []).filter(t => t.synthetic && t.productionItemId === line.id));
+    psSyncSyntheticPrepTasks(job, line.id, line, recipe);
+    const after = JSON.stringify((job.tasks || []).filter(t => t.synthetic && t.productionItemId === line.id));
+    if (before !== after) changed = true;
+  });
+  if (changed) psSaveJob(job);
 }
 
 // ─── Deriving completion from tasks (never a separate manual flag) ───
@@ -7046,11 +7079,25 @@ function psPrepSectionHtml(job) {
 }
 
 // ═══════════════════════════════════════ INFLATE & BUILD (per-item: what to build, reference info, real checkable steps) ═══════════════════════════════════════
+// Counts physical UNITS across every line (a qty-2 "Classic Column" contributes 2, not 1) —
+// deliberately NOT one count per distinct production-item type. Reported directly: a job with one
+// line item at qty 2, both built, showed "1/1 items complete" in this header while the item's own
+// row right below it said "Completed: 2 of 2" — both numbers were internally correct by their own
+// old definition (1 of 1 item-TYPES was fully finished), but reading "1/1" directly above "2 of 2"
+// looks like a contradiction, and the unit count is the one a person actually walking through
+// build work cares about — the same completedQty/bookedQty pair that row's own stepper already
+// shows. `complete` stays the stricter, correct "fully finished" meaning (qty AND every task done,
+// on every line — see psItemFullyFinished), independent of the unit tally above it.
 function psBuildStatusInfo(job) {
   const items = job.productionItems || [];
-  const total = items.length;
-  const done = items.filter(l => psItemFullyFinished(job, l.id)).length;
-  return { done, total, complete: total > 0 && done === total };
+  let total = 0, done = 0;
+  items.forEach(l => {
+    const bookedQty = Math.max(1, Math.round(l.qty) || 1);
+    total += bookedQty;
+    done += Math.max(0, Math.min(bookedQty, l.completedQty || 0));
+  });
+  const complete = items.length > 0 && items.every(l => psItemFullyFinished(job, l.id));
+  return { done, total, complete };
 }
 // One decor item's block: header (title + physical-completion control + Edit/Trash), a modestly
 // indented compact metadata reference block (Size/Qty/Style/Location/Colors) with the item's own
@@ -7137,13 +7184,14 @@ function psBuildItemBlockHtml(job, line, idx, readOnly) {
 
   // Real, checkable build steps — job.tasks, the one existing task/progress system, never a
   // second one. A template's tasks[] are deliberately milestone-only by default (see PS_BUILTIN_TASKS'
-  // own comment); buildInstructions (if a business has written one) stays separate, plain reference
-  // prose below rather than being guessed/split into fake steps.
+  // own comment); buildInstructions (each of its own non-blank lines) is folded into this SAME list
+  // as synthetic tasks (see psSyntheticPrepTasksFor/psBackfillSyntheticTasksIfNeeded) rather than
+  // rendered a second time as separate plain prose below — that second, uncheckable copy is exactly
+  // what was reported as confusing ("needs to be on separate lines... and clickable check boxes").
   const buildTasks = (job.tasks || []).filter(t => t.productionItemId === line.id && t.phase === 'build');
   if (buildTasks.length) {
     buildTasks.forEach(t => { html += psTaskRowHtml(job, t, null); });
   }
-  if (r.buildInstructions) html += `<div class="ps-build-fields"><b>Reference instructions:</b> ${psEscape(r.buildInstructions)}</div>`;
   if (r.equipmentList && r.equipmentList.length) html += `<div class="ps-build-fields"><b>Equipment:</b> ${r.equipmentList.map(psEscape).join(', ')}</div>`;
   if (r.packList && r.packList.length) html += `<div class="ps-build-fields"><b>Pack list:</b> ${r.packList.map(psEscape).join(', ')}</div>`;
   if (r.installNotes) html += `<div class="ps-build-fields"><b>Install notes:</b> ${psEscape(r.installNotes)}</div>`;
@@ -7251,6 +7299,7 @@ function psProductionBodyHtml(job) {
   // added this session (Review & Pull, Feedback, Attachments, Staffing). Threaded through as a
   // plain local rather than re-deriving job.status === 'completed' at every call site below.
   const readOnly = job.status === 'completed';
+  psBackfillSyntheticTasksIfNeeded(job);
   let html = '';
 
   // Client/Event name + date are already shown once, in the shared job header above this body —
