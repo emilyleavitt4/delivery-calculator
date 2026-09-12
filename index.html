@@ -9496,16 +9496,13 @@ const INV_SIZE_SHORT = { '5"/7"': '5"', '11"': '11"', '17"/18"': '18"', '24"': '
 // Maps a Production balloon size to the inventory size group it belongs to.
 const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '18"': '17"/18"', '24"': '24"', '36"': '30"/36"' };
 const INV_OPEN_STATUSES = ['Full', 'Partial', 'Empty'];
-// Open Bin is deliberately a quick qualitative status, never a counted quantity (see its own
-// comment on INV_OPEN_STATUSES/INV_OPEN_STATUS_BADGE) — nothing here writes a real number from it,
-// and it is NEVER used to compute a row's actual `available` balloons (that stays exact: backstock
-// * perBag + counted looseBalloons only). This table exists for exactly one purpose: deciding
-// whether a shortfall in Prep is confidently real ("Out of stock") or merely uncounted-but-
-// plausible ("Maybe" — go verify), per Emily's own real-world estimate of what each status
-// typically holds. Uses the upper end of her stated range on purpose — "Maybe" means "the open
-// bin COULD plausibly cover this," a generous benefit-of-the-doubt threshold to prompt a human
-// count, not a claim that the balloons are confirmed present.
-const INV_OPEN_STATUS_MAX_ESTIMATE = { Full: 100, Partial: 80, Empty: 5 };
+// Open Bin is deliberately a quick qualitative status, never a counted quantity — nothing here
+// writes a real number from it, and it is NEVER used to compute a row's actual `available`
+// balloons (that stays exact: backstock * perBag + counted looseBalloons only). Per explicit
+// revision, a shortfall against the exact numbers is "Out of stock" ONLY when the Open Bin status
+// is also 'Empty' — Full or Partial always earns "Maybe, go check" instead, regardless of how
+// large the shortfall looks (see psReviewPullRows' own comment; this replaced an earlier
+// per-status magnitude-estimate cap that no longer applies).
 // Compact letter + color chip for the quick-view glance — same warning/info convention as the
 // backstock number boxes right above it: Empty is a solid warning fill (needs refilling, most
 // urgent), Partial a lighter warning tint, Full uses the calm info-blue (fully stocked).
@@ -12026,21 +12023,25 @@ function psReviewPullRows(job) {
     }
     if (stillNeeded <= 0) return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'done' });
     if (available < stillNeeded) {
-      // A real shortfall against the exact, counted numbers — but Open Bin's own status (a quick
-      // qualitative glance, never a counted quantity — see INV_OPEN_STATUS_MAX_ESTIMATE) may mean
-      // there's genuinely enough sitting uncounted in an opened bag. Only ever softens the
-      // employee-facing status to "Maybe" when the shortfall is within that generous estimate —
-      // never changes `available` itself, and never lets anything actually get pulled off a guess
-      // (see psPrepConfirmOpenBin, the only path that can turn this into a real confirmed pull).
+      // A real shortfall against the exact, counted numbers (backstock + any counted loose
+      // balloons) — but Open Bin's own status is a quick qualitative glance, never a counted
+      // quantity, so it may mean there's genuinely enough sitting uncounted in an opened bag.
+      // Revised per explicit request: "should only be out of stock when there's 0 backstock and
+      // the open bin is fully empty — otherwise it can remain a maybe that people can check."
+      // Dropped the earlier magnitude cap entirely (INV_OPEN_STATUS_MAX_ESTIMATE, which only
+      // softened the status when the shortfall was within a generous per-status estimate) — now
+      // ANY non-Empty Open Bin status (Full or Partial) always earns "Maybe," no matter how large
+      // the shortfall looks against the exact numbers, since Open Bin's own status already says
+      // there's real, uncounted balloons that could plausibly cover it. Never changes `available`
+      // itself, and never lets anything actually get pulled off a guess (see
+      // psPrepConfirmOpenBin, the only path that can turn this into a real confirmed pull).
+      const openStatus = sd.openStatus;
       // Once a real loose count has ever been entered (via a plain Adjust/Receive) or this exact
       // job/item/size already got one Yes/Missing-N answer (see openBinAlreadyConfirmed below),
       // looseBalloons stops meaning "never counted" and starts meaning "this many, for real" —
-      // the estimate must never override an actual human count, even a small or zero one, or
-      // "Maybe" would keep reoffering itself after someone already told the truth. Only a
-      // genuinely never-touched 0 is treated as "uncounted."
-      const shortfall = stillNeeded - available;
-      const openStatus = sd.openStatus;
-      const maxEstimate = INV_OPEN_STATUS_MAX_ESTIMATE[openStatus] || 0;
+      // an actual human count must never be overridden by the qualitative status, or "Maybe"
+      // would keep reoffering itself after someone already told the truth. Only a genuinely
+      // never-touched 0 is treated as "uncounted."
       const looseCounted = !!sd.looseBalloons;
       // A job that already got one real Yes/Missing-N answer about this exact open bin (see
       // psPrepConfirmOpenBin) never gets asked again for the same pull — that bin's contents are
@@ -12051,7 +12052,8 @@ function psReviewPullRows(job) {
       // "Maybe" again fresh; only a still-outstanding confirmation (full or the leftover from a
       // Missing-N partial one) blocks re-asking.
       const openBinAlreadyConfirmed = invStandardLatexOutstandingSplit(job.id, row.inventoryItemId, row.size).fromOpenBin > 0;
-      if (!looseCounted && !openBinAlreadyConfirmed && maxEstimate > 0 && shortfall <= maxEstimate) {
+      if (!looseCounted && !openBinAlreadyConfirmed && openStatus !== 'Empty') {
+        const shortfall = stillNeeded - available;
         return Object.assign({}, row, { alreadyPulled, stillNeeded, available, shortfall, openStatus, status: 'maybeShort' });
       }
       return Object.assign({}, row, { alreadyPulled, stillNeeded, available, status: 'short' });
