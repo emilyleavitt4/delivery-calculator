@@ -4838,6 +4838,41 @@ function psToggleRentalStatus(jobId, itemId, field, checked) {
   item[field] = checked;
   psSaveJob(job);
 }
+// A Service-classified import item (IM_CLASSIFICATIONS — "logistics only, no build item") had
+// literally nowhere to be seen once imported, by the code's own admission ("no dedicated view
+// yet"). Reported directly: real shop work like custom vinyl on a backdrop needs a checkable list
+// of steps, same as any other production item, but has no balloon/color/size math to it at all.
+// Reuses job.tasks — the one shared task/progress system every other checklist in this app already
+// runs through — rather than inventing a second one: a service step is a completely ordinary task,
+// just addressed by a service item's id instead of a production line's, and rendered in its own
+// "Services" section (psProductionBodyHtml) instead of under Prep/Build/Finish. No template to
+// snapshot steps from (a service item is just a flat name/qty, not a Production Template), so
+// steps are typed directly, one at a time, same lightweight prompt() pattern already used for
+// flagging a clarification.
+function psAddServiceStep(jobId, serviceItemId) {
+  const job = psFindJob(jobId);
+  if (!job || psJobArchived(job)) return;
+  const text = prompt('Add a step for this item:');
+  if (text === null) return;
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  if (!job.tasks) job.tasks = [];
+  job.tasks.push({ id: psNewTaskId(), productionItemId: serviceItemId, phase: 'build', text: trimmed, dueOffsetDays: null, status: 'ready', priority: false });
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+// Generic (not service-specific) — removes any one ad-hoc, directly-typed task outright, as
+// opposed to psSetTaskStatus's done/ready/hold, none of which ever delete a task. Only meaningful
+// for a task someone typed in directly (a service step today; nothing else currently offers a
+// delete control), never called from a template-snapshotted or synthetic task's own row.
+function psDeleteAdHocTask(jobId, taskId) {
+  const job = psFindJob(jobId);
+  if (!job || psJobArchived(job)) return;
+  if (!confirm("Remove this step? This can't be undone.")) return;
+  job.tasks = (job.tasks || []).filter(t => t.id !== taskId);
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
 
 // ═══════════════════════════════════════ MAPPING LAYER ═══════════════════════════════════════
 //
@@ -6689,7 +6724,7 @@ function psResolvedClarificationNotesHtml(job, task, readOnly) {
     ${readOnly ? '' : `<button class="icon-btn no-print" style="width:auto; padding:1px 5px; flex-shrink:0;" title="Delete this note" onclick="psDeleteFeedback('${job.id}','${f.id}')"><i class="fa-solid fa-xmark"></i></button>`}
   </div>`).join('');
 }
-function psTaskRowHtml(job, task, itemLabel) {
+function psTaskRowHtml(job, task, itemLabel, deletable) {
   const readOnly = psJobArchived(job);
   const done = task.status === 'done';
   const held = task.status === 'hold';
@@ -6706,7 +6741,8 @@ function psTaskRowHtml(job, task, itemLabel) {
     ${clarBadge}
     ${readOnly ? '' : `<button class="icon-btn no-print" style="width:auto; padding:2px 6px; flex-shrink:0;" title="Flag a clarification" onclick="psTaskFlagClarification('${job.id}','${task.id}')"><i class="fa-regular fa-circle-question" style="color:var(--text-tertiary);"></i></button>
     <button class="icon-btn" style="width:auto; padding:2px 6px; flex-shrink:0;" title="${task.priority ? 'Do Next — click to unmark' : 'Do Next'}" onclick="psSetTaskPriority('${job.id}','${task.id}', ${task.priority ? 'false' : 'true'})"><i class="fa-${task.priority ? 'solid' : 'regular'} fa-star" style="color:${task.priority ? 'var(--warning-text)' : 'var(--text-tertiary)'};"></i></button>
-    ${!done ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psSetTaskStatus('${job.id}','${task.id}', '${held ? 'ready' : 'hold'}')">${held ? 'Resume' : 'Hold'}</button>` : ''}`}
+    ${!done ? `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="psSetTaskStatus('${job.id}','${task.id}', '${held ? 'ready' : 'hold'}')">${held ? 'Resume' : 'Hold'}</button>` : ''}
+    ${deletable ? `<button class="icon-btn no-print" style="width:auto; padding:2px 6px; flex-shrink:0;" title="Remove this step" onclick="psDeleteAdHocTask('${job.id}','${task.id}')"><i class="fa-solid fa-trash" style="color:var(--text-tertiary);"></i></button>` : ''}`}
   </div>${psResolvedClarificationNotesHtml(job, task, readOnly)}`;
 }
 // ─── Resolving a "general note" color to real Specialty Latex / Foil inventory, from Prep ───
@@ -7570,6 +7606,27 @@ function psProductionBodyHtml(job) {
           <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" ${item.returned ? 'checked' : ''} ${readOnly ? 'disabled' : ''} onchange="psToggleRentalStatus('${job.id}','${item.id}','returned',this.checked)"> Returned</label>
         </div>
       </div>`;
+    });
+  }
+
+  // Service-classified import items (see IM_CLASSIFICATIONS — "logistics only, no build item")
+  // land in job.serviceItems: real shop work (e.g. custom vinyl on a backdrop) with no balloon/
+  // color/size math at all, so it gets its own checkable step list instead of a pull list + Prep/
+  // Build/Finish structure that wouldn't apply to it. Steps are ordinary job.tasks entries
+  // addressed by the service item's id (psTaskRowHtml, the same shared task/progress system every
+  // other checklist in this app already runs through) — just typed in directly rather than
+  // snapshotted from a template, since a service item has no template to snapshot from.
+  const serviceItems = job.serviceItems || [];
+  if (serviceItems.length > 0) {
+    html += `<div class="section-label">Services — shop work, not inventory-tracked</div>`;
+    serviceItems.forEach(item => {
+      const steps = (job.tasks || []).filter(t => t.productionItemId === item.id);
+      html += `<div style="padding:8px 0; border-top:0.5px solid var(--border);">
+        <div style="font-size:14px; font-weight:700; margin-bottom:6px;">${psEscape(item.name)} <span style="font-weight:400; color:var(--text-secondary);">× ${item.qty}</span></div>`;
+      steps.forEach(t => { html += psTaskRowHtml(job, t, null, !readOnly); });
+      if (steps.length === 0) html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">No steps added yet.</div>`;
+      if (!readOnly) html += `<button class="icon-btn no-print" style="width:auto; padding:4px 10px; font-size:11px;" onclick="psAddServiceStep('${job.id}','${item.id}')"><i class="fa-solid fa-plus"></i> Add a step</button>`;
+      html += `</div>`;
     });
   }
 
