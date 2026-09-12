@@ -6142,6 +6142,30 @@ function psSizeOverrideEditorHtml(line, r, sanitizedKey) {
   html += `</div>`;
   return html;
 }
+// A job's explicit answer to "which brand did I mean for this color name," settable right here
+// while adding/editing a color instead of only ever surfacing reactively as an "Unresolved" row
+// once Review & Pull actually tries to compute a requirement for it. Writes into the exact same
+// job.colorResolutions map that row's own candidate buttons already write via
+// psReviewPullResolveForJob — one shared fact, not a second parallel resolution system. Only
+// rendered when the typed name actually has 2+ real brand matches in the Color Library; 0 or 1
+// match has nothing to choose between, matching how clEntriesByExactName's own callers never
+// force a choice that isn't real.
+function psColorBrandChoiceHtml(key, colorName) {
+  const candidates = clEntriesByExactName(colorName);
+  if (candidates.length < 2) return '';
+  const jobId = key.split('|')[0];
+  const job = psFindJob(jobId);
+  const resolveKey = colorName.trim().toLowerCase();
+  const chosenId = job && job.colorResolutions && job.colorResolutions[resolveKey] ? job.colorResolutions[resolveKey].colorId : null;
+  return `<div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:-2px 0 8px; font-size:11px;">
+    <span style="color:var(--text-secondary);">Matches more than one brand — which for this job?</span>
+    ${candidates.map(c => `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);${c.id === chosenId ? ' background:var(--accent-light); border-color:var(--accent);' : ''}" onclick="psSetColorBrandForJob('${key}','${psJsKeyAttr(colorName)}','${c.id}')">${psEscape(c.brand || 'Generic/Unknown')} — ${psEscape(c.colorName)}</button>`).join('')}
+  </div>`;
+}
+function psSetColorBrandForJob(key, colorName, colorId) {
+  psReviewPullResolveForJob(key.split('|')[0], colorName, colorId);
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
 function psColorRowHtml(key, idx, value, canRemove) {
   const inputId = 'pi-color-' + key.replace(/[|]/g, '-') + '-' + idx;
   return `<div style="position:relative; margin-bottom:6px;">
@@ -6152,6 +6176,7 @@ function psColorRowHtml(key, idx, value, canRemove) {
       <button class="icon-btn" style="padding:4px;" onclick="psRemoveColorDraftRow('${key}', ${idx})" ${canRemove ? '' : 'disabled'} aria-label="Remove color"><i class="fa-solid fa-trash"></i></button>
     </div>
     <div id="${inputId}-suggest" class="inv-color-suggest" style="display:none;"></div>
+    ${value.trim() ? psColorBrandChoiceHtml(key, value) : ''}
   </div>`;
 }
 function psColorPickerHtml(key, draft) {
