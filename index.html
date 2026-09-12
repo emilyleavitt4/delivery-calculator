@@ -7151,7 +7151,7 @@ function psTogglePrepRowDetail(rowKey) {
   psPrepRowDetailOpenFor = psPrepRowDetailOpenFor === rowKey ? null : rowKey;
   psRenderProductionJobs();
 }
-function psPrepRowDetailHtml(row) {
+function psPrepRowDetailHtml(jobId, row) {
   if (psPrepRowDetailOpenFor !== row.key) return '';
   const system = row.system || 'standardLatex';
   const lines = [`system: ${system}`, `inventoryItemId: ${row.inventoryItemId || '(none)'}`, `colorId: ${row.colorId || '(none)'}`, `size: ${row.size || '(none)'}`];
@@ -7160,7 +7160,13 @@ function psPrepRowDetailHtml(row) {
     lines.push(`resolved inventory item: ${item ? `${item.brand} ${item.color}${item.active === false ? ' (ARCHIVED)' : ''}` : '(not found — item may have been deleted since this was computed)'}`);
     const sd = item && item.sizes[row.size];
     if (sd) {
-      lines.push(`backstock: ${sd.backstock || 0} bags`, `perBag: ${sd.perBag || '(not set)'}`, `looseBalloons: ${sd.looseBalloons || 0}`, `usageRemainder: ${sd.usageRemainder || 0}`);
+      lines.push(`backstock: ${sd.backstock || 0} bags`, `perBag: ${sd.perBag || '(not set)'}`, `looseBalloons: ${sd.looseBalloons || 0}`, `usageRemainder: ${sd.usageRemainder || 0}`, `openStatus: ${sd.openStatus || '(not set)'}`);
+      // Directly answers "why does this still say short/out-of-stock" without needing a back-and-
+      // forth — openStatus alone isn't enough to explain a 'short' row, since a per-job confirmed
+      // open-bin answer (see psPrepConfirmOpenBin) can ALSO force 'short' even when openStatus is
+      // Partial/Full (see psReviewPullRows' own comment on openBinAlreadyConfirmed).
+      const confirmedSoFar = invStandardLatexOutstandingSplit(jobId, row.inventoryItemId, row.size).fromOpenBin;
+      lines.push(`openBinAlreadyConfirmed for this job: ${confirmedSoFar > 0 ? `yes (${confirmedSoFar} confirmed via Yes/Missing, not yet Returned)` : 'no'}`);
     }
     // Surfaces a real, known failure mode directly: more than one Inventory item pointing at the
     // same colorId means requirement resolution (INVENTORY_ITEMS.find, first match wins) could be
@@ -7253,7 +7259,7 @@ function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
     if (!readOnly) html += psPrepMaybeActionsHtml(Object.assign({}, row, { jobIdForMaybe: job.id }));
     html += `</div>`;
     html += `<div style="font-size:11px; color:var(--text-secondary); margin:-2px 0 2px 26px;">Open Bin: ${psEscape(row.openStatus)} — ~${row.shortfall} not yet counted. Go check: was there enough?</div>`;
-    html += psPrepRowDetailHtml(row);
+    html += psPrepRowDetailHtml(job.id, row);
     return html;
   }
   if (row.status === 'short') {
@@ -7308,7 +7314,7 @@ function psPrepCheckboxRowHtml(job, row, readOnly, hideOwnQty) {
       <button class="icon-btn" style="width:auto; padding:1px 6px; font-size:11px;" onclick="psPrepCorrectOpenBin('${job.id}','${row.inventoryItemId}','${invAttr(row.size)}','Full')">Mark Full</button>
     </div>`;
   }
-  html += psPrepRowDetailHtml(row);
+  html += psPrepRowDetailHtml(job.id, row);
   return html;
 }
 // Groups this item's own 'item'-kind rows by size — "SIZE — N of each color" when every color in
