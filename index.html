@@ -6122,7 +6122,14 @@ function psColorPickerHtml(key, draft) {
 // itself, since re-picking that has real edge cases (customLinear footage, a Quantity
 // Calculator customRecipe with no catalog entry to re-select). If the item type itself is
 // wrong, delete and re-add; everything else about an already-added item can be fixed here.
-function psStartEditItem(jobId, idx) {
+// `phase` ('prep' | 'build') records WHICH section's "Edit" button opened this, so the identical
+// edit form (psItemEditFormHtml) renders in only that one section — not both, even when a job's
+// Prep and Inflate & Build are both expanded at once. Editing works identically from either
+// section (same underlying line, same save path); this is purely about not showing the same live
+// form twice. Per explicit request: catching a miscalculated qty/color/distribution/size mix
+// should be fixable from Prep BEFORE ever pulling, not only after the fact from Build.
+let psEditingItemPhase = null;
+function psStartEditItem(jobId, idx, phase) {
   const job = psFindJob(jobId);
   if (!job || job.status === 'completed') return;
   const line = job.productionItems[idx];
@@ -6130,11 +6137,13 @@ function psStartEditItem(jobId, idx) {
   psColorDraftStore[key] = [...line.colors];
   psDistDraftStore[key] = psInitDistDraft(line);
   psEditingItemKey = key;
+  psEditingItemPhase = phase || 'build';
   psRenderProductionJobs();
 }
 function psCancelEditItem() {
   if (psEditingItemKey) { delete psColorDraftStore[psEditingItemKey]; delete psDistDraftStore[psEditingItemKey]; }
   psEditingItemKey = null;
+  psEditingItemPhase = null;
   psRenderProductionJobs();
 }
 function psSaveEditItem(jobId, idx) {
@@ -6210,6 +6219,7 @@ function psSaveEditItem(jobId, idx) {
   delete psColorDraftStore[key];
   delete psDistDraftStore[key];
   psEditingItemKey = null;
+  psEditingItemPhase = null;
   psSaveJob(job);
 }
 
@@ -6683,7 +6693,7 @@ function psPrepSectionHtml(job) {
   }
 
   const claimedKeys = new Set();
-  job.productionItems.forEach(line => {
+  job.productionItems.forEach((line, idx) => {
     const r = psLineRecipe(line);
     if (!r) return;
     const reqs = psComputeJobRequirements(job).filter(req => req.productionItemId === line.id);
@@ -6707,11 +6717,21 @@ function psPrepSectionHtml(job) {
     const needsAttention = rows.some(x => x.status === 'short' || x.status === 'maybeShort' || x.status === 'configMissing' || x.kind === 'unresolved' || x.kind === 'noItem' || x.status === 'formulaInvalid')
       || psOpenClarifications(job, 'productionItem', line.id).length > 0;
     const prepStatusHtml = (itemRows.length ? `${itemDone}/${itemRows.length} pulled` : '') + (needsAttention ? ` <i class="fa-solid fa-triangle-exclamation" style="color:var(--warning-text);"></i>` : '');
-    const itemExpanded = psItemPhaseExpanded(job.id, line.id, 'prep');
+    // A miscalculated qty/color/distribution/size mix needs to be fixable HERE, before anything
+    // is ever pulled — not only after the fact from Inflate & Build (see psItemEditFormHtml,
+    // the identical shared form both sections use). Editing always forces this item open, same
+    // reasoning as Build's own itemExpanded.
+    const editKey = psColorDraftKey(job.id, idx);
+    const sanitizedEditKey = editKey.replace(/\|/g, '-');
+    const editing = psEditingItemKey === editKey && psEditingItemPhase === 'prep';
+    const itemExpanded = (editing && !readOnly) || psItemPhaseExpanded(job.id, line.id, 'prep');
+    const editBtnHtml = (!readOnly && !editing) ? `<button class="icon-btn no-print" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="event.stopPropagation(); psStartEditItem('${job.id}', ${idx}, 'prep')">Edit</button>` : '';
 
     html += `<div style="margin-bottom:0.75rem;">`;
-    html += psItemCollapseHeaderHtml(job, line, r, 'prep', prepStatusHtml);
-    if (itemExpanded) {
+    html += psItemCollapseHeaderHtml(job, line, r, 'prep', prepStatusHtml, editBtnHtml);
+    if (itemExpanded && editing && !readOnly) {
+      html += psItemEditFormHtml(job, line, idx, r, editKey, sanitizedEditKey);
+    } else if (itemExpanded) {
       html += `<div class="ps-item-indent">`;
       html += `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Colors: ${psEscape(line.colors.join(' / '))}</div>`;
       // Add-ons/modifiers stay visible here too, even the non-inventory-backed ones with no pull
@@ -6756,37 +6776,12 @@ function psBuildStatusInfo(job) {
 // second build-step system; see the batch instruction on job.tasks), template-owned reference
 // text, Additional Notes, lightweight feedback triggers. Only the metadata returns to an indented
 // treatment; everything else sits at normal item-content alignment.
-function psBuildItemBlockHtml(job, line, idx, readOnly) {
-  const r = psLineRecipe(line);
-  if (!r) return '';
-  const editKey = psColorDraftKey(job.id, idx);
-  const sanitizedEditKey = editKey.replace(/\|/g, '-');
-  const editing = psEditingItemKey === editKey;
-
-  // Collapsing while actively editing would hide the very form you're editing — editing always
-  // forces this item's Build content open, matching how Prep's own collapse never applies mid-edit
-  // elsewhere in this file.
-  const itemExpanded = (editing && !readOnly) || psItemPhaseExpanded(job.id, line.id, 'build');
-
-  let html = `<div class="ps-item-block">`;
-  html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem; gap:8px; flex-wrap:wrap;">
-    <div style="display:flex; align-items:center; gap:6px; min-width:0; cursor:pointer;" onclick="psToggleItemPhaseExpanded('${job.id}','${line.id}','build')">
-      <i class="fa-solid fa-chevron-${itemExpanded ? 'down' : 'right'}" style="font-size:10px; color:var(--text-secondary); flex-shrink:0;"></i>
-      <div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))}</div>
-    </div>
-    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;" onclick="event.stopPropagation()">
-      ${psCompletedQtyControlHtml(job, idx, line)}
-      ${psItemProgressBadgeHtml(job, line.id)}
-    </div>
-    <div style="display:flex; gap:2px; flex-shrink:0;" onclick="event.stopPropagation()">
-      ${(!editing && !readOnly) ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx})">Edit</button>` : ''}
-      ${readOnly ? '' : `<button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>`}
-    </div>
-  </div>`;
-  if (!itemExpanded) { html += `</div>`; return html; }
-
-  if (editing && !readOnly) {
-    html += `<div class="no-print">
+// The one shared edit form — qty/label/colors/color-distribution/size-mix/design/location/
+// topper/modifiers — used identically from both Prep (fix a miscalculated qty/color/distribution
+// BEFORE ever pulling) and Inflate & Build (fix it after the fact; either way it's the same job
+// line, same save path, so there's no reason for two different forms to exist).
+function psItemEditFormHtml(job, line, idx, r, editKey, sanitizedEditKey) {
+  return `<div class="no-print">
       ${psFootageEditorHtml(line, r, sanitizedEditKey)}
       <div class="settings-field"><label>Item label <span style="font-weight:400;">(optional — shown here and in Prep instead of the template name)</span></label><input type="text" id="pi-edit-label-${sanitizedEditKey}" placeholder="${psEscape(r.display)}" value="${psEscape(line.itemLabel || '')}"></div>
       <div class="settings-field"><label>Quantity</label><input type="number" id="pi-edit-qty-${sanitizedEditKey}" value="${line.qty}" min="1" inputmode="numeric"></div>
@@ -6807,6 +6802,38 @@ function psBuildItemBlockHtml(job, line, idx, readOnly) {
         <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="psCancelEditItem()">Cancel</button>
       </div>
     </div>`;
+}
+function psBuildItemBlockHtml(job, line, idx, readOnly) {
+  const r = psLineRecipe(line);
+  if (!r) return '';
+  const editKey = psColorDraftKey(job.id, idx);
+  const sanitizedEditKey = editKey.replace(/\|/g, '-');
+  const editing = psEditingItemKey === editKey && psEditingItemPhase === 'build';
+
+  // Collapsing while actively editing would hide the very form you're editing — editing always
+  // forces this item's Build content open, matching how Prep's own collapse never applies mid-edit
+  // elsewhere in this file.
+  const itemExpanded = (editing && !readOnly) || psItemPhaseExpanded(job.id, line.id, 'build');
+
+  let html = `<div class="ps-item-block">`;
+  html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.4rem; gap:8px; flex-wrap:wrap;">
+    <div style="display:flex; align-items:center; gap:6px; min-width:0; cursor:pointer;" onclick="psToggleItemPhaseExpanded('${job.id}','${line.id}','build')">
+      <i class="fa-solid fa-chevron-${itemExpanded ? 'down' : 'right'}" style="font-size:10px; color:var(--text-secondary); flex-shrink:0;"></i>
+      <div style="font-size:14px; font-weight:700;">${psEscape(psLineLabel(line, r))}</div>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;" onclick="event.stopPropagation()">
+      ${psCompletedQtyControlHtml(job, idx, line)}
+      ${psItemProgressBadgeHtml(job, line.id)}
+    </div>
+    <div style="display:flex; gap:2px; flex-shrink:0;" onclick="event.stopPropagation()">
+      ${(!editing && !readOnly) ? `<button class="icon-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="psStartEditItem('${job.id}', ${idx}, 'build')">Edit</button>` : ''}
+      ${readOnly ? '' : `<button class="icon-btn" onclick="psRemoveItemFromJob('${job.id}', ${idx})" aria-label="Remove item"><i class="fa-solid fa-trash"></i></button>`}
+    </div>
+  </div>`;
+  if (!itemExpanded) { html += `</div>`; return html; }
+
+  if (editing && !readOnly) {
+    html += psItemEditFormHtml(job, line, idx, r, editKey, sanitizedEditKey);
   } else {
     html += `<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">`;
     html += `<div class="ps-item-indent ps-build-fields" style="flex:1; min-width:0;">`;
