@@ -155,16 +155,30 @@
   .topbar-left { display: flex; align-items: center; gap: 9px; }
   .topbar-icon { font-size: 17px; color: var(--brand-blue); }
   .topbar h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.2px; }
+  /* Clickable admin lock/unlock toggle — per explicit request, the badge always said "Admin" with
+     no way to tell whether it was actually unlocked. Locked (default) stays a neutral grey; the
+     ONLY state that turns green is genuinely unlocked, so a glance at the topbar always answers
+     "am I in admin mode right now" without opening any screen. See invUnlockAdmin/invLockAdmin's
+     renderAdminBadge call for what toggles this class. */
   .app-mode-badge {
     font-size: 9.5px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--brand-seafoam);
-    background: var(--brand-surface);
-    border: 0.5px solid var(--brand-seafoam);
+    color: var(--text-secondary);
+    background: rgba(153,153,153,0.18);
+    border: 0.5px solid var(--border-strong);
     border-radius: 5px;
-    padding: 2px 6px;
+    padding: 2px 7px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .app-mode-badge.unlocked {
+    color: #fff;
+    background: var(--success);
+    border-color: var(--success);
   }
 
   /* BREADCRUMB — a thin, horizontally-scrolling strip so a deep trail never wraps into a second
@@ -1400,7 +1414,7 @@
       <img id="topbar-logo" src="assets/balloon-code-logo.png" alt="Balloon Code" style="height:126px; width:auto; display:none;">
       <i class="fa-solid fa-toolbox topbar-icon" id="topbar-icon"></i>
       <h1 id="topbar-title">Balloon Code</h1>
-      <span class="app-mode-badge">Admin</span>
+      <span class="app-mode-badge" id="topbar-admin-badge" onclick="toggleAdminBadge()" title="Click to lock/unlock admin"><i class="fa-solid fa-lock" id="topbar-admin-badge-icon"></i> Admin</span>
     </div>
     <button class="icon-btn" id="topbar-gear" onclick="gateAdminNav(() => { settingsShowHome(); showView('settings'); })" aria-label="Settings" style="display:none">
       <i class="fa-solid fa-gear"></i>
@@ -4133,11 +4147,11 @@ function acRenderShell() {
 function acUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit attachment categories:');
   if (entered === null) return;
-  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; settingsRefreshAdminSections(); }
+  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; renderAdminBadge(); settingsRefreshAdminSections(); }
   else alert('Incorrect passcode.');
 }
 function acLockAdmin() {
-  invAdminUnlocked = false;
+  invAdminUnlocked = false; renderAdminBadge();
   settingsRefreshAdminSections();
 }
 function acRenderList() {
@@ -4913,14 +4927,14 @@ function imUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit mapping rules:');
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) {
-    invAdminUnlocked = true;
+    invAdminUnlocked = true; renderAdminBadge();
     settingsRefreshAdminSections();
   } else {
     alert('Incorrect passcode.');
   }
 }
 function imLockAdmin() {
-  invAdminUnlocked = false;
+  invAdminUnlocked = false; renderAdminBadge();
   settingsRefreshAdminSections();
 }
 
@@ -8208,14 +8222,14 @@ function ptUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit production templates:');
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) {
-    invAdminUnlocked = true;
+    invAdminUnlocked = true; renderAdminBadge();
     settingsRefreshAdminSections();
   } else {
     alert('Incorrect passcode.');
   }
 }
 function ptLockAdmin() {
-  invAdminUnlocked = false;
+  invAdminUnlocked = false; renderAdminBadge();
   settingsRefreshAdminSections();
 }
 
@@ -9463,11 +9477,11 @@ function tmRenderShell() {
 function tmUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit team members:');
   if (entered === null) return;
-  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; settingsRefreshAdminSections(); }
+  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; renderAdminBadge(); settingsRefreshAdminSections(); }
   else alert('Incorrect passcode.');
 }
 function tmLockAdmin() {
-  invAdminUnlocked = false;
+  invAdminUnlocked = false; renderAdminBadge();
   settingsRefreshAdminSections();
 }
 function tmRenderList() {
@@ -9551,11 +9565,11 @@ function renderAdminPasscodeBlock() {
 function unlockAdminPasscode() {
   const entered = prompt('Enter the current admin passcode to change it:');
   if (entered === null) return;
-  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; settingsRefreshAdminSections(); }
+  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; renderAdminBadge(); settingsRefreshAdminSections(); }
   else alert('Incorrect passcode.');
 }
 function lockAdminPasscode() {
-  invAdminUnlocked = false;
+  invAdminUnlocked = false; renderAdminBadge();
   settingsRefreshAdminSections();
 }
 function invLoadAdminLock() {
@@ -9587,25 +9601,44 @@ function gateAdminNav(afterUnlock) {
   const entered = prompt('Enter the admin passcode:');
   if (entered === null) return;
   if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode.'); return; }
-  invAdminUnlocked = true;
+  invAdminUnlocked = true; renderAdminBadge();
   settingsRefreshAdminSections();
   afterUnlock();
+}
+// The one visible, always-on indicator of invAdminUnlocked — reported directly: the topbar badge
+// always just said "Admin" with no way to tell whether it was actually unlocked right now. Locked
+// is neutral grey with a closed padlock; unlocked turns green with an open padlock — a glance at
+// the topbar from any screen answers the question without opening Settings or Inventory.
+function renderAdminBadge() {
+  const badge = document.getElementById('topbar-admin-badge');
+  const icon = document.getElementById('topbar-admin-badge-icon');
+  if (!badge || !icon) return;
+  badge.classList.toggle('unlocked', invAdminUnlocked);
+  icon.className = 'fa-solid ' + (invAdminUnlocked ? 'fa-lock-open' : 'fa-lock');
+}
+// Clicking the badge itself IS the lock/unlock control now — reuses invUnlockAdmin/invLockAdmin
+// exactly (same passcode prompt, same single shared invAdminUnlocked flag every admin-gated
+// screen already reads) rather than a second, parallel toggle.
+function toggleAdminBadge() {
+  if (invAdminUnlocked) invLockAdmin(); else invUnlockAdmin();
 }
 function invUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit price / balloons per bag / par:');
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) {
-    invAdminUnlocked = true;
+    invAdminUnlocked = true; renderAdminBadge();
     invRenderLatex(); // rebuilds the shell too, so the lock indicator itself updates
     settingsRefreshAdminSections(); // and every other admin-gated section on Settings, since they share this one flag
+    psRenderAllJobViews(); // Production/Staffing's own admin-gated controls (manual staff assign, item Edit) update too
   } else {
     alert('Incorrect passcode.');
   }
 }
 function invLockAdmin() {
-  invAdminUnlocked = false;
+  invAdminUnlocked = false; renderAdminBadge();
   invRenderLatex();
   settingsRefreshAdminSections();
+  psRenderAllJobViews();
 }
 let invCollapsedGroups = new Set(); // group keys currently collapsed
 // Collapsed by default — houses everything occasional/setup (Start Count, Rearrange shelf order,
@@ -16200,11 +16233,11 @@ function pgAddGroupPrompt(kind) {
 function pgUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit groups:');
   if (entered === null) return;
-  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; settingsRefreshAdminSections(); }
+  if (entered === ADMIN_PASSCODE) { invAdminUnlocked = true; renderAdminBadge(); settingsRefreshAdminSections(); }
   else alert('Incorrect passcode.');
 }
 function pgLockAdmin() {
-  invAdminUnlocked = false;
+  invAdminUnlocked = false; renderAdminBadge();
   settingsRefreshAdminSections();
 }
 let pgManageCollapsed = true;
@@ -21403,7 +21436,7 @@ function jccChooseImportOwn() {
     const entered = prompt('Enter the admin passcode to clear the built-in materials and import your own:');
     if (entered === null) return;
     if (entered !== ADMIN_PASSCODE) { alert('Incorrect passcode.'); return; }
-    invAdminUnlocked = true;
+    invAdminUnlocked = true; renderAdminBadge();
   }
   if (!confirm(`This removes all ${JCC_CATALOG.length} built-in sample materials so you can import your own instead. This can't be undone.`)) return;
   JCC_CATALOG = [];
@@ -21833,14 +21866,14 @@ function jccUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit catalog costs:');
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) {
-    invAdminUnlocked = true;
+    invAdminUnlocked = true; renderAdminBadge();
     settingsRefreshAdminSections();
   } else {
     alert('Incorrect passcode.');
   }
 }
 function jccLockAdmin() {
-  invAdminUnlocked = false;
+  invAdminUnlocked = false; renderAdminBadge();
   settingsRefreshAdminSections();
 }
 
@@ -22073,14 +22106,14 @@ function heUnlockAdmin() {
   const entered = prompt('Enter the admin passcode to edit costs:');
   if (entered === null) return;
   if (entered === ADMIN_PASSCODE) {
-    invAdminUnlocked = true;
+    invAdminUnlocked = true; renderAdminBadge();
     settingsRefreshAdminSections();
   } else {
     alert('Incorrect passcode.');
   }
 }
 function heLockAdmin() {
-  invAdminUnlocked = false;
+  invAdminUnlocked = false; renderAdminBadge();
   settingsRefreshAdminSections();
 }
 
@@ -23231,6 +23264,7 @@ window.handleAuthStateChanged = handleAuthStateChanged;
 
 // Everything that used to run immediately on page load now waits until sign-in succeeds.
 function bootApp() {
+  try { renderAdminBadge(); } catch (e) { console.error('renderAdminBadge failed:', e); }
   try { homeRenderTiles(); } catch (e) { console.error('homeRenderTiles failed:', e); }
   // Builds Settings' section containers before anything below tries to render into one.
   try { settingsRenderSections(); } catch (e) { console.error('settingsRenderSections failed:', e); }
