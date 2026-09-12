@@ -1784,7 +1784,18 @@
         <div class="tool-tile-title">Framework</div>
       </div>
     </div>
+    <!-- A per-color/size "View history" already exists inside each category's own screen — this
+         is the cross-category answer to "what happened across ALL of Inventory," a separate
+         screen since a full log deserves its own scroll/filter space rather than crowding this
+         picker. See invActivitySectionHtml. -->
+    <button class="icon-btn no-print" style="width:auto; padding:6px 14px; font-size:12px; margin-top:0.75rem;" onclick="showView('inventory-activity')"><i class="fa-solid fa-clock-rotate-left"></i> View all inventory activity</button>
   </div><!-- end view-inventory -->
+
+  <!-- ═══════════════════════════════════════ CROSS-CATEGORY INVENTORY ACTIVITY FEED -->
+  <div class="view" id="view-inventory-activity">
+    <div class="section-label" style="margin-top:0">Inventory Activity</div>
+    <div id="inv-activity-root"></div>
+  </div><!-- end view-inventory-activity -->
 
   <!-- ═══════════════════════════════════════ FOIL INVENTORY VIEW -->
   <!-- A top-level Inventory category, sibling to Latex (not nested under it). Letters & Numbers
@@ -2357,6 +2368,7 @@ const TOOL_META = {
   'inventory-specialty': { title: 'Specialty Latex',    icon: 'fa-solid fa-shapes',              showBack: true,  showGear: true  },
   'inventory-foil': { title: 'Foil Inventory',          icon: 'fa-solid fa-star',                showBack: true,  showGear: true  },
   'inventory-extras': { title: 'Add-Ons',               icon: 'fa-solid fa-ribbon',              showBack: true,  showGear: true  },
+  'inventory-activity': { title: 'Inventory Activity',  icon: 'fa-solid fa-clock-rotate-left',   showBack: true,  showGear: true  },
   assets:     { title: 'Assets',                        icon: 'fa-solid fa-warehouse',           showBack: true,  showGear: true  },
   supplies:   { title: 'Supply Order',                  icon: 'fa-solid fa-cart-shopping',       showBack: true,  showGear: true  },
   letters:    { title: 'Letter Styling Calculator',     icon: 'fa-solid fa-font',                showBack: true,  showGear: true  },
@@ -9342,6 +9354,7 @@ function invStartListeners() {
     (snapshot) => {
       INVENTORY_TRANSACTIONS = snapshot.docs.map(d => d.data());
       invRenderLatex();
+      invRenderActivity();
       // Prep's checkbox checked/unchecked state (alreadyPulled/stillNeeded) is derived entirely
       // from this collection — without this, a pull recorded from Prep re-renders correctly only
       // because psPrepCheckPull/psPrepReturnPull explicitly call psRenderProductionJobs() themselves
@@ -12636,29 +12649,98 @@ function invFmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(2); }
 // else leads with its type label; a balloon-denominated entry shows the original balloon count,
 // the Standard Package Qty at the time, and how the usage remainder pool moved, so "why didn't
 // Backstock change" or "why did it drop by exactly 1" is never a mystery.
+// The shared per-transaction detail block — extracted so the global cross-item Activity feed
+// (invActivitySectionHtml, below) renders every entry identically to a single color+size's own
+// History, just with an added item-identity line up front since the global feed spans every
+// color/item at once instead of one already-known size.
+function invTxnDetailHtml(t) {
+  const date = new Date(t.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const sign = t.delta > 0 ? '+' : '';
+  const usageNote = (t.balloonsUsed != null && t.perBagAtTime != null) ? ` (${t.balloonsUsed} balloons used, ${t.perBagAtTime}/standard package)` : '';
+  const remainderNote = (t.remainderBefore != null && t.remainderAfter != null)
+    ? `<div style="color:var(--text-secondary);">Pending usage: ${t.remainderBefore} → ${t.remainderAfter} balloon${t.remainderAfter === 1 ? '' : 's'}</div>`
+    : '';
+  return `<div style="display:flex; justify-content:space-between; align-items:baseline;">
+      <span style="font-weight:700;">${t.jobName ? psEscape(t.jobName) : psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</span>
+      <span style="color:var(--text-tertiary); font-size:11px;">${date}</span>
+    </div>
+    ${t.jobName ? `<div style="color:var(--text-secondary);">${psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</div>` : ''}
+    <div>${sign}${invFmtQty(t.delta)} ${invUnitLabel()}${usageNote} — Balance: ${invFmtQty(t.newBalance)}</div>
+    ${remainderNote}
+    ${t.reference ? `<div style="color:var(--text-secondary);">Reference: ${psEscape(t.reference)}</div>` : ''}
+    ${t.note ? `<div style="color:var(--text-secondary);">${psEscape(t.note)}</div>` : ''}
+    ${t.who ? `<div style="color:var(--text-tertiary); font-size:11px; margin-top:2px;">${psEscape(t.who)}</div>` : ''}`;
+}
 function invHistoryHtml(itemId, size) {
   const txns = INVENTORY_TRANSACTIONS.filter(t => t.itemId === itemId && t.size === size).sort((a, b) => b.createdAt - a.createdAt);
   if (txns.length === 0) return `<div style="font-size:12px; color:var(--text-secondary); padding:0.5rem 0;">No history yet for this size.</div>`;
-  return txns.map(t => {
-    const date = new Date(t.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    const sign = t.delta > 0 ? '+' : '';
-    const usageNote = (t.balloonsUsed != null && t.perBagAtTime != null) ? ` (${t.balloonsUsed} balloons used, ${t.perBagAtTime}/standard package)` : '';
-    const remainderNote = (t.remainderBefore != null && t.remainderAfter != null)
-      ? `<div style="color:var(--text-secondary);">Pending usage: ${t.remainderBefore} → ${t.remainderAfter} balloon${t.remainderAfter === 1 ? '' : 's'}</div>`
-      : '';
-    return `<div style="padding:0.5rem 0; border-bottom:0.5px solid var(--border); font-size:12px;">
-      <div style="display:flex; justify-content:space-between; align-items:baseline;">
-        <span style="font-weight:700;">${t.jobName ? psEscape(t.jobName) : psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</span>
-        <span style="color:var(--text-tertiary); font-size:11px;">${date}</span>
-      </div>
-      ${t.jobName ? `<div style="color:var(--text-secondary);">${psEscape(INV_TXN_TYPE_LABEL[t.type] || t.type)}</div>` : ''}
-      <div>${sign}${invFmtQty(t.delta)} ${invUnitLabel()}${usageNote} — Balance: ${invFmtQty(t.newBalance)}</div>
-      ${remainderNote}
-      ${t.reference ? `<div style="color:var(--text-secondary);">Reference: ${psEscape(t.reference)}</div>` : ''}
-      ${t.note ? `<div style="color:var(--text-secondary);">${psEscape(t.note)}</div>` : ''}
-      ${t.who ? `<div style="color:var(--text-tertiary); font-size:11px; margin-top:2px;">${psEscape(t.who)}</div>` : ''}
-    </div>`;
-  }).join('');
+  return txns.map(t => `<div style="padding:0.5rem 0; border-bottom:0.5px solid var(--border); font-size:12px;">${invTxnDetailHtml(t)}</div>`).join('');
+}
+// ═══════════════════════════════════════ CROSS-CATEGORY ACTIVITY FEED (all inventory transactions, every category, one screen) ═══════════════════════════════════════
+//
+// invHistoryHtml above answers "what happened to THIS color+size" — this answers "what happened
+// across all of Inventory," reusing the exact same INVENTORY_TRANSACTIONS array and detail
+// formatting (invTxnDetailHtml), just not pre-filtered to one item. Every transaction doc already
+// carries its own denormalized color/brand/name identity (see invApplyInventoryTransactions) —
+// this reads that directly rather than re-joining against the live item, so a since-renamed or
+// since-deleted item's history still reads correctly here exactly like it does in per-item History.
+let invActivityFilter = { query: '', type: 'all', system: 'all' };
+const INV_ACTIVITY_PAGE_SIZE = 150; // a reasonable cap for one render pass — narrowing the filters is the way to see further back, not infinite-scroll machinery for what should be a rare "let me check something" screen
+function invActivitySetFilter(field, value) {
+  invActivityFilter[field] = value;
+  invRenderActivity();
+}
+function invActivityItemLabel(t) {
+  const sys = invSystemFor(t.system);
+  if (t.brand || t.color) return [t.brand, t.color].filter(Boolean).join(' ') + (t.size ? ' — ' + t.size : '');
+  return (t.name || '(unknown item)') + (t.size ? ' — ' + t.size : '');
+}
+function invActivityFilteredRows() {
+  const q = invActivityFilter.query.trim().toLowerCase();
+  return INVENTORY_TRANSACTIONS.filter(t => {
+    if (invActivityFilter.type !== 'all' && t.type !== invActivityFilter.type) return false;
+    if (invActivityFilter.system !== 'all' && (t.system || 'standardLatex') !== invActivityFilter.system) return false;
+    if (!q) return true;
+    const hay = [invActivityItemLabel(t), t.jobName, t.note, t.reference, t.who].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q);
+  }).sort((a, b) => b.createdAt - a.createdAt);
+}
+function invActivitySectionHtml() {
+  const all = invActivityFilteredRows();
+  const shown = all.slice(0, INV_ACTIVITY_PAGE_SIZE);
+  let html = `<div class="settings-field"><input type="text" placeholder="Search by color, item, job, or note…" value="${invAttr(invActivityFilter.query)}" oninput="invActivitySetFilter('query', this.value)"></div>`;
+  html += `<div class="row">
+    <div class="settings-field" style="margin-bottom:0;"><label>Type</label>
+      <select onchange="invActivitySetFilter('type', this.value)">
+        <option value="all">All types</option>
+        ${Object.keys(INV_TXN_TYPE_LABEL).map(k => `<option value="${k}" ${invActivityFilter.type === k ? 'selected' : ''}>${psEscape(INV_TXN_TYPE_LABEL[k])}</option>`).join('')}
+      </select>
+    </div>
+    <div class="settings-field" style="margin-bottom:0;"><label>Category</label>
+      <select onchange="invActivitySetFilter('system', this.value)">
+        <option value="all">All categories</option>
+        ${Object.keys(INV_SYSTEMS).map(k => `<option value="${k}" ${invActivityFilter.system === k ? 'selected' : ''}>${psEscape(INV_SYSTEMS[k].label)}</option>`).join('')}
+      </select>
+    </div>
+  </div>`;
+  if (all.length === 0) {
+    html += `<div style="font-size:13px; color:var(--text-secondary); padding:1rem 0;">No activity ${(invActivityFilter.query || invActivityFilter.type !== 'all' || invActivityFilter.system !== 'all') ? 'matches those filters' : 'recorded yet'}.</div>`;
+    return html;
+  }
+  html += `<div style="margin:0.5rem 0;">${shown.map(t => `<div class="card" style="margin-bottom:0.4rem;">
+    <div style="font-size:12px; font-weight:700; margin-bottom:2px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+      ${psEscape(invActivityItemLabel(t))}
+      <span class="rp-badge" style="background:var(--brand-blue-light); color:var(--brand-blue);">${psEscape(invSystemFor(t.system).label)}</span>
+    </div>
+    <div style="font-size:12px;">${invTxnDetailHtml(t)}</div>
+  </div>`).join('')}</div>`;
+  if (all.length > shown.length) html += `<div style="font-size:12px; color:var(--text-secondary);">Showing the most recent ${shown.length} of ${all.length} — narrow your search to see further back.</div>`;
+  return html;
+}
+function invRenderActivity() {
+  const root = document.getElementById('inv-activity-root');
+  if (!root) return;
+  root.innerHTML = invActivitySectionHtml();
 }
 // ═══════════════════════════════════════ CROSS-CATEGORY ORDERS (above Inventory's category picker) ═══════════════════════════════════════
 //
@@ -22173,6 +22255,7 @@ function showView(v) {
   // elsewhere. Recomputing on every Home visit keeps it honest without needing every single
   // place progress could change to remember to call this.
   if (v === 'home') bsUpdateHomeBanner();
+  if (v === 'inventory-activity') invRenderActivity();
   setTopBar(v);
 }
 
@@ -22195,6 +22278,7 @@ const VIEW_PARENT = {
   'inventory-specialty': 'inventory-latex-choice',
   'inventory-foil': 'inventory',
   'inventory-extras': 'inventory',
+  'inventory-activity': 'inventory',
 };
 function psBreadcrumbAncestors(view) {
   const chain = [];
@@ -22316,6 +22400,9 @@ function goBack() {
   // under the Inventory picker, sibling to Latex/Foil.
   const inExtrasInventory = document.getElementById('view-inventory-extras').classList.contains('active');
   if (inExtrasInventory) { showView('inventory'); return; }
+  // Same shape as Foil/Extras — directly under the Inventory picker, sibling to every category.
+  const inActivityFeed = document.getElementById('view-inventory-activity').classList.contains('active');
+  if (inActivityFeed) { showView('inventory'); return; }
   // Guided Setup only ever launches from Business Setup — the topbar back arrow always returns
   // there (in-flow "Back" between questions is a separate control, handled by gsBack()).
   const inGuidedSetup = document.getElementById('view-guidedSetup').classList.contains('active');
