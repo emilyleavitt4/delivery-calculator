@@ -5283,10 +5283,18 @@ function psResolveRawItem(pItem) {
 function irRecomputeItemStatus(item) {
   const reasons = item.reasons.filter(r => r.startsWith('Multiple saved mappings') || r.startsWith('Low-confidence match')); // keep original-match context
   if (item.classification === 'production') {
+    const chosenRecipe = item.recipeId ? RECIPES.find(r => r.id === item.recipeId) : null;
     const readyRecipe = ptReadyRecipe(item.recipeId);
-    if (!readyRecipe) {
+    // Direct request: "I don't have the recipe in front of me — I'd like to import what I have
+    // and add numbers later." A needsSetup template (from "+ New template", right here) now counts
+    // as a real choice — only a genuinely UNCHOSEN template still blocks approval. The resulting
+    // production line just shows "Needs Configuration" in Prep until the template's formula/rates
+    // get filled in later (Settings → Templates & Formulas), the exact same recovery path every
+    // other broken-formula template already uses (Fix Template / Use Current Template Settings /
+    // a manual Size Mix override) — no new state, just no longer forcing that decision right now.
+    if (!chosenRecipe) {
       reasons.push('No production template selected yet.');
-    } else if (readyRecipe.customLinear && !item.customLinear) {
+    } else if (readyRecipe && readyRecipe.customLinear && !item.customLinear) {
       reasons.push('This template needs an actual footage — enter it below.');
     }
     if (clColorsNeedReview(item.colors, item.colorGeneralNotes, IMPORT_REVIEW_DRAFT.event.colorResolutions)) reasons.push('One or more colors need review — pick a match, add new, or mark general.');
@@ -5360,11 +5368,19 @@ function psApplyReviewDraftToEvent(draft) {
     if (item.status === 'ignored' || item.classification === 'ignore') return;
     if (item.classification === 'production') {
       // irApproveImport already blocks Approve while any item is 'needs_review' (which
-      // irRecomputeItemStatus/psResolveRawItem both already treat a needsSetup recipeId as), but
-      // this is the one place a review draft actually becomes real Production data — it gets its
-      // own independent check rather than trusting that gate alone, the same way the inventory
+      // irRecomputeItemStatus/psResolveRawItem both already treat as having NO recipe chosen at
+      // all — a needsSetup one now counts as chosen, per direct request: "I don't have the recipe
+      // in front of me, I'd like to import what I have and add numbers later"), but this is the
+      // one place a review draft actually becomes real Production data — it gets its own
+      // independent check rather than trusting that gate alone, the same way the inventory
       // ledger's negative-balance guard doesn't rely solely on the UI never offering a bad amount.
-      const recipe = ptReadyRecipe(item.recipeId);
+      // Real bug caught here while wiring the above through: this used to call ptReadyRecipe (which
+      // excludes needsSetup) and silently drop the entire item when it returned null — the approval
+      // gate would have let a needsSetup-templated item through only for it to vanish without a
+      // trace right here. Reads the CHOSEN recipe directly instead — ready or not — so the line
+      // still gets created; a needsSetup one just snapshots with no formula, surfacing as "Needs
+      // Configuration" in Prep exactly like any other broken-formula template once it's live.
+      const recipe = item.recipeId ? RECIPES.find(r => r.id === item.recipeId) : null;
       if (!recipe) return;
       const newItemId = psNewLineItemId();
       const newLine = {
@@ -5538,7 +5554,10 @@ function irRenderShell() {
 function irPendingDecisions(item) {
   const readyRecipe = item.classification === 'production' ? ptReadyRecipe(item.recipeId) : null;
   const mappingUncertain = item.reasons.some(r => r.startsWith('No saved mapping') || r.startsWith('Multiple saved mappings') || r.startsWith('Low-confidence match'));
-  const needsTemplate = item.classification === 'production' && !readyRecipe;
+  // A needsSetup template still counts as "chosen" here too — see irRecomputeItemStatus's own
+  // comment, which this must always agree with (this function only drives what the UI shows;
+  // that one drives the actual approval gate).
+  const needsTemplate = item.classification === 'production' && !item.recipeId;
   const needsFootage = item.classification === 'production' && !!readyRecipe && readyRecipe.customLinear && !item.customLinear;
   const needsColors = item.classification === 'production' && clColorsNeedReview(item.colors, item.colorGeneralNotes, IMPORT_REVIEW_DRAFT.event.colorResolutions);
   const decisions = [];
@@ -5567,7 +5586,14 @@ function irItemCardHtml(item) {
         <div class="${needsReview ? 'ir-item-title' : 'ir-item-title-quiet'}">${psEscape(item.rawName)}${item.rawQty > 1 ? ` <span class="ir-item-qty">× ${item.rawQty}</span>` : ''}</div>
         ${needsReview
           ? `<div class="ir-item-need">${decisions.length} thing${decisions.length === 1 ? '' : 's'} need${decisions.length === 1 ? 's' : ''} your input</div>`
-          : `<div class="ir-item-resolved-note"><i class="fa-solid fa-check"></i>${psEscape(imClassificationLabel(item.classification))}${item.classification === 'production' ? ' — ' + psEscape(destinationSummary) : ''}</div>`}
+          : `<div class="ir-item-resolved-note"><i class="fa-solid fa-check"></i>${psEscape(imClassificationLabel(item.classification))}${item.classification === 'production' ? ' — ' + psEscape(destinationSummary) : ''}${
+              // A placeholder template (chosen via "+ New template" with no formula/rates yet) is
+              // now allowed to resolve this item — flagged here so it's never silently forgotten
+              // once Import Review itself is done and gone. Not an error: the resulting production
+              // line will show "Needs Configuration" in Prep, fixable there whenever the real
+              // numbers are ready, exactly like any other unfinished template.
+              recipe && recipe.needsSetup ? ` <span style="color:var(--warning-text); font-weight:600;">— template needs setup before it can calculate</span>` : ''
+            }</div>`}
       </div>
       <i class="fa-solid fa-chevron-${expanded ? 'up' : 'down'} ir-chevron"></i>
     </div>`;
