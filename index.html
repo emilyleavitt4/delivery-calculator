@@ -6546,33 +6546,123 @@ function psColorExactCountsHtml(key, draft) {
 // line.qty in psComputeJobRequirements. Reuses psColorBrandChoiceHtml as-is for brand
 // disambiguation — it only needs a job key and a color name, so a topper color that happens to
 // share a name across brands gets the exact same "which for this job?" picker the body does.
+// `system` defaults to 'standardLatex' when absent — every topper saved before Foil toppers
+// existed reads exactly as it always did, no migration needed. `itemId` (a resolved Foil item)
+// only ever means something when system === 'foil'; unused otherwise, same convention
+// modifier.inventoryRef already follows for its own system-specific fields.
 function psInitTopperDraft(line) {
   if (line.topper && line.topper.length) {
-    return line.topper.map(t => ({ color: t.color || '', size: t.size || '', qty: Number.isFinite(t.qty) ? t.qty : '' }));
+    return line.topper.map(t => ({ system: t.system === 'foil' ? 'foil' : 'standardLatex', color: t.color || '', size: t.size || '', qty: Number.isFinite(t.qty) ? t.qty : '', itemId: t.itemId || '' }));
   }
-  return [{ color: '', size: '', qty: '' }];
+  return [{ system: 'standardLatex', color: '', size: '', qty: '', itemId: '' }];
 }
 function psAddTopperRow(key) {
-  (psTopperDraftStore[key] = psTopperDraftStore[key] || []).push({ color: '', size: '', qty: '' });
+  (psTopperDraftStore[key] = psTopperDraftStore[key] || []).push({ system: 'standardLatex', color: '', size: '', qty: '', itemId: '' });
   psWithFormPreserved(key, psRenderProductionJobs);
 }
 function psRemoveTopperRow(key, idx) {
   const draft = psTopperDraftStore[key];
   if (!draft) return;
   draft.splice(idx, 1);
-  if (draft.length === 0) draft.push({ color: '', size: '', qty: '' });
+  if (draft.length === 0) draft.push({ system: 'standardLatex', color: '', size: '', qty: '', itemId: '' });
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
+// Direct request: "on any column where I've selected it has a topper, it has to be able to
+// search color latex OR foil shape." Switching a row's system clears whatever was picked under
+// the old one — never leaves a stale half-latex-half-foil row (e.g. a latex color string
+// surviving into a foil pick, or vice versa).
+function psSetTopperSystem(key, idx, system) {
+  const draft = psTopperDraftStore[key];
+  if (!draft || !draft[idx]) return;
+  draft[idx].system = system;
+  draft[idx].color = '';
+  draft[idx].itemId = '';
+  draft[idx].size = '';
   psWithFormPreserved(key, psRenderProductionJobs);
 }
 function psUpdateTopperField(key, idx, field, value) {
   const draft = psTopperDraftStore[key];
   if (draft && draft[idx]) draft[idx][field] = value;
 }
+// ─── A topper row's own foil picker — same type-ahead search + character grid as a foil
+// modifier's (psFoilPickerHtml), just addressed by the topper draft's own key+idx instead of a
+// job/line/modId, since a topper row isn't a real modifier and has its own draft/save path. ───
+let psTopperFoilSearchDraft = {}; // `${key}|${idx}` -> in-progress search text, while picking
+function psTopperFoilPickerKey(key, idx) { return key + '|' + idx; }
+function psTopperFoilSearch(key, idx, value) {
+  const k = psTopperFoilPickerKey(key, idx);
+  psTopperFoilSearchDraft[k] = value;
+  const container = document.getElementById('topper-foil-suggest-' + k.replace(/[^a-zA-Z0-9]/g, '-'));
+  if (!container) return;
+  const q = value.trim().toLowerCase();
+  if (!q) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  const matches = FOIL_ITEMS.filter(i => !i.deletedAt && i.active !== false && invGenericItemLabel('foil', i).toLowerCase().includes(q)).slice(0, 8);
+  if (matches.length === 0) {
+    container.innerHTML = `<div class="inv-color-suggest-item" style="color:var(--text-tertiary); font-style:italic; cursor:default;">No match — add it from Settings → Foil Inventory, then search again</div>`;
+    container.style.display = 'block';
+    return;
+  }
+  container.innerHTML = matches.map(i =>
+    `<div class="inv-color-suggest-item" onmousedown="event.preventDefault(); psTopperFoilPick('${psJsKeyAttr(key)}',${idx},'${psJsKeyAttr(i.id)}')">${psEscape(invGenericItemLabel('foil', i))}</div>`
+  ).join('');
+  container.style.display = 'block';
+}
+// Same abandon-on-blur reasoning as psFoilPickerAbandonSoon — a suggestion's onmousedown (with
+// preventDefault) already stops the browser from blurring for that click, so this only ever fires
+// for a genuine abandon.
+function psTopperFoilAbandonSoon(key, idx) {
+  const k = psTopperFoilPickerKey(key, idx);
+  setTimeout(() => {
+    if (psTopperFoilSearchDraft[k] !== undefined) { delete psTopperFoilSearchDraft[k]; psWithFormPreserved(key, psRenderProductionJobs); }
+  }, 150);
+}
+function psTopperFoilPick(key, idx, itemId) {
+  const draft = psTopperDraftStore[key];
+  if (!draft || !draft[idx]) return;
+  draft[idx].itemId = itemId;
+  draft[idx].size = '';
+  delete psTopperFoilSearchDraft[psTopperFoilPickerKey(key, idx)];
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
+function psTopperFoilSetChar(key, idx, char) {
+  const draft = psTopperDraftStore[key];
+  if (!draft || !draft[idx]) return;
+  draft[idx].size = char;
+  psWithFormPreserved(key, psRenderProductionJobs);
+}
+function psTopperFoilPickerHtml(key, idx, row) {
+  const k = psTopperFoilPickerKey(key, idx);
+  const sanitized = k.replace(/[^a-zA-Z0-9]/g, '-');
+  const inputId = 'topper-foil-search-' + sanitized;
+  const item = row.itemId ? foilFindItem(row.itemId) : null;
+  const draftVal = psTopperFoilSearchDraft[k];
+  const inputValue = draftVal !== undefined ? draftVal : (item ? invGenericItemLabel('foil', item) : '');
+  return `<div style="position:relative; flex:1; min-width:140px;">
+    <input type="text" id="${inputId}" placeholder="Foil shape, letter, number, or theme..." value="${invAttr(inputValue)}"
+      oninput="psTopperFoilSearch('${psJsKeyAttr(key)}',${idx}, this.value)"
+      onfocus="psTopperFoilSearch('${psJsKeyAttr(key)}',${idx}, this.value)"
+      onblur="invHideColorSuggestionsSoon('${inputId}'); psTopperFoilAbandonSoon('${psJsKeyAttr(key)}',${idx})">
+    <div id="topper-foil-suggest-${sanitized}" class="inv-color-suggest" style="display:none;"></div>
+  </div>`;
+}
+// Direct request: "on any of my columns where I've selected that it has a topper... it has to be
+// able to search color latex OR foil shape" — a small Latex/Foil toggle per row picks which
+// search (and which saved identity — color+size, or a resolved Foil itemId+character) applies.
 function psTopperRowHtml(key, idx, row, canRemove) {
   const sanitizedKey = key.replace(/\|/g, '-');
   const inputId = 'pi-topper-color-' + sanitizedKey + '-' + idx;
-  return `<div style="margin-bottom:8px;">
+  const system = row.system === 'foil' ? 'foil' : 'standardLatex';
+  const foilItem = system === 'foil' && row.itemId ? foilFindItem(row.itemId) : null;
+  let html = `<div style="margin-bottom:8px;">
     <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-      <div style="position:relative; flex:1; min-width:140px;">
+      <div style="display:flex; gap:4px; background:var(--bg); padding:2px; border-radius:var(--radius-sm); border:0.5px solid var(--border); flex-shrink:0;">
+        <button type="button" class="trip-btn ${system === 'standardLatex' ? 'active' : ''}" style="padding:4px 8px; font-size:11px; flex:none;" onclick="psSetTopperSystem('${key}', ${idx}, 'standardLatex')">Latex</button>
+        <button type="button" class="trip-btn ${system === 'foil' ? 'active' : ''}" style="padding:4px 8px; font-size:11px; flex:none;" onclick="psSetTopperSystem('${key}', ${idx}, 'foil')">Foil</button>
+      </div>`;
+  if (system === 'foil') {
+    html += psTopperFoilPickerHtml(key, idx, row);
+  } else {
+    html += `<div style="position:relative; flex:1; min-width:140px;">
         <input type="text" id="${inputId}" value="${psEscape(row.color)}" placeholder="Topper color..."
           oninput="psUpdateTopperField('${key}', ${idx}, 'color', this.value); invShowColorSuggestions('${inputId}')"
           onblur="invHideColorSuggestionsSoon('${inputId}')">
@@ -6581,12 +6671,23 @@ function psTopperRowHtml(key, idx, row, canRemove) {
       <select style="width:auto;" onchange="psUpdateTopperField('${key}', ${idx}, 'size', this.value)">
         <option value="">Size…</option>
         ${SIZE_ORDER.map(size => `<option value="${psEscape(size)}" ${row.size === size ? 'selected' : ''}>${psEscape(size)}</option>`).join('')}
-      </select>
+      </select>`;
+  }
+  html += `
       <input type="number" min="0" step="1" placeholder="Qty" style="width:70px;" value="${row.qty}" oninput="psUpdateTopperField('${key}', ${idx}, 'qty', this.value)">
       <button class="icon-btn" style="padding:4px;" onclick="psRemoveTopperRow('${key}', ${idx})" ${canRemove ? '' : 'disabled'} aria-label="Remove topper color"><i class="fa-solid fa-trash"></i></button>
-    </div>
-    ${row.color.trim() ? psColorBrandChoiceHtml(key, row.color) : ''}
-  </div>`;
+    </div>`;
+  if (system === 'standardLatex') {
+    html += row.color.trim() ? psColorBrandChoiceHtml(key, row.color) : '';
+  } else if (foilItem && foilItem.category === 'lettersNumbers' && foilItem.charType !== 'phrases') {
+    const chars = foilCharsFor(foilItem.charType);
+    html += `<div style="display:flex; flex-wrap:wrap; gap:4px; margin:4px 0 0;">
+      ${chars.map(c => `<button type="button" class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;${row.size === c ? ' background:var(--accent-light); border-color:var(--accent);' : ''}" onclick="psTopperFoilSetChar('${key}', ${idx}, '${psJsKeyAttr(c)}')">${psEscape(c)}</button>`).join('')}
+    </div>`;
+    if (!row.size) html += `<div style="font-size:11px; color:var(--warning-text); margin:2px 0 0;">Pick which character above.</div>`;
+  }
+  html += `</div>`;
+  return html;
 }
 function psTopperColorEditorHtml(key) {
   const draft = psTopperDraftStore[key] || [];
@@ -6813,11 +6914,22 @@ function psSaveEditItem(jobId, idx) {
   if (Object.keys(sizeOverride).length > 0) line.sizeOverride = sizeOverride; else delete line.sizeOverride;
 
   // A topper's own color(s) — real inventory, not just a build note (see topperNote just below
-  // for the separate free-text instruction). A row needs a color AND a size to count; qty
-  // defaults to 0 (contributes nothing) rather than rejecting the row outright.
+  // for the separate free-text instruction). A Latex row needs a color AND a size to count; a
+  // Foil row needs a resolved item (its character, if any, is validated at requirement-compute
+  // time — see psComputeJobRequirements — the same incomplete-pick guard a foil modifier gets).
+  // qty defaults to 0 (contributes nothing) rather than rejecting the row outright.
   const topperRows = (psTopperDraftStore[key] || [])
-    .map(t => ({ color: (t.color || '').trim(), size: t.size || '', qty: parseFloat(t.qty) }))
-    .filter(t => t.color && t.size && Number.isFinite(t.qty) && t.qty > 0);
+    .map(t => {
+      const system = t.system === 'foil' ? 'foil' : 'standardLatex';
+      const qty = parseFloat(t.qty);
+      return system === 'foil'
+        ? { system, itemId: t.itemId || '', size: t.size || '', qty }
+        : { system, color: (t.color || '').trim(), size: t.size || '', qty };
+    })
+    .filter(t => {
+      if (!Number.isFinite(t.qty) || t.qty <= 0) return false;
+      return t.system === 'foil' ? !!t.itemId : !!(t.color && t.size);
+    });
   if (topperRows.length > 0) line.topper = topperRows; else delete line.topper;
 
   // topperNote is the one of the three synthetic-task sources that's actually editable here —
@@ -12164,14 +12276,32 @@ function psComputeJobRequirements(job) {
     // note (see line.topperNote for the separate free-text instruction, kept as-is alongside
     // this). Entered per ONE unit of Quantity, same convention and same reason as the exact-count
     // body override above — one topper per column/arch, scaling automatically with Quantity.
+    // Direct request: a topper can now be EITHER a Standard Latex color+size or a Foil pick (a
+    // shape, letter/number, or themed piece) — see psTopperRowHtml's own Latex/Foil toggle.
     (line.topper || []).forEach(t => {
-      if (!t.color || !t.color.trim() || !t.size) return;
-      const invSize = INV_SIZE_FROM_PRODUCTION[t.size];
-      if (!invSize) return;
       const perUnit = Number.isFinite(t.qty) ? t.qty : 0;
       if (perUnit <= 0) return;
       const qty = Math.round(perUnit * (line.qty || 1));
       if (qty <= 0) return;
+      if (t.system === 'foil') {
+        if (!t.itemId) return;
+        // Same incomplete-pick guard as a foil modifier (see psComputeJobRequirements's own
+        // modifier loop below) — a Letters & Numbers group with no character chosen yet isn't a
+        // complete pick, and would otherwise read as a confusing false shortage mid-edit.
+        const foilItem = invFindItemGeneric('foil', t.itemId);
+        if (foilItem && foilItem.category === 'lettersNumbers' && foilItem.charType !== 'phrases' && !t.size) return;
+        const foilTopperReq = {
+          jobId: job.id, productionItemId, system: 'foil', colorId: null, inventoryItemId: t.itemId, brand: '',
+          color: itemLabel + ' — Topper', size: t.size || null, qty, unit: 'unit', requiredBy: job.eventDate || '', category: 'modifier',
+          source: { jobId: job.id, jobName: job.jobName || '', itemLabel }, unresolved: false,
+        };
+        foilTopperReq.excluded = psIsRequirementExcluded(job, foilTopperReq);
+        requirements.push(foilTopperReq);
+        return;
+      }
+      if (!t.color || !t.color.trim() || !t.size) return;
+      const invSize = INV_SIZE_FROM_PRODUCTION[t.size];
+      if (!invSize) return;
       requirements.push(psStandardLatexRequirement(job, productionItemId, itemLabel + ' — Topper', t.color, invSize, qty));
     });
 
