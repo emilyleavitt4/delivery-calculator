@@ -5411,6 +5411,10 @@ function psApplyReviewDraftToEvent(draft) {
         topperNote: '',
         notes: item.description || '',
       };
+      // Same template-level foil requirement psAddItemToJob seeds for a manually-added item — an
+      // import shouldn't behave differently just because it arrived through a different door.
+      const foilMod = psFoilSlotModifier(recipe, item.qty);
+      if (foilMod) newLine.modifiers.push(foilMod);
       event.productionItems.push(newLine);
       event.tasks = (event.tasks || []).concat(psSnapshotTasksForItem(recipe, newItemId));
       psSyncSyntheticPrepTasks(event, newItemId, newLine, recipe);
@@ -7900,6 +7904,8 @@ function psAddItemToJob(jobId) {
 
   const newItemId = psNewLineItemId();
   const newLine = { id: newItemId, recipeId: recipe.id, customRecipe: psSnapshotTemplate(recipe), qty, colors, customLinear, design, location, indoorOutdoor: psDetectIndoorOutdoor(location), topperNote, notes: '' };
+  const foilMod = psFoilSlotModifier(recipe, qty);
+  if (foilMod) newLine.modifiers = [foilMod];
   job.productionItems.push(newLine);
   job.tasks = (job.tasks || []).concat(psSnapshotTasksForItem(recipe, newItemId));
   psSyncSyntheticPrepTasks(job, newItemId, newLine, recipe);
@@ -7938,6 +7944,22 @@ function psUpdateItemNotes(jobId, idx, value) {
 // immediately on each field change (like Build notes/rentals already do), not staged behind the
 // item's own "Save changes" button, since a modifier is its own independent sub-list.
 function psNewModifierId() { return 'mod_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+// A template's optional per-unit foil requirement (see the Formula editor's own "Foil balloons
+// per ONE unit" field) becomes a real job-instance modifier at line-creation time — the SAME
+// Add-ons/Modifiers mechanism (and the same foil-aware picker, see psFoilPickerHtml) a person
+// could add by hand, just pre-seeded so a recurring design doesn't need it re-added every job.
+// `foilSlot: true` marks it so its picker renders the type-ahead foil search instead of the
+// plain generic dropdown, and scales by qty exactly like every other per-unit template value
+// already does. inventoryRef starts null — WHICH foil balloon(s) is always a per-job choice
+// (the same reasoning line.colors is never baked into the template either). Returns null when
+// the template has no foil requirement, so a caller can just conditionally push it.
+function psFoilSlotModifier(recipe, qty) {
+  const perUnit = recipe && recipe.foilPerUnit;
+  if (!Number.isFinite(perUnit) || perUnit <= 0) return null;
+  const total = Math.round(perUnit * (qty || 1));
+  if (total <= 0) return null;
+  return { id: psNewModifierId(), label: (recipe.foilLabel && recipe.foilLabel.trim()) || 'Foil balloons', inventoryRef: null, qty: total, generatesTask: false, note: '', foilSlot: true };
+}
 function psAddModifier(jobId, idx) {
   const job = psFindJob(jobId);
   if (job && psJobArchived(job)) return;
@@ -7945,6 +7967,20 @@ function psAddModifier(jobId, idx) {
   if (!line) return;
   if (!line.modifiers) line.modifiers = [];
   line.modifiers.push({ id: psNewModifierId(), label: '', inventoryRef: null, qty: 1, generatesTask: false, note: '' });
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+// A dedicated add button (alongside the generic one) so a foil balloon beyond whatever the
+// template's own foil count already seeded gets the nice type-ahead picker (psFoilPickerHtml)
+// immediately, rather than needing to add a plain modifier first and only THEN somehow discover
+// it should point at Foil.
+function psAddFoilModifier(jobId, idx) {
+  const job = psFindJob(jobId);
+  if (job && psJobArchived(job)) return;
+  const line = job && job.productionItems[idx];
+  if (!line) return;
+  if (!line.modifiers) line.modifiers = [];
+  line.modifiers.push({ id: psNewModifierId(), label: 'Foil balloon', inventoryRef: null, qty: 1, generatesTask: false, note: '', foilSlot: true });
   psSaveJob(job);
   psRenderProductionJobs();
 }
@@ -7991,6 +8027,94 @@ function psRemoveModifier(jobId, idx, modId) {
   psSaveJob(job);
   psRenderProductionJobs();
 }
+// ─── Foil balloon picker (a foil-targeted modifier's own inventoryRef editor) ───
+//
+// Direct request: "the foil picker option should almost be like the color options — I can type
+// 'star' into the foil field and choose from the different stars listed, or add a new one."
+// Mirrors the exact type-ahead pattern Production's own color fields and the Orders picker
+// already use (invShowColorSuggestions/invOrderItemSearch) instead of the plain giant <select>
+// every other modifier target still uses — swapped in ONLY for a foil-targeted modifier
+// (mod.foilSlot, or one that already points at the foil system; see psModifierEditorHtml), since
+// every other modifier target's list is short enough that the plain dropdown is still fine.
+//
+// A Letters & Numbers match (except Phrases, which is a flat quantity like everything else) is a
+// whole CHARACTER GROUP, not one countable item — picking it reveals a second small picker for
+// the exact character. That sub-step was completely missing before: pointing a modifier at a
+// Letters & Numbers group with no character chosen silently read as 0 available (getQty falls
+// back to item.quantity, a field that category doesn't even have).
+let psFoilSearchDraft = {}; // `${jobId}|${idx}|${modId}` -> in-progress search text, while picking
+function psFoilPickerKey(jobId, idx, modId) { return jobId + '|' + idx + '|' + modId; }
+function psFoilPickerSearch(jobId, idx, modId, value) {
+  const key = psFoilPickerKey(jobId, idx, modId);
+  psFoilSearchDraft[key] = value;
+  const container = document.getElementById('foil-suggest-' + key.replace(/[^a-zA-Z0-9]/g, '-'));
+  if (!container) return;
+  const q = value.trim().toLowerCase();
+  if (!q) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  const matches = FOIL_ITEMS.filter(i => !i.deletedAt && i.active !== false && invGenericItemLabel('foil', i).toLowerCase().includes(q)).slice(0, 8);
+  if (matches.length === 0) {
+    container.innerHTML = `<div class="inv-color-suggest-item" style="color:var(--text-tertiary); font-style:italic; cursor:default;">No match — add it from Settings → Foil Inventory, then search again</div>`;
+    container.style.display = 'block';
+    return;
+  }
+  container.innerHTML = matches.map(i =>
+    `<div class="inv-color-suggest-item" onmousedown="event.preventDefault(); psFoilPickerPick('${psJsKeyAttr(jobId)}',${idx},'${psJsKeyAttr(modId)}','${psJsKeyAttr(i.id)}')">${psEscape(invGenericItemLabel('foil', i))}</div>`
+  ).join('');
+  container.style.display = 'block';
+}
+// Abandons an in-progress, never-completed search on blur — otherwise the field would stay stuck
+// showing typed text that was never actually turned into a real pick, hiding whatever was really
+// saved underneath. Same 150ms delay as invHideColorSuggestionsSoon, for the same reason: a
+// suggestion's onmousedown (with preventDefault) already stops the browser from ever blurring the
+// input for that click, so this only ever fires for a genuine abandon, never a real pick.
+function psFoilPickerAbandonSoon(jobId, idx, modId) {
+  const key = psFoilPickerKey(jobId, idx, modId);
+  setTimeout(() => {
+    if (psFoilSearchDraft[key] !== undefined) { delete psFoilSearchDraft[key]; psRenderProductionJobs(); }
+  }, 150);
+}
+function psFoilPickerPick(jobId, idx, modId, itemId) {
+  const job = psFindJob(jobId);
+  if (!job || psJobArchived(job)) return;
+  const mod = psFindModifier(job, idx, modId);
+  if (!mod) return;
+  mod.inventoryRef = { system: 'foil', itemId, size: null };
+  delete psFoilSearchDraft[psFoilPickerKey(jobId, idx, modId)];
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+function psFoilPickerSetChar(jobId, idx, modId, char) {
+  const job = psFindJob(jobId);
+  if (!job || psJobArchived(job)) return;
+  const mod = psFindModifier(job, idx, modId);
+  if (!mod || !mod.inventoryRef) return;
+  mod.inventoryRef.size = char;
+  psSaveJob(job);
+  psRenderProductionJobs();
+}
+function psFoilPickerHtml(jobId, idx, mod) {
+  const key = psFoilPickerKey(jobId, idx, mod.id);
+  const sanitized = key.replace(/[^a-zA-Z0-9]/g, '-');
+  const inputId = 'foil-search-' + sanitized;
+  const item = mod.inventoryRef && mod.inventoryRef.itemId ? foilFindItem(mod.inventoryRef.itemId) : null;
+  const draft = psFoilSearchDraft[key];
+  const inputValue = draft !== undefined ? draft : (item ? invGenericItemLabel('foil', item) : '');
+  let html = `<div style="position:relative; margin-bottom:6px;">
+    <input type="text" id="${inputId}" placeholder="Start typing a shape, letter, number, or theme..." value="${invAttr(inputValue)}"
+      oninput="psFoilPickerSearch('${psJsKeyAttr(jobId)}',${idx},'${psJsKeyAttr(mod.id)}', this.value)"
+      onfocus="psFoilPickerSearch('${psJsKeyAttr(jobId)}',${idx},'${psJsKeyAttr(mod.id)}', this.value)"
+      onblur="invHideColorSuggestionsSoon('${inputId}'); psFoilPickerAbandonSoon('${psJsKeyAttr(jobId)}',${idx},'${psJsKeyAttr(mod.id)}')">
+    <div id="foil-suggest-${sanitized}" class="inv-color-suggest" style="display:none;"></div>
+  </div>`;
+  if (item && item.category === 'lettersNumbers' && item.charType !== 'phrases') {
+    const chars = foilCharsFor(item.charType);
+    html += `<div style="display:flex; flex-wrap:wrap; gap:4px; margin:-2px 0 6px;">
+      ${chars.map(c => `<button type="button" class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;${mod.inventoryRef.size === c ? ' background:var(--accent-light); border-color:var(--accent);' : ''}" onclick="psFoilPickerSetChar('${psJsKeyAttr(jobId)}',${idx},'${psJsKeyAttr(mod.id)}','${psJsKeyAttr(c)}')">${psEscape(c)}</button>`).join('')}
+    </div>`;
+    if (!mod.inventoryRef.size) html += `<div style="font-size:11px; color:var(--warning-text); margin:-2px 0 6px;">Pick which character above.</div>`;
+  }
+  return html;
+}
 // Every business-owned inventory record a modifier could point at, grouped by system — "Not
 // inventory-backed" is always the default/first option, since most modifiers (a design note, a
 // build variation) have nothing to pull at all. Standard Latex is deliberately excluded here: a
@@ -8020,15 +8144,20 @@ function invGenericItemOptionsHtml(selectedSystem, selectedItemId) {
 // earliest place to configure it, never a second system." Callers supply their own onclick/
 // onchange handler strings, since addressing genuinely differs (job+lineIndex+modId in
 // Production, reviewItemId+modId in Import Review) — only the markup/field layout is shared.
-function psModifierRowHtml(mod, onLabelChange, onQtyChange, onRefChange, onNoteChange, onTaskChange, onRemove) {
+// `foilPickerHtml`: when supplied (a foil-targeted modifier — see psModifierEditorHtml), renders
+// the type-ahead foil picker instead of the plain generic dropdown. Import Review's own modifier
+// editor never supplies this (its items aren't real job lines yet — a template's foil count only
+// ever gets seeded once a real production line exists, see psFoilSlotModifier), so it keeps using
+// the plain dropdown exactly as before.
+function psModifierRowHtml(mod, onLabelChange, onQtyChange, onRefChange, onNoteChange, onTaskChange, onRemove, foilPickerHtml) {
   return `<div style="border:0.5px solid var(--border); border-radius:var(--radius-sm); padding:8px; margin-bottom:6px;">
     <div class="row" style="margin-bottom:6px;">
       <input type="text" placeholder="Label, e.g. Red Starbursts" value="${invAttr(mod.label)}" onchange="${onLabelChange}">
       <input type="number" min="0" step="1" style="max-width:80px;" value="${mod.qty}" onchange="${onQtyChange}">
     </div>
-    <select style="width:100%; margin-bottom:6px;" onchange="${onRefChange}">
+    ${foilPickerHtml || `<select style="width:100%; margin-bottom:6px;" onchange="${onRefChange}">
       ${invGenericItemOptionsHtml(mod.inventoryRef && mod.inventoryRef.system, mod.inventoryRef && mod.inventoryRef.itemId)}
-    </select>
+    </select>`}
     <input type="text" placeholder="Note (optional)" style="width:100%; margin-bottom:6px;" value="${invAttr(mod.note)}" onchange="${onNoteChange}">
     <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary);">
       <input type="checkbox" ${mod.generatesTask ? 'checked' : ''} onchange="${onTaskChange}">
@@ -8037,10 +8166,13 @@ function psModifierRowHtml(mod, onLabelChange, onQtyChange, onRefChange, onNoteC
     <button class="icon-btn" style="width:auto; padding:4px 10px; font-size:11px; margin-top:6px;" onclick="${onRemove}"><i class="fa-solid fa-trash"></i> Remove</button>
   </div>`;
 }
-function psModifierListHtml(mods, labelHtml, rowFn, addOnClick) {
+function psModifierListHtml(mods, labelHtml, rowFn, addOnClick, extraButtonsHtml) {
   let html = `<div class="settings-field"><label>${labelHtml}</label>`;
   mods.forEach(mod => { html += rowFn(mod); });
-  html += `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="${addOnClick}"><i class="fa-solid fa-plus"></i> Add an add-on</button>`;
+  html += `<div style="display:flex; gap:6px; flex-wrap:wrap;">
+    <button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="${addOnClick}"><i class="fa-solid fa-plus"></i> Add an add-on</button>
+    ${extraButtonsHtml || ''}
+  </div>`;
   html += `</div>`;
   return html;
 }
@@ -8051,8 +8183,10 @@ function psModifierEditorHtml(job, idx, line) {
     `psSetModifierInventoryRef('${job.id}',${idx},'${mod.id}', this.value)`,
     `psUpdateModifierField('${job.id}',${idx},'${mod.id}','note', this.value)`,
     `psUpdateModifierField('${job.id}',${idx},'${mod.id}','generatesTask', this.checked)`,
-    `psRemoveModifier('${job.id}',${idx},'${mod.id}')`
-  ), `psAddModifier('${job.id}',${idx})`);
+    `psRemoveModifier('${job.id}',${idx},'${mod.id}')`,
+    (mod.foilSlot || (mod.inventoryRef && mod.inventoryRef.system === 'foil')) ? psFoilPickerHtml(job.id, idx, mod) : null
+  ), `psAddModifier('${job.id}',${idx})`,
+  `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="psAddFoilModifier('${job.id}',${idx})"><i class="fa-solid fa-plus"></i> Add a foil balloon</button>`);
 }
 
 // ═══════════════════════════════════════ QUANTITY CALCULATOR VIEW ═══════════════════════════════════════
@@ -8834,6 +8968,15 @@ function ptTemplateFieldsEditorHtml(t) {
   </div>
   ${ptFormulaEditorHtml(t)}
   ${t.formula === 'fixed' ? '' : ptTopperEditorHtml(t)}
+  <div class="row" style="margin-bottom:0.6rem;">
+    <div class="settings-field" style="margin-bottom:0;"><label>Foil balloons per ONE unit <span style="font-weight:400;">(optional — air-filled or helium; multiplied by Quantity like every other per-unit value here)</span></label>
+      <input type="number" min="0" step="1" value="${t.foilPerUnit || ''}" placeholder="e.g. 3" onchange="ptUpdateField('${t.id}','foilPerUnit', this.value)">
+    </div>
+    <div class="settings-field" style="margin-bottom:0;"><label>Foil label <span style="font-weight:400;">(optional)</span></label>
+      <input type="text" placeholder="e.g. Numeral foil balloons" value="${invAttr(t.foilLabel || '')}" onchange="ptUpdateField('${t.id}','foilLabel', this.value)">
+    </div>
+  </div>
+  <div style="font-size:11px; color:var(--text-secondary); margin:-0.4rem 0 0.6rem;">Sets the count only — WHICH foil balloon(s) (a shape, a letter/number, a themed design) is picked per job from Foil inventory, since that varies job to job the same way a color does.</div>
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Build instructions</label><textarea rows="3" onchange="ptUpdateField('${t.id}','buildInstructions', this.value)">${psEscape(t.buildInstructions)}</textarea></div>
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Equipment list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','equipmentList', this.value)">${psEscape(t.equipmentList.join('\n'))}</textarea></div>
   <div class="settings-field" style="margin-bottom:0.6rem;"><label>Pack list <span style="font-weight:400;">(one per line)</span></label><textarea rows="3" onchange="ptUpdateListField('${t.id}','packList', this.value)">${psEscape(t.packList.join('\n'))}</textarea></div>
@@ -8904,6 +9047,11 @@ function ptUpdateField(id, field, value) {
   if (!t) return;
   if (field === 'linearFt' || field === 'topperFt') {
     t[field] = parseFloat(value) || 0;
+  } else if (field === 'foilPerUnit') {
+    // Blank/0 both mean "no foil in this design" — never seeds a foil slot on a new job either
+    // way (see psFoilSlotModifier). Never a rate-per-foot like the latex formulas — foil balloons
+    // are always a flat count per ONE unit, same convention 'fixed'-formula counts already use.
+    t.foilPerUnit = parseFloat(value) || 0;
   } else if (field === 'classicPerFt') {
     // Blank must mean "use the shared global rate," never "override to zero" — zero would
     // silently compute zero balloons for every job using this template.
@@ -12033,6 +12181,12 @@ function psComputeJobRequirements(job) {
     // (still shown in Production's Pull section, just nothing for Review & Pull to track).
     (line.modifiers || []).forEach(mod => {
       if (!mod.inventoryRef || !mod.inventoryRef.itemId) return;
+      // A Letters & Numbers foil pick (see psFoilPickerHtml) targets a whole character GROUP —
+      // itemId alone isn't a complete pick until a specific character is also chosen. Generating a
+      // requirement mid-pick would read as a real (and wrongly zero) shortage before the person's
+      // even done choosing, since that category has no flat quantity for size to fall back to.
+      const modItem = invFindItemGeneric(mod.inventoryRef.system, mod.inventoryRef.itemId);
+      if (modItem && mod.inventoryRef.system === 'foil' && modItem.category === 'lettersNumbers' && modItem.charType !== 'phrases' && !mod.inventoryRef.size) return;
       const modQty = Number.isFinite(mod.qty) ? mod.qty : 0;
       if (modQty <= 0) return;
       const modReq = {
