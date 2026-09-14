@@ -14702,12 +14702,27 @@ function invToOrderAddToDraft(rowKey) {
   if (row.source === 'manual' && row.flagId) invUnflagToOrder(row.flagId);
   invRenderOrdersSection();
 }
+// Reported directly: a 43-row "To Order" list defaulting wide open made the whole Orders screen
+// unusable without scrolling past it first. Collapsed by default (matching every other long list
+// in this app — Completed jobs, Recently Deleted, Flagged sizes) — the header itself is the
+// toggle, same click-to-expand convention as those.
+let invToOrderExpanded = false;
+function invToggleToOrderExpanded() {
+  invToOrderExpanded = !invToOrderExpanded;
+  invRenderOrdersSection();
+}
 function invToOrderColumnHtml() {
   const rows = invToOrderRows();
   let html = `<div class="card">
-    <div style="font-size:14px; font-weight:700; margin-bottom:0.5rem;">To Order${rows.length ? ` (${rows.length})` : ''}</div>`;
+    <div style="font-size:14px; font-weight:700; margin-bottom:0.5rem; display:flex; align-items:center; justify-content:space-between;${rows.length ? ' cursor:pointer;' : ''}"${rows.length ? ` onclick="invToggleToOrderExpanded()"` : ''}>
+      <span>To Order${rows.length ? ` (${rows.length})` : ''}</span>
+      ${rows.length ? `<i class="fa-solid fa-chevron-${invToOrderExpanded ? 'up' : 'down'}" style="font-size:12px; color:var(--text-tertiary);"></i>` : ''}
+    </div>`;
   if (rows.length === 0) {
     html += `<div style="font-size:13px; color:var(--text-secondary);">Nothing flagged to order right now.</div>`;
+  } else if (!invToOrderExpanded) {
+    const urgentCount = rows.filter(r => r.urgent).length;
+    html += `<div style="font-size:13px; color:var(--text-secondary); cursor:pointer;" onclick="invToggleToOrderExpanded()">${rows.length} item${rows.length === 1 ? '' : 's'} need${rows.length === 1 ? 's' : ''} ordering${urgentCount ? ` — ${urgentCount} urgent` : ''}. Tap to view.</div>`;
   } else {
     rows.forEach(row => {
       const sys = invSystemFor(row.system);
@@ -14717,8 +14732,8 @@ function invToOrderColumnHtml() {
         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:2px;">
           <span style="font-size:12px; color:var(--text-secondary);">Suggested: ${row.suggestedQty}</span>
           <div style="display:flex; gap:4px;">
-            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;" onclick="invToOrderAddToDraft('${row.key}')">Add to order</button>
-            ${row.source === 'manual' ? `<button class="icon-btn" style="padding:2px 6px;" onclick="invUnflagToOrder('${row.flagId}')" aria-label="Remove from list"><i class="fa-solid fa-xmark"></i></button>` : ''}
+            <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;" onclick="invToOrderAddToDraft('${psJsKeyAttr(row.key)}')">Add to order</button>
+            ${row.source === 'manual' ? `<button class="icon-btn" style="padding:2px 6px;" onclick="invUnflagToOrder('${psJsKeyAttr(row.flagId)}')" aria-label="Remove from list"><i class="fa-solid fa-xmark"></i></button>` : ''}
           </div>
         </div>
       </div>`;
