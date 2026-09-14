@@ -10959,6 +10959,13 @@ function invApplyInventoryTransactions(entries) {
         txDocs.push({
           id: psNewInventoryTransactionId(), system, itemId: e.itemId, size: e.size || null,
           color: item.color || null, brand: item.brand || null, name: item.name || null,
+          // Specialty Latex's own extra identity beyond brand+color — a printed item's pattern
+          // (e.g. "Cow") or a shaped item's shape name. Null for every other system (Add-Ons/
+          // Framework/Foil have no such field). Reported directly: without this, two prints
+          // sharing the same brand+color (e.g. "Sempertex White — Cow" vs. "Sempertex White —
+          // Polka Dot") were completely indistinguishable in the Activity ledger — exactly what
+          // made a real mis-pick hard to even notice. See invActivityItemLabel's own use of this.
+          sizeType: item.sizeType || null, pattern: item.pattern || item.shape || null,
           type: e.type, unit: trackingUnit, delta, previousBalance, newBalance,
           balloonsUsed: null, perBagAtTime: null, remainderBefore: null, remainderAfter: null, looseBefore: null, looseAfter: null,
           // Which production item this pull/return belongs to — see the batch fix for a real,
@@ -14199,9 +14206,18 @@ function invActivitySetFilter(field, value) {
   invActivityFilter[field] = value;
   invRenderActivity();
 }
+// sizeType/pattern only ever exist on a Specialty Latex transaction (see
+// invApplyInventoryTransactions' own generic-system denormalization) — included whenever present
+// so two same-brand-same-color prints (e.g. "White — Cow" vs. "White — Polka Dot") read as
+// genuinely different Activity rows instead of both showing as identical "Sempertex White."
+// Reported directly: a real inventory mix-up traced back to exactly this gap. Absent on every
+// transaction recorded before this field existed — filtered out below, same no-backfill
+// convention as every other optional field added this way.
 function invActivityItemLabel(t) {
-  const sys = invSystemFor(t.system);
-  if (t.brand || t.color) return [t.brand, t.color].filter(Boolean).join(' ') + (t.size ? ' — ' + t.size : '');
+  if (t.brand || t.color) {
+    const extra = [t.sizeType, t.pattern].filter(Boolean).join(' — ');
+    return [t.brand, t.color].filter(Boolean).join(' ') + (extra ? ` — ${extra}` : '') + (t.size ? ' — ' + t.size : '');
+  }
   return (t.name || '(unknown item)') + (t.size ? ' — ' + t.size : '');
 }
 function invActivityFilteredRows() {
