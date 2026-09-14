@@ -14315,6 +14315,16 @@ function invOrderItemPick(itemId) {
   invOrderDraftLine.itemQuery = '';
   invRenderOrdersSection(); // a chosen item can mean different sizeOptions — rebuild that dropdown, same as the old select's onchange did
 }
+// Reported directly, real inventory damage: "I thought it was asking for how many BALLOONS and I
+// entered numbers" — a whole order's worth of misunderstood quantities went straight into real
+// Backstock with zero review. "If I put in anything over like 5 bags for a certain size/color, we
+// should have some kind of 'oops did you mean this many?'" Shared by two checkpoints — right here
+// at entry, and again in invMarkReceived right before it becomes real Backstock (catching anything
+// that slipped through some other way, e.g. an uploaded/pasted invoice's own parsed quantity).
+// Scoped to bags-tracked systems only (Standard/Specialty Latex, the only two where "bags" is even
+// the unit) — Add-Ons/Framework/Foil are plain counted units, where a normal quantity can
+// legitimately be well over 5 with nothing wrong.
+const INV_RECEIVE_BAG_SANITY_THRESHOLD = 5;
 // Adding a line never touches the ledger — it only grows the in-memory draft. Nothing is real
 // until Save order writes the whole thing as one document; cancelling the draft discards every
 // line added so far, same as any other unsaved form in this app.
@@ -14334,6 +14344,13 @@ function invAddOrderLine() {
   // Denormalized at add-time, same convention Production's own requirement rows use — the order
   // stays legible even if this item is later renamed, re-categorized, or deleted.
   const label = sys.displayLabel(item) + (size ? ` — ${size}` : '');
+  // Caught right at entry, before it can ever reach real Backstock (see invMarkReceived's own
+  // second checkpoint) — reported directly: "I thought it was asking for how many BALLOONS and I
+  // entered numbers." Bags-tracked systems only; a flat-count system's normal quantities (Add-Ons,
+  // Framework, Foil) aren't bags, so a number over 5 there isn't a meaningful red flag.
+  if ((system === 'standardLatex' || system === 'specialtyLatex') && qty > INV_RECEIVE_BAG_SANITY_THRESHOLD) {
+    if (!confirm(`That's ${qty} bags of ${label} — a lot for one line. If you meant ${qty} individual balloons instead of bags, cancel and re-enter the amount in bags (usually a much smaller number). Add ${qty} bags anyway?`)) return;
+  }
   invOrderDraft.lines.push({ system, itemId, size: size || null, qty, label });
   invOrderDraftLine = { system, itemId: '' };
   invRenderOrdersSection();
@@ -14859,12 +14876,23 @@ function invOrderLines(order) {
 // invApplyInventoryTransactions service every other backstock change uses, generalized across
 // systems via INV_SYSTEMS exactly like Review & Pull's own generic branch already is. Whole-order
 // receiving only for now (all lines credited together) — partial/per-line receiving would be a
-// real, separate feature if it turns out to be needed.
+// real, separate feature if it turns out to be needed. Its own sanity check right before crediting
+// (see INV_RECEIVE_BAG_SANITY_THRESHOLD's own comment) is a second checkpoint alongside
+// invAddOrderLine's — catches anything that slipped through some other way (e.g. an uploaded/
+// pasted invoice's own parsed quantity), not just a manually-typed line.
 function invMarkReceived(orderId) {
   const order = INVENTORY_ORDERS.find(o => o.id === orderId);
   if (!order) return;
   const lines = invOrderLines(order);
   if (lines.length === 0) return;
+  const bigLines = lines.filter(l => (!l.system || l.system === 'standardLatex' || l.system === 'specialtyLatex') && l.qty > INV_RECEIVE_BAG_SANITY_THRESHOLD);
+  if (bigLines.length > 0) {
+    const list = bigLines.map(l => {
+      const label = l.label || invGenericItemLabel(l.system || 'standardLatex', invFindItemGeneric(l.system || 'standardLatex', l.itemId)) + (l.size ? ` — ${l.size}` : '');
+      return `• ${l.qty} bags — ${label}`;
+    }).join('\n');
+    if (!confirm(`That's a lot for one order — double-check before this goes into real Backstock:\n\n${list}\n\nIf any of these were meant as individual balloons instead of bags, Cancel and fix that line first. Continue crediting as shown?`)) return;
+  }
   const entries = lines.map(l => (l.system && l.system !== 'standardLatex')
     ? { system: l.system, itemId: l.itemId, size: l.size, type: 'RECEIVE', delta: l.qty, reference: order.vendor }
     : { itemId: l.itemId, size: l.size, type: 'RECEIVE', delta: l.qty, reference: order.vendor });
