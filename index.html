@@ -14510,16 +14510,32 @@ function invBuildInvoiceDraftFromText(text) {
     const resolution = clResolveName(parsedDesc.colorRaw);
     const item = resolution.status === 'resolved' ? INVENTORY_ITEMS.find(i => i.colorId === resolution.entry.id && i.active !== false) : null;
     const resolved = resolution.status === 'resolved' && item;
+    // A vendor invoice can carry Specialty Latex stock too (a printed pattern, e.g. "COW PRINT")
+    // — reported directly: "how do we import this? it's the cow print specialty latex, but only
+    // pulling from our main inventory list to match." Standard Latex stays the primary, tried-
+    // first match (this parser was built and tested against that shape); only when it comes up
+    // empty does an EXACT (never fuzzy) match against a Specialty Latex item's color-or-pattern
+    // get a try, and only auto-applied when it's the single unambiguous hit — same "never guess"
+    // rule as everywhere else here. A raw description with extra wording around the real pattern
+    // (e.g. "COW PRINT AROUND" vs. a stored pattern of "Cow") won't auto-match either way — that's
+    // fine, it's exactly what the new Specialty Latex options in the manual picker (see
+    // invInvoiceColorOptionsHtml) are for.
+    let system = 'standardLatex', specialtyItem = null;
+    if (!resolved) {
+      const spMatches = spFindByExactColorText(parsedDesc.colorRaw);
+      if (spMatches.length === 1) { specialtyItem = spMatches[0]; system = 'specialtyLatex'; }
+    }
     rows.push({
       id: invNewInvoiceRowId(),
       stockNumber, raw: description, sizeRaw: parsedDesc.sizeRaw, colorRaw: parsedDesc.colorRaw,
       invSize, qty: parseInt(qtyShip, 10) || 0,
+      system,
       colorId: (resolution.status === 'resolved' && item) ? resolution.entry.id : null,
-      itemId: item ? item.id : null,
-      matchStatus: !invSize ? 'badSize' : (resolution.status === 'resolved' ? (item ? 'resolved' : 'noItem') : resolution.status), // 'resolved' | 'ambiguous' | 'none' | 'noItem' | 'badSize'
+      itemId: specialtyItem ? specialtyItem.id : (item ? item.id : null),
+      matchStatus: !invSize ? 'badSize' : (specialtyItem ? 'resolved' : (resolution.status === 'resolved' ? (item ? 'resolved' : 'noItem') : resolution.status)), // 'resolved' | 'ambiguous' | 'none' | 'noItem' | 'badSize'
       // Ranked candidates for a fast manual pick — only computed when there's actually a decision
       // to speed up; a confidently auto-resolved row has nothing to suggest.
-      suggestions: resolved ? [] : invFuzzyColorSuggestions(parsedDesc.colorRaw, 4),
+      suggestions: (resolved || specialtyItem) ? [] : invFuzzyColorSuggestions(parsedDesc.colorRaw, 4),
       include: true,
     });
   });
@@ -14566,13 +14582,30 @@ function invInvoiceSetField(field, value) {
   if (!invInvoiceDraft) return;
   invInvoiceDraft[field] = value;
 }
-function invInvoiceSetRowColor(rowId, colorId) {
+// `value` is '' (nothing picked) or 'system|id' from invInvoiceColorOptionsHtml — same
+// system-prefixed shape invGenericItemOptionsHtml already uses for modifiers, so a Specialty
+// Latex pick here (a printed pattern like Cow Print — see the batch note on why the auto-match
+// above only fires on an exact hit) resolves by id directly rather than through Color Library at
+// all, the same way any other Specialty Latex reference in this app works.
+function invInvoiceSetRowColor(rowId, value) {
   const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
   if (!row) return;
-  if (!colorId) { row.colorId = null; row.itemId = null; row.matchStatus = 'none'; invRenderOrdersSection(); return; }
-  const entry = COLOR_LIBRARY.find(e => e.id === colorId);
-  const item = INVENTORY_ITEMS.find(i => i.colorId === colorId && i.active !== false);
-  row.colorId = colorId;
+  if (!value) { row.system = 'standardLatex'; row.colorId = null; row.itemId = null; row.matchStatus = 'none'; invRenderOrdersSection(); return; }
+  const sepIdx = value.indexOf('|');
+  const system = value.slice(0, sepIdx);
+  const id = value.slice(sepIdx + 1);
+  if (system === 'specialtyLatex') {
+    const item = SPECIALTY_ITEMS.find(i => i.id === id);
+    row.system = 'specialtyLatex';
+    row.colorId = null;
+    row.itemId = item ? item.id : null;
+    row.matchStatus = item ? 'resolved' : 'noItem';
+    invRenderOrdersSection();
+    return;
+  }
+  const item = INVENTORY_ITEMS.find(i => i.colorId === id && i.active !== false);
+  row.system = 'standardLatex';
+  row.colorId = id;
   row.itemId = item ? item.id : null;
   row.matchStatus = item ? 'resolved' : 'noItem';
   invRenderOrdersSection();
@@ -14609,6 +14642,7 @@ function invInvoiceSubmitAddColor(rowId) {
   const existingItem = INVENTORY_ITEMS.find(i => i.colorId === libraryEntry.id && i.active !== false);
   const item = existingItem || { id: psNewInventoryItemId(), color, brand, tier: 'misc', active: true, colorId: libraryEntry.id, sizes: invBlankSizeData() };
   if (!existingItem) invSaveItem(item);
+  row.system = 'standardLatex';
   row.colorId = libraryEntry.id;
   row.itemId = item.id;
   row.matchStatus = 'resolved';
@@ -14642,6 +14676,16 @@ function invSubmitInvoiceOrder() {
   const skipped = invInvoiceDraft.rows.filter(r => r.include).length - usable.length;
   if (usable.length === 0) { alert('No rows are ready to order yet — pick a color for at least one row.'); return; }
   const lines = usable.map(r => {
+    const system = r.system || 'standardLatex';
+    // Specialty Latex has no sub-size to address (one flat SKU per record — its size/pattern are
+    // already baked into the item itself, see INV_SYSTEMS.specialtyLatex.sizeOptions) — the row's
+    // own parsed invSize is Standard-Latex-shaped and doesn't apply there, so the order line's
+    // size stays null exactly like every other Specialty Latex reference in this app.
+    if (system === 'specialtyLatex') {
+      const item = SPECIALTY_ITEMS.find(i => i.id === r.itemId);
+      const label = item ? invGenericItemLabel('specialtyLatex', item) : r.colorRaw;
+      return { system, itemId: r.itemId, size: null, qty: r.qty, label };
+    }
     const item = invFindItem(r.itemId);
     const label = (item ? [item.brand, item.color].filter(Boolean).join(' ') : r.colorRaw) + ` — ${r.invSize}`;
     return { system: 'standardLatex', itemId: r.itemId, size: r.invSize, qty: r.qty, label };
@@ -14663,11 +14707,24 @@ function invInvoiceMatchBadgeHtml(status) {
   if (status === 'badSize') return `<span class="rp-badge rp-badge-danger">Unknown size</span>`;
   return `<span class="rp-badge rp-badge-danger">No match</span>`;
 }
-// Every active Standard Latex color, for the manual fix-up picker on a row that didn't
-// auto-resolve — plain alphabetical, not filtered by anything the row itself guessed.
-function invInvoiceColorOptionsHtml(selectedId) {
-  const sorted = COLOR_LIBRARY.filter(e => e.active !== false).sort((a, b) => a.colorName.localeCompare(b.colorName));
-  return `<option value="">— pick a color —</option>` + sorted.map(e => `<option value="${e.id}" ${e.id === selectedId ? 'selected' : ''}>${psEscape(e.colorName)}${e.brand ? ' (' + psEscape(e.brand) + ')' : ''}</option>`).join('');
+// Standard Latex colors (the common case this parser was built and tested against) plus every
+// Specialty Latex item, for the manual fix-up picker on a row that didn't auto-resolve — reported
+// directly: "how do we import this? it's the cow print specialty latex, but only pulling from our
+// main inventory list to match." Same system-prefixed `system|id` value shape
+// invGenericItemOptionsHtml already uses for modifiers, so invInvoiceSetRowColor can tell the two
+// apart unambiguously. Foil/Add-Ons/Framework aren't included — a vendor STOCK invoice restocking
+// balloons has no reason to carry those, and this parser's own row shape (a size+color/pattern
+// description) doesn't fit them anyway.
+function invInvoiceColorOptionsHtml(row) {
+  const sortedColors = COLOR_LIBRARY.filter(e => e.active !== false).sort((a, b) => a.colorName.localeCompare(b.colorName));
+  const sortedSpecialty = SPECIALTY_ITEMS.filter(i => !i.deletedAt && i.active !== false).sort((a, b) => invGenericItemLabel('specialtyLatex', a).localeCompare(invGenericItemLabel('specialtyLatex', b)));
+  const selected = row.system === 'specialtyLatex' ? ('specialtyLatex|' + row.itemId) : (row.colorId ? ('standardLatex|' + row.colorId) : '');
+  let html = `<option value="">— pick a color —</option>`;
+  html += `<optgroup label="Standard Latex">` + sortedColors.map(e => `<option value="${invAttr('standardLatex|' + e.id)}" ${('standardLatex|' + e.id) === selected ? 'selected' : ''}>${psEscape(e.colorName)}${e.brand ? ' (' + psEscape(e.brand) + ')' : ''}</option>`).join('') + `</optgroup>`;
+  if (sortedSpecialty.length) {
+    html += `<optgroup label="Specialty Latex">` + sortedSpecialty.map(i => `<option value="${invAttr('specialtyLatex|' + i.id)}" ${('specialtyLatex|' + i.id) === selected ? 'selected' : ''}>${psEscape(invGenericItemLabel('specialtyLatex', i))}</option>`).join('') + `</optgroup>`;
+  }
+  return html;
 }
 function invInvoiceDraftHtml() {
   const rows = invInvoiceDraft.rows;
@@ -14688,13 +14745,13 @@ function invInvoiceDraftHtml() {
           <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:2px;">
             ${invInvoiceMatchBadgeHtml(r.matchStatus)}
             ${r.invSize ? `<span style="font-size:12px;">${psEscape(r.invSize)}</span>` : ''}
-            <select style="width:auto; min-width:160px;" onchange="invInvoiceSetRowColor('${r.id}', this.value)">${invInvoiceColorOptionsHtml(r.colorId)}</select>
+            <select style="width:auto; min-width:160px;" onchange="invInvoiceSetRowColor('${r.id}', this.value)">${invInvoiceColorOptionsHtml(r)}</select>
             <input type="number" min="0" value="${r.qty}" style="width:70px;" oninput="invInvoiceSetRowQty('${r.id}', this.value)">
             <button class="icon-btn" style="padding:2px 6px;" onclick="invInvoiceRemoveRow('${r.id}')" aria-label="Remove row"><i class="fa-solid fa-xmark"></i></button>
           </div>
           ${needsHelp && r.suggestions.length ? `<div style="display:flex; align-items:center; gap:4px; flex-wrap:wrap; margin-top:4px;">
             <span style="font-size:11px; color:var(--text-tertiary);">Did you mean:</span>
-            ${r.suggestions.map(s => `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;" onclick="invInvoiceSetRowColor('${r.id}','${s.id}')">${psEscape(s.colorName)}${s.brand ? ' (' + psEscape(s.brand) + ')' : ''}</button>`).join('')}
+            ${r.suggestions.map(s => `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;" onclick="invInvoiceSetRowColor('${r.id}','${psJsKeyAttr('standardLatex|' + s.id)}')">${psEscape(s.colorName)}${s.brand ? ' (' + psEscape(s.brand) + ')' : ''}</button>`).join('')}
           </div>` : ''}
           ${needsHelp ? (invInvoiceAddColorOpenFor === r.id ? `<div class="row" style="margin-top:4px;">
               <div class="settings-field" style="margin-bottom:0;"><input type="text" id="inv-invoice-newcolor-name-${r.id}" placeholder="Color name" value="${invAttr(invTitleCaseWords(r.colorRaw))}"></div>
