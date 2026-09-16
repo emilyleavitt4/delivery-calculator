@@ -10831,7 +10831,18 @@ const INV_SYSTEMS = {
     findItem: (itemId) => SPECIALTY_ITEMS.find(i => i.id === itemId),
     listItems: () => SPECIALTY_ITEMS,
     sizeOptions: () => null, // one flat SKU per record — nothing to sub-select
-    displayLabel: (item) => [item.color, item.pattern].filter(Boolean).join(' — ') || item.brand || '(unnamed)',
+    // Reported directly: searching "260" in the Add-an-Order item field found nothing, even when a
+    // real 260 Twisting item existed — this label (what that search actually matches against) never
+    // included sizeType at all, so a size could never be how an item was found. Also folds in brand
+    // and pattern/shape, matching what invSystemFor.standardLatex already does with brand+color —
+    // two same-color prints at different sizes (or the same size in two brands) used to be
+    // genuinely indistinguishable everywhere this label is shown (Orders picker, modifier dropdown,
+    // the restock invoice importer's own Specialty Latex options).
+    displayLabel: (item) => {
+      const base = [item.brand, item.color].filter(Boolean).join(' ') || '(unnamed)';
+      const extra = [item.sizeType, item.pattern || item.shape].filter(Boolean).join(' — ');
+      return extra ? `${base} — ${extra}` : base;
+    },
   },
   addOns: {
     label: 'Add-Ons', viewId: 'inventory-extras', itemRef: (itemId) => window.fbInvxItemRef(itemId),
@@ -14424,6 +14435,14 @@ function invOrderLinePickerHtml() {
       <div id="inv-order-item-search-suggest" class="inv-color-suggest" style="display:none;"></div>
     </div>
   </div>`;
+  // This search can only ever find an item that already exists — reported directly: "I still
+  // can't figure out how to add 260s" turned out to be exactly this, a brand-new Specialty Latex
+  // SKU with nothing yet to find. Navigating away doesn't lose this in-progress order — invOrderDraft/
+  // invOrderDraftLine are plain module state, untouched by showView — so she can add the real item
+  // in Specialty Latex Inventory and come straight back to search for it here.
+  if (invOrderDraftLine.system === 'specialtyLatex' && !selectedItem) {
+    html += `<div style="font-size:11px; color:var(--text-secondary); margin:-0.3rem 0 0.6rem;">Can't find it? <button class="ir-text-action" style="font-size:11px; padding:0;" onclick="showView('inventory-specialty')">Add it in Specialty Latex Inventory</button>, then come back and search for it here.</div>`;
+  }
   if (sizeOpts) {
     html += `<div class="settings-field"><label>${invOrderDraftLine.system === 'foil' ? 'Character' : 'Size'}</label>
       <select id="inv-order-line-size">
