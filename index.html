@@ -1112,6 +1112,12 @@
   window.fbLoadImportMappingRules = () => window.fbLoadSettingsDoc('importMappingRules');
   window.fbSaveImportMappingRules = (data) => window.fbSaveSettingsDoc('importMappingRules', data);
 
+  // Remembers a manually-resolved vendor-invoice color/size -> business item match (the restock
+  // invoice importer's own "remember this for next time" — see INVOICE_COLOR_MAPPINGS), separate
+  // from Import Review's own importMappingRules (a different importer, different raw-text shape).
+  window.fbLoadInvoiceColorMappings = () => window.fbLoadSettingsDoc('invoiceColorMappings');
+  window.fbSaveInvoiceColorMappings = (data) => window.fbSaveSettingsDoc('invoiceColorMappings', data);
+
   // Import Review — "Save Draft" persists the in-progress review here so it survives a reload
   // or a trip to another screen; cleared (set to null) once "Approve Import" runs. Not really
   // configuration (it's a transient operational draft), just parked in the settings/ bucket
@@ -10029,7 +10035,11 @@ const INV_SIZES = ['5"/7"', '11"', '17"/18"', '24"', '30"/36"'];
 // (e.g. '17"/18"') are correct but too wide to show five of them side by side on a phone.
 const INV_SIZE_SHORT = { '5"/7"': '5"', '11"': '11"', '17"/18"': '18"', '24"': '24"', '30"/36"': '36"' };
 // Maps a Production balloon size to the inventory size group it belongs to.
-const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '18"': '17"/18"', '24"': '24"', '36"': '30"/36"' };
+// Both '17"' and '18"' map to the same combined Standard Latex bucket — reported directly: "17"
+// blue slate... should be grouped with 17"/18" because Tuftex always does 17"" (a different brand
+// may print "18"" for the identical physical size; this app already stocks both under one bucket,
+// this mapping just needed to recognize the vendor's own labeling convention too).
+const INV_SIZE_FROM_PRODUCTION = { '5"': '5"/7"', '11"': '11"', '17"': '17"/18"', '18"': '17"/18"', '24"': '24"', '36"': '30"/36"' };
 const INV_OPEN_STATUSES = ['Full', 'Partial', 'Empty'];
 // Open Bin is deliberately a quick qualitative status, never a counted quantity — nothing here
 // writes a real number from it, and it is NEVER used to compute a row's actual `available`
@@ -14451,15 +14461,41 @@ let invInvoiceMode = null; // 'upload' | 'paste' | null — which input method i
 // text line: STOCK# QTY-SOLD QTY-SHIP QTY-B/O UNIT DESCRIPTION PRICE EXT-PRICE. QTY-SHIP (not
 // QTY-SOLD or QTY-B/O) is what's actually arriving, so that's the number this reads.
 const INV_INVOICE_ROW_RE = /^([A-Z0-9][A-Z0-9\-\/]{2,})\s+(\d+)\s+(\d+)\s+(\d+)\s+([A-Z]{2,4})\s+(.+?)\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})\s*$/;
-// A description like `11" DELUXE BLACK - 100 CT` or `5" DELUXE COSMO PINK` (the trailing pack-
-// count suffix is optional — not every row has one, and it's discarded either way since Standard
-// Package Qty is this business's own configured field, never inferred from an invoice).
+// The trailing pack-count suffix (CT or PK) is optional — not every row has one, and it's
+// discarded either way since Standard Package Qty is this business's own configured field, never
+// inferred from an invoice.
+function invStripInvoicePackSuffix(text) {
+  return (text || '').replace(/-?\s*\d+\s*(CT|PK)\s*$/i, '').replace(/-\s*$/, '').trim();
+}
+// A description like `11" DELUXE BLACK - 100 CT` or `5" DELUXE COSMO PINK` — but a vendor invoice
+// also carries sizes with no Standard Latex bucket at all: Specialty Latex Twisting numbers (160/
+// 260/350/646, no inch mark at all — see SP_SIZE_OPTIONS.twisting) and foot-marked giants (3',
+// not 3"). Reported directly: these were being silently dropped — not even shown as an unmatched
+// row — because only the inch-marked shape was ever recognized at all. `sizeKind` distinguishes
+// "this size legitimately has no Standard Latex bucket, try Specialty Latex instead" from the
+// ordinary inch-based case, so a caller never confuses "no bucket exists for this size" with
+// "this size string wasn't understood."
 function invParseInvoiceDescription(desc) {
-  const m = (desc || '').match(/^(\d+)"\s*(.+)$/);
-  if (!m) return null;
-  const colorRaw = m[2].replace(/-?\s*\d+\s*CT\s*$/i, '').replace(/-\s*$/, '').trim();
-  if (!colorRaw) return null;
-  return { sizeRaw: m[1] + '"', colorRaw };
+  const raw = (desc || '').trim();
+  let m = raw.match(/^(\d+)"\s*(.+)$/);
+  if (m) {
+    const colorRaw = invStripInvoicePackSuffix(m[2]);
+    if (!colorRaw) return null;
+    return { sizeRaw: m[1] + '"', colorRaw, sizeKind: 'standard' };
+  }
+  m = raw.match(/^(\d+)'\s*(.+)$/);
+  if (m) {
+    const colorRaw = invStripInvoicePackSuffix(m[2]);
+    if (!colorRaw) return null;
+    return { sizeRaw: m[1] + "'", colorRaw, sizeKind: 'specialtyOnly' };
+  }
+  m = raw.match(/^(160|260|350|646)\s+(.+)$/);
+  if (m) {
+    const colorRaw = invStripInvoicePackSuffix(m[2]);
+    if (!colorRaw) return null;
+    return { sizeRaw: m[1], colorRaw, sizeKind: 'specialtyOnly' };
+  }
+  return null;
 }
 function invNewInvoiceRowId() { return 'invrow_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 // clResolveName (an exact, unambiguous match) is still the ONLY thing that ever auto-fills a
@@ -14492,8 +14528,44 @@ function invFuzzyColorSuggestions(colorRaw, limit) {
 function invTitleCaseWords(text) {
   return (text || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 }
+// General Specialty Latex exact match, ANY kind (not just Printed) — used when an invoice row's
+// size has no Standard Latex bucket at all (a Twisting number, or a foot-marked giant), so there's
+// nothing else for it to plausibly resolve to. Requires sizeType to ALSO match exactly, since
+// "260" and "160" are genuinely different SKUs, not interchangeable by color alone.
+function spFindByExactColorAndSize(text, sizeType) {
+  const key = (text || '').trim().toLowerCase();
+  const sizeKey = (sizeType || '').trim().toLowerCase();
+  if (!key || !sizeKey) return [];
+  return SPECIALTY_ITEMS.filter(i => !i.deletedAt && i.active !== false && (i.sizeType || '').trim().toLowerCase() === sizeKey &&
+    ((i.color || '').trim().toLowerCase() === key || (i.pattern || '').trim().toLowerCase() === key));
+}
+// Remembers a manual invoice-color resolution so the SAME vendor wording auto-resolves next time
+// — reported directly: "ours is 11" fog by Tuftex, Loftus says 11" fog designer by Tuftex... these
+// should be the same, and once I match it, I'd like it to remember the match for next time." Keyed
+// by size+raw-wording (not just color) since the same wording could plausibly mean a different
+// item at a different size. Deliberately NOT populated by an automatic exact-match resolution
+// (clResolveName/spFindByExactColorText/spFindByExactColorAndSize) — those already re-resolve
+// correctly on their own every time; this only needs to remember a correction a person actually
+// had to make.
+let INVOICE_COLOR_MAPPINGS = []; // [{ key: 'sizeRaw|normalized colorRaw', system, itemId }]
+function invInvoiceMappingKey(sizeRaw, colorRaw) {
+  return (sizeRaw || '').trim().toLowerCase() + '|' + (colorRaw || '').trim().toLowerCase();
+}
+function invInvoiceMappingsInit() {
+  window.fbLoadInvoiceColorMappings().then(snap => {
+    if (snap.exists() && Array.isArray(snap.data().mappings)) INVOICE_COLOR_MAPPINGS = snap.data().mappings;
+  }).catch(err => console.error('Invoice color mappings load failed:', err));
+}
+function invInvoiceRememberMapping(sizeRaw, colorRaw, system, itemId) {
+  if (!colorRaw || !itemId) return;
+  const key = invInvoiceMappingKey(sizeRaw, colorRaw);
+  const existing = INVOICE_COLOR_MAPPINGS.find(m => m.key === key);
+  if (existing) { existing.system = system; existing.itemId = itemId; }
+  else INVOICE_COLOR_MAPPINGS.push({ key, system, itemId });
+  window.fbSaveInvoiceColorMappings({ mappings: INVOICE_COLOR_MAPPINGS }).catch(err => console.error('Invoice color mappings save failed:', err));
+}
 // Parses raw extracted text into review rows — never touches COLOR_LIBRARY/INVENTORY_ITEMS/the
-// ledger itself; purely builds the draft psSubmitInvoiceOrder (below) later commits explicitly.
+// ledger itself; purely builds the draft invSubmitInvoiceOrder (below) later commits explicitly.
 function invBuildInvoiceDraftFromText(text) {
   const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
   const rows = [];
@@ -14506,36 +14578,59 @@ function invBuildInvoiceDraftFromText(text) {
     const [, stockNumber, , qtyShip, , unit, description] = rowMatch;
     const parsedDesc = invParseInvoiceDescription(description);
     if (!parsedDesc) return; // not a size+color row — a subtotal/fee line etc. that happened to match the column shape
-    const invSize = INV_SIZE_FROM_PRODUCTION[parsedDesc.sizeRaw] || null;
-    const resolution = clResolveName(parsedDesc.colorRaw);
-    const item = resolution.status === 'resolved' ? INVENTORY_ITEMS.find(i => i.colorId === resolution.entry.id && i.active !== false) : null;
-    const resolved = resolution.status === 'resolved' && item;
-    // A vendor invoice can carry Specialty Latex stock too (a printed pattern, e.g. "COW PRINT")
-    // — reported directly: "how do we import this? it's the cow print specialty latex, but only
-    // pulling from our main inventory list to match." Standard Latex stays the primary, tried-
-    // first match (this parser was built and tested against that shape); only when it comes up
-    // empty does an EXACT (never fuzzy) match against a Specialty Latex item's color-or-pattern
-    // get a try, and only auto-applied when it's the single unambiguous hit — same "never guess"
-    // rule as everywhere else here. A raw description with extra wording around the real pattern
-    // (e.g. "COW PRINT AROUND" vs. a stored pattern of "Cow") won't auto-match either way — that's
-    // fine, it's exactly what the new Specialty Latex options in the manual picker (see
-    // invInvoiceColorOptionsHtml) are for.
-    let system = 'standardLatex', specialtyItem = null;
-    if (!resolved) {
-      const spMatches = spFindByExactColorText(parsedDesc.colorRaw);
-      if (spMatches.length === 1) { specialtyItem = spMatches[0]; system = 'specialtyLatex'; }
+    const invSize = parsedDesc.sizeKind === 'standard' ? (INV_SIZE_FROM_PRODUCTION[parsedDesc.sizeRaw] || null) : null;
+
+    let system = null, itemId = null, colorId = null, matchStatus, suggestions = [];
+    // A remembered correction always wins first — it represents an explicit, already-confirmed
+    // decision, not a guess to re-derive from scratch every time.
+    const remembered = INVOICE_COLOR_MAPPINGS.find(m => m.key === invInvoiceMappingKey(parsedDesc.sizeRaw, parsedDesc.colorRaw));
+    const rememberedItem = remembered ? invFindItemGeneric(remembered.system, remembered.itemId) : null;
+    if (remembered && rememberedItem) {
+      system = remembered.system;
+      itemId = remembered.itemId;
+      if (system === 'standardLatex') colorId = rememberedItem.colorId || null;
+      matchStatus = 'resolved';
+    } else if (parsedDesc.sizeKind === 'specialtyOnly') {
+      // No Standard Latex bucket exists for this size at all (a Twisting number, or a foot-marked
+      // giant) — there's nothing for Standard Latex resolution to even attempt, so go straight to
+      // an exact Specialty Latex match (color AND size together).
+      const spMatches = spFindByExactColorAndSize(parsedDesc.colorRaw, parsedDesc.sizeRaw);
+      if (spMatches.length === 1) {
+        system = 'specialtyLatex'; itemId = spMatches[0].id; matchStatus = 'resolved';
+      } else {
+        system = 'specialtyLatex'; matchStatus = 'none';
+      }
+    } else {
+      const resolution = clResolveName(parsedDesc.colorRaw);
+      const item = resolution.status === 'resolved' ? INVENTORY_ITEMS.find(i => i.colorId === resolution.entry.id && i.active !== false) : null;
+      if (resolution.status === 'resolved' && item) {
+        system = 'standardLatex'; colorId = resolution.entry.id; itemId = item.id; matchStatus = 'resolved';
+      } else {
+        // A vendor invoice can carry Specialty Latex stock too (a printed pattern, e.g. "COW
+        // PRINT") — reported directly: "how do we import this? it's the cow print specialty
+        // latex, but only pulling from our main inventory list to match." Standard Latex stays
+        // the primary, tried-first match (this parser was built and tested against that shape);
+        // only when it comes up empty does an EXACT (never fuzzy) match against a Specialty
+        // Latex item's color-or-pattern get a try, and only auto-applied when it's the single
+        // unambiguous hit — same "never guess" rule as everywhere else here. A raw description
+        // with extra wording around the real pattern (e.g. "COW PRINT AROUND" vs. a stored
+        // pattern of "Cow") won't auto-match either way — that's fine, it's exactly what the
+        // Specialty Latex options in the manual picker (invInvoiceColorOptionsHtml) are for.
+        const spMatches = spFindByExactColorText(parsedDesc.colorRaw);
+        if (spMatches.length === 1) {
+          system = 'specialtyLatex'; itemId = spMatches[0].id; matchStatus = 'resolved';
+        } else {
+          system = 'standardLatex';
+          matchStatus = !invSize ? 'badSize' : (resolution.status === 'resolved' ? 'noItem' : resolution.status); // 'ambiguous' | 'none' | 'noItem' | 'badSize'
+          suggestions = invFuzzyColorSuggestions(parsedDesc.colorRaw, 4);
+        }
+      }
     }
     rows.push({
       id: invNewInvoiceRowId(),
       stockNumber, raw: description, sizeRaw: parsedDesc.sizeRaw, colorRaw: parsedDesc.colorRaw,
       invSize, qty: parseInt(qtyShip, 10) || 0,
-      system,
-      colorId: (resolution.status === 'resolved' && item) ? resolution.entry.id : null,
-      itemId: specialtyItem ? specialtyItem.id : (item ? item.id : null),
-      matchStatus: !invSize ? 'badSize' : (specialtyItem ? 'resolved' : (resolution.status === 'resolved' ? (item ? 'resolved' : 'noItem') : resolution.status)), // 'resolved' | 'ambiguous' | 'none' | 'noItem' | 'badSize'
-      // Ranked candidates for a fast manual pick — only computed when there's actually a decision
-      // to speed up; a confidently auto-resolved row has nothing to suggest.
-      suggestions: (resolved || specialtyItem) ? [] : invFuzzyColorSuggestions(parsedDesc.colorRaw, 4),
+      system, colorId, itemId, matchStatus, suggestions,
       include: true,
     });
   });
@@ -14582,6 +14677,19 @@ function invInvoiceSetField(field, value) {
   if (!invInvoiceDraft) return;
   invInvoiceDraft[field] = value;
 }
+// invRenderOrdersSection rebuilds the whole #inv-orders-root, destroying and recreating the
+// scrollable rows container every time — its scroll position has to be captured and restored
+// around that, not assumed to survive it. Used by every row-mutating action in the invoice draft
+// (a color pick, a "Did you mean" click, removing a row, toggling include) instead of calling
+// invRenderOrdersSection directly, so reviewing a real 30+ line invoice doesn't get kicked back to
+// the top on every single decision.
+function invInvoiceRenderPreserveScroll() {
+  const scroller = document.getElementById('inv-invoice-rows-scroll');
+  const scrollTop = scroller ? scroller.scrollTop : 0;
+  invRenderOrdersSection();
+  const restored = document.getElementById('inv-invoice-rows-scroll');
+  if (restored) restored.scrollTop = scrollTop;
+}
 // `value` is '' (nothing picked) or 'system|id' from invInvoiceColorOptionsHtml — same
 // system-prefixed shape invGenericItemOptionsHtml already uses for modifiers, so a Specialty
 // Latex pick here (a printed pattern like Cow Print — see the batch note on why the auto-match
@@ -14590,7 +14698,7 @@ function invInvoiceSetField(field, value) {
 function invInvoiceSetRowColor(rowId, value) {
   const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
   if (!row) return;
-  if (!value) { row.system = 'standardLatex'; row.colorId = null; row.itemId = null; row.matchStatus = 'none'; invRenderOrdersSection(); return; }
+  if (!value) { row.system = 'standardLatex'; row.colorId = null; row.itemId = null; row.matchStatus = 'none'; invInvoiceRenderPreserveScroll(); return; }
   const sepIdx = value.indexOf('|');
   const system = value.slice(0, sepIdx);
   const id = value.slice(sepIdx + 1);
@@ -14600,7 +14708,10 @@ function invInvoiceSetRowColor(rowId, value) {
     row.colorId = null;
     row.itemId = item ? item.id : null;
     row.matchStatus = item ? 'resolved' : 'noItem';
-    invRenderOrdersSection();
+    // A manual pick is a real, confirmed decision — remembered so the same vendor wording
+    // resolves on its own next time (see INVOICE_COLOR_MAPPINGS's own comment).
+    if (item) invInvoiceRememberMapping(row.sizeRaw, row.colorRaw, 'specialtyLatex', item.id);
+    invInvoiceRenderPreserveScroll();
     return;
   }
   const item = INVENTORY_ITEMS.find(i => i.colorId === id && i.active !== false);
@@ -14608,7 +14719,8 @@ function invInvoiceSetRowColor(rowId, value) {
   row.colorId = id;
   row.itemId = item ? item.id : null;
   row.matchStatus = item ? 'resolved' : 'noItem';
-  invRenderOrdersSection();
+  if (item) invInvoiceRememberMapping(row.sizeRaw, row.colorRaw, 'standardLatex', item.id);
+  invInvoiceRenderPreserveScroll();
 }
 // Best-effort default for the "Add new color" brand field — an invoice's line items are almost
 // always all one brand, so reuse whatever brand the order's own already-resolved rows share
@@ -14623,7 +14735,7 @@ function invInvoiceGuessBrand() {
 let invInvoiceAddColorOpenFor = null; // the one row currently showing its "add new color" mini-form, or null
 function invInvoiceOpenAddColor(rowId) {
   invInvoiceAddColorOpenFor = invInvoiceAddColorOpenFor === rowId ? null : rowId;
-  invRenderOrdersSection();
+  invInvoiceRenderPreserveScroll();
 }
 // Creates a REAL, permanent Color Library entry + Inventory item — exactly invAddColor's own
 // logic (clFindOrCreate's dedup, then the same duplicate-Inventory-item guard), just triggered
@@ -14646,8 +14758,9 @@ function invInvoiceSubmitAddColor(rowId) {
   row.colorId = libraryEntry.id;
   row.itemId = item.id;
   row.matchStatus = 'resolved';
+  invInvoiceRememberMapping(row.sizeRaw, row.colorRaw, 'standardLatex', item.id);
   invInvoiceAddColorOpenFor = null;
-  invRenderOrdersSection();
+  invInvoiceRenderPreserveScroll();
 }
 function invInvoiceSetRowQty(rowId, value) {
   const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
@@ -14658,12 +14771,12 @@ function invInvoiceSetRowInclude(rowId, checked) {
   const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
   if (!row) return;
   row.include = checked;
-  invRenderOrdersSection();
+  invInvoiceRenderPreserveScroll();
 }
 function invInvoiceRemoveRow(rowId) {
   if (!invInvoiceDraft) return;
   invInvoiceDraft.rows = invInvoiceDraft.rows.filter(r => r.id !== rowId);
-  invRenderOrdersSection();
+  invInvoiceRenderPreserveScroll();
 }
 // Builds real order lines only from rows that are both included AND fully resolved (a real
 // colorId + a real Standard Latex Inventory item + a real qty) — anything else is reported and
@@ -14672,8 +14785,11 @@ function invSubmitInvoiceOrder() {
   if (!invInvoiceDraft) return;
   const vendor = ((document.getElementById('inv-invoice-vendor') || {}).value || '').trim();
   const date = ((document.getElementById('inv-invoice-date') || {}).value || '').trim();
-  const usable = invInvoiceDraft.rows.filter(r => r.include && r.itemId && r.invSize && r.qty > 0);
-  const skipped = invInvoiceDraft.rows.filter(r => r.include).length - usable.length;
+  const usable = invInvoiceDraft.rows.filter(invInvoiceRowIsReady);
+  // Reported directly: 2 real lines from a real invoice went unsaved with nothing to show for it
+  // beyond a bare count — she had to compare against the physical invoice again to even notice.
+  // Named here (stock#, raw description) so a skip is something to act on, not just a number.
+  const skippedRows = invInvoiceDraft.rows.filter(r => r.include && !invInvoiceRowIsReady(r));
   if (usable.length === 0) { alert('No rows are ready to order yet — pick a color for at least one row.'); return; }
   const lines = usable.map(r => {
     const system = r.system || 'standardLatex';
@@ -14693,7 +14809,10 @@ function invSubmitInvoiceOrder() {
   const order = { id: psNewInventoryOrderId(), vendor, orderedDate: date, status: 'ordered', receivedDate: '', lines };
   invInvoiceDraft = null;
   window.fbSaveInventoryOrder(order).then(() => {
-    if (skipped > 0) alert(`Added ${lines.length} line${lines.length === 1 ? '' : 's'} to the order. ${skipped} line${skipped === 1 ? '' : 's'} couldn't be matched and ${skipped === 1 ? 'was' : 'were'} skipped — add ${skipped === 1 ? 'it' : 'them'} manually if needed.`);
+    if (skippedRows.length > 0) {
+      const list = skippedRows.map(r => `• ${r.stockNumber} — ${r.raw}`).join('\n');
+      alert(`Added ${lines.length} line${lines.length === 1 ? '' : 's'} to the order. ${skippedRows.length} line${skippedRows.length === 1 ? '' : 's'} couldn't be matched and ${skippedRows.length === 1 ? 'was' : 'were'} skipped — add ${skippedRows.length === 1 ? 'it' : 'them'} manually if needed:\n\n${list}`);
+    }
   }).catch(err => {
     console.error(err);
     alert("Couldn't save that order — check your connection and try again.");
@@ -14726,15 +14845,24 @@ function invInvoiceColorOptionsHtml(row) {
   }
   return html;
 }
+// A row is ready once it has a real itemId — invSize only matters for Standard Latex (Specialty
+// Latex has no sub-size to require; see invSubmitInvoiceOrder's own line-building).
+function invInvoiceRowIsReady(r) {
+  return !!(r.include && r.itemId && (r.system === 'specialtyLatex' || r.invSize) && r.qty > 0);
+}
 function invInvoiceDraftHtml() {
   const rows = invInvoiceDraft.rows;
-  const readyCount = rows.filter(r => r.include && r.itemId && r.invSize && r.qty > 0).length;
+  const readyCount = rows.filter(invInvoiceRowIsReady).length;
   let html = `<div style="font-size:12px; color:var(--text-secondary); margin-bottom:0.5rem;">Reviewed ${rows.length} line${rows.length === 1 ? '' : 's'} — fix any that didn't match before saving. Nothing is added to Inventory until you Mark Received on the saved order.</div>`;
   html += `<div class="row">
     <div class="settings-field" style="margin-bottom:0;"><label>Ordered from</label><input type="text" id="inv-invoice-vendor" placeholder="e.g. Loftus" value="${invAttr(invInvoiceDraft.vendor)}"></div>
     <div class="settings-field" style="margin-bottom:0;"><label>Order date</label><input type="text" id="inv-invoice-date" placeholder="e.g. 9/8/26" value="${invAttr(invInvoiceDraft.orderedDate)}"></div>
   </div>`;
-  html += `<div style="max-height:360px; overflow-y:auto; margin:0.5rem 0; border:0.5px solid var(--border); border-radius:var(--radius-sm);">`;
+  // Reported directly: every match (a color pick, a "Did you mean" click) reset this whole list
+  // back to the top, on a real invoice review that can run 30+ lines — actively punishing exactly
+  // the workflow this list exists for. A stable id lets invInvoiceRenderPreserveScroll capture and
+  // restore its scroll position across the re-render this container gets rebuilt by every time.
+  html += `<div id="inv-invoice-rows-scroll" style="max-height:360px; overflow-y:auto; margin:0.5rem 0; border:0.5px solid var(--border); border-radius:var(--radius-sm);">`;
   rows.forEach(r => {
     const needsHelp = r.matchStatus !== 'resolved';
     html += `<div style="padding:6px 8px; border-bottom:0.5px solid var(--border);">
@@ -24288,6 +24416,7 @@ function bootApp() {
   // nothing later in this function can block it from connecting.
   try { psStartJobsListener(); } catch (e) { console.error('Jobs listener failed to start:', e); }
   try { imInit(); } catch (e) { console.error('imInit failed:', e); }
+  try { invInvoiceMappingsInit(); } catch (e) { console.error('invInvoiceMappingsInit failed:', e); }
   try { irInit(); } catch (e) { console.error('irInit failed:', e); }
   try { loadSettings(); } catch (e) { console.error('loadSettings failed:', e); }
   try { calc(); } catch (e) { console.error('calc failed:', e); }
