@@ -14767,6 +14767,42 @@ function invInvoiceSubmitAddColor(rowId) {
   invInvoiceAddColorOpenFor = null;
   invInvoiceRenderPreserveScroll();
 }
+// A bare-number sizeRaw (160/260/350/646) is the only shape this can confidently map to a real
+// Specialty Latex kind today — the only one of SP_KINDS that identifies by a plain number with no
+// unit mark at all (see SP_SIZE_OPTIONS.twisting). A foot-marked size (3') has no equivalent kind
+// yet, so this deliberately returns null there rather than guessing one — the row still shows the
+// Specialty Latex options in its manual picker, it just doesn't get an inline "create" shortcut.
+function invInvoiceSpecialtyKindForSizeRaw(sizeRaw) {
+  return /^\d+$/.test(sizeRaw || '') ? 'twisting' : null;
+}
+// Reported directly: "when I get that 50 ct bag of Deluxe Gray 260s, it can be tracked and
+// imported instead of manually going into Inventory each time." Mirrors invInvoiceSubmitAddColor's
+// own "create it without leaving the review" flow, but for a brand-new Specialty Latex SKU — same
+// spFindCollision dedup spAddFormHtml itself uses, so a genuinely-already-existing 260 opens
+// (resolves to) that record instead of creating a duplicate. Backstock starts at 0 — this only
+// registers the SKU so the invoice's own qty can credit it for real once the order is Marked
+// Received, the same as any other line.
+function invInvoiceSubmitAddSpecialty(rowId) {
+  const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
+  if (!row) return;
+  const kind = invInvoiceSpecialtyKindForSizeRaw(row.sizeRaw);
+  if (!kind) { alert("This size doesn't have a Specialty Latex category to create it under yet — add it manually from Inventory → Latex → Specialty Latex first, then come back and pick it here."); return; }
+  const nameEl = document.getElementById('inv-invoice-newsp-color-' + rowId);
+  const brandEl = document.getElementById('inv-invoice-newsp-brand-' + rowId);
+  const color = (nameEl && nameEl.value.trim()) || '';
+  const brand = (brandEl && brandEl.value.trim()) || '';
+  if (!color) { alert('Enter a color name first.'); return; }
+  if (!brand) { alert('Enter a brand first.'); return; }
+  const dup = spFindCollision(kind, brand, color, row.sizeRaw, '', null);
+  const item = dup || { id: psNewSpecialtyItemId(), kind, brand, color, sizeType: row.sizeRaw, pattern: '', printGroupId: null, shape: '', descriptor: '', perBag: 100, costPerBag: 0, backstock: 0, looseBalloons: 0, active: true };
+  if (!dup) { SPECIALTY_ITEMS.push(item); spSaveItem(item); }
+  row.system = 'specialtyLatex';
+  row.itemId = item.id;
+  row.matchStatus = 'resolved';
+  invInvoiceRememberMapping(row.sizeRaw, row.colorRaw, 'specialtyLatex', item.id);
+  invInvoiceAddColorOpenFor = null;
+  invInvoiceRenderPreserveScroll();
+}
 function invInvoiceSetRowQty(rowId, value) {
   const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
   if (!row) return;
@@ -14886,7 +14922,15 @@ function invInvoiceDraftHtml() {
             <span style="font-size:11px; color:var(--text-tertiary);">Did you mean:</span>
             ${r.suggestions.map(s => `<button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;" onclick="invInvoiceSetRowColor('${r.id}','${psJsKeyAttr('standardLatex|' + s.id)}')">${psEscape(s.colorName)}${s.brand ? ' (' + psEscape(s.brand) + ')' : ''}</button>`).join('')}
           </div>` : ''}
-          ${needsHelp ? (invInvoiceAddColorOpenFor === r.id ? `<div class="row" style="margin-top:4px;">
+          ${needsHelp && r.system === 'specialtyLatex' ? (invInvoiceAddColorOpenFor === r.id ? `<div class="row" style="margin-top:4px;">
+              <div class="settings-field" style="margin-bottom:0;"><input type="text" id="inv-invoice-newsp-color-${r.id}" placeholder="Color name" value="${invAttr(invTitleCaseWords(r.colorRaw))}"></div>
+              <div class="settings-field" style="margin-bottom:0; display:flex; gap:4px;">
+                <input type="text" id="inv-invoice-newsp-brand-${r.id}" placeholder="Brand" value="${invAttr(invInvoiceGuessBrand())}" style="flex:1;">
+                <button class="save-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="invInvoiceSubmitAddSpecialty('${r.id}')">Add</button>
+                <button class="icon-btn" style="width:auto; padding:4px 8px; font-size:11px;" onclick="invInvoiceOpenAddColor('${r.id}')">Cancel</button>
+              </div>
+            </div>` : `<button class="icon-btn no-print" style="width:auto; padding:2px 8px; font-size:11px; color:var(--text-secondary); margin-top:4px;" onclick="invInvoiceOpenAddColor('${r.id}')"><i class="fa-solid fa-plus"></i> Add new Specialty Latex item</button>`)
+          : needsHelp && r.system !== 'specialtyLatex' ? (invInvoiceAddColorOpenFor === r.id ? `<div class="row" style="margin-top:4px;">
               <div class="settings-field" style="margin-bottom:0;"><input type="text" id="inv-invoice-newcolor-name-${r.id}" placeholder="Color name" value="${invAttr(invTitleCaseWords(r.colorRaw))}"></div>
               <div class="settings-field" style="margin-bottom:0; display:flex; gap:4px;">
                 <input type="text" id="inv-invoice-newcolor-brand-${r.id}" placeholder="Brand" value="${invAttr(invInvoiceGuessBrand())}" style="flex:1;">
