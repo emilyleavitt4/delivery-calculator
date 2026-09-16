@@ -14473,13 +14473,16 @@ function invStripInvoicePackSuffix(text) {
   return (text || '').replace(/-?\s*\d+\s*(CT|PK)?\s*$/i, '').replace(/-\s*$/, '').trim();
 }
 // A description like `11" DELUXE BLACK - 100 CT` or `5" DELUXE COSMO PINK` — but a vendor invoice
-// also carries sizes with no Standard Latex bucket at all: Specialty Latex Twisting numbers (160/
-// 260/350/646, no inch mark at all — see SP_SIZE_OPTIONS.twisting) and foot-marked giants (3',
-// not 3"). Reported directly: these were being silently dropped — not even shown as an unmatched
-// row — because only the inch-marked shape was ever recognized at all. `sizeKind` distinguishes
-// "this size legitimately has no Standard Latex bucket, try Specialty Latex instead" from the
-// ordinary inch-based case, so a caller never confuses "no bucket exists for this size" with
-// "this size string wasn't understood."
+// also carries sizes written differently: a foot mark (e.g. `3'`, meaning 36 inches — just a
+// different way of writing an existing Standard Latex size, per direct correction: "3' latex
+// shouldn't be in specialty latex, that's the same as the 30"/36", someone called it 3' instead
+// of 36""), and Specialty Latex Twisting numbers (160/260/350/646, no unit mark at all — see
+// SP_SIZE_OPTIONS.twisting), which genuinely have no Standard Latex bucket. Both used to be
+// silently dropped — not even shown as an unmatched row — because only the inch-marked shape was
+// ever recognized at all. `sizeKind` distinguishes "this size legitimately has no Standard Latex
+// bucket, try Specialty Latex instead" (Twisting only) from the ordinary inch-based case (which
+// a foot mark converts into, not a separate category), so a caller never confuses "no bucket
+// exists for this size" with "this size string wasn't understood."
 function invParseInvoiceDescription(desc) {
   const raw = (desc || '').trim();
   let m = raw.match(/^(\d+)"\s*(.+)$/);
@@ -14492,7 +14495,9 @@ function invParseInvoiceDescription(desc) {
   if (m) {
     const colorRaw = invStripInvoicePackSuffix(m[2]);
     if (!colorRaw) return null;
-    return { sizeRaw: m[1] + "'", colorRaw, sizeKind: 'specialtyOnly' };
+    // Feet -> inches (3' = 36") — the SAME Standard Latex size, just written differently; never a
+    // distinct category of its own, so this reuses the exact ordinary inch-based path/bucket.
+    return { sizeRaw: (parseInt(m[1], 10) * 12) + '"', colorRaw, sizeKind: 'standard' };
   }
   m = raw.match(/^(160|260|350|646)\s+(.+)$/);
   if (m) {
@@ -14767,11 +14772,12 @@ function invInvoiceSubmitAddColor(rowId) {
   invInvoiceAddColorOpenFor = null;
   invInvoiceRenderPreserveScroll();
 }
-// A bare-number sizeRaw (160/260/350/646) is the only shape this can confidently map to a real
-// Specialty Latex kind today — the only one of SP_KINDS that identifies by a plain number with no
-// unit mark at all (see SP_SIZE_OPTIONS.twisting). A foot-marked size (3') has no equivalent kind
-// yet, so this deliberately returns null there rather than guessing one — the row still shows the
-// Specialty Latex options in its manual picker, it just doesn't get an inline "create" shortcut.
+// A bare-number sizeRaw (160/260/350/646) is currently the only shape invParseInvoiceDescription
+// ever tags sizeKind:'specialtyOnly' for — the only one of SP_KINDS that identifies by a plain
+// number with no unit mark at all (see SP_SIZE_OPTIONS.twisting). A foot mark (3') is converted to
+// its inch equivalent upstream and never reaches here as Specialty Latex at all (a foot-marked
+// size is the same Standard Latex bucket, just written differently — see
+// invParseInvoiceDescription's own comment).
 function invInvoiceSpecialtyKindForSizeRaw(sizeRaw) {
   return /^\d+$/.test(sizeRaw || '') ? 'twisting' : null;
 }
