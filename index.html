@@ -14561,12 +14561,33 @@ function invTitleCaseWords(text) {
 // size has no Standard Latex bucket at all (a Twisting number, or a foot-marked giant), so there's
 // nothing else for it to plausibly resolve to. Requires sizeType to ALSO match exactly, since
 // "260" and "160" are genuinely different SKUs, not interchangeable by color alone.
-function spFindByExactColorAndSize(text, sizeType) {
+// `kind` is optional — when a caller already knows it for certain (e.g. the Bargain Balloons
+// parser, which reads "Linking"/"Twisting" straight off the invoice text), passing it narrows the
+// match so a same-size-same-color item of some OTHER kind can never be mistaken for this one.
+function spFindByExactColorAndSize(text, sizeType, kind) {
   const key = (text || '').trim().toLowerCase();
   const sizeKey = (sizeType || '').trim().toLowerCase();
   if (!key || !sizeKey) return [];
-  return SPECIALTY_ITEMS.filter(i => !i.deletedAt && i.active !== false && (i.sizeType || '').trim().toLowerCase() === sizeKey &&
+  return SPECIALTY_ITEMS.filter(i => !i.deletedAt && i.active !== false && (!kind || i.kind === kind) && (i.sizeType || '').trim().toLowerCase() === sizeKey &&
     ((i.color || '').trim().toLowerCase() === key || (i.pattern || '').trim().toLowerCase() === key));
+}
+// General Foil exact match — either a Letters & Numbers group (charType+size+color) or a
+// Decorator Shape (shape+size+color). Never fuzzy, same "don't guess" rule as every other exact
+// matcher here; a vendor's brand/color wording rarely comes through this cleanly (see the Bargain
+// Balloons parser's own comment on why colorRaw is often a messy blob), so this is expected to
+// rarely fire in practice for that vendor specifically — that's correct, not a bug, and exactly
+// why the manual picker/"+ Add new" flow exist.
+function foilFindByExactMatch(charType, shape, sizeType, colorRaw) {
+  const key = (colorRaw || '').trim().toLowerCase();
+  const sizeKey = (sizeType || '').trim().toLowerCase();
+  if (!key || !sizeKey) return [];
+  if (charType) {
+    return FOIL_ITEMS.filter(i => !i.deletedAt && i.active !== false && i.category === 'lettersNumbers' && i.charType === charType &&
+      (i.size || '').trim().toLowerCase() === sizeKey && (i.color || '').trim().toLowerCase() === key);
+  }
+  if (!shape) return [];
+  return FOIL_ITEMS.filter(i => !i.deletedAt && i.active !== false && i.category === 'decoratorShapes' &&
+    (i.size || '').trim().toLowerCase() === sizeKey && (i.color || '').trim().toLowerCase() === key);
 }
 // Remembers a manual invoice-color resolution so the SAME vendor wording auto-resolves next time
 // — reported directly: "ours is 11" fog by Tuftex, Loftus says 11" fog designer by Tuftex... these
@@ -14622,8 +14643,10 @@ function invBuildInvoiceDraftFromText(text) {
     } else if (parsedDesc.sizeKind === 'specialtyOnly') {
       // No Standard Latex bucket exists for this size at all (a Twisting number, or a foot-marked
       // giant) — there's nothing for Standard Latex resolution to even attempt, so go straight to
-      // an exact Specialty Latex match (color AND size together).
-      const spMatches = spFindByExactColorAndSize(parsedDesc.colorRaw, parsedDesc.sizeRaw);
+      // an exact Specialty Latex match (color AND size together). Loftus's own shape only ever
+      // implies Twisting here (see invParseInvoiceDescription) — Bargain Balloons' own parser is
+      // the one that can tell Linking from Twisting and passes that kind through explicitly.
+      const spMatches = spFindByExactColorAndSize(parsedDesc.colorRaw, parsedDesc.sizeRaw, 'twisting');
       if (spMatches.length === 1) {
         system = 'specialtyLatex'; itemId = spMatches[0].id; matchStatus = 'resolved';
       } else {
@@ -14665,12 +14688,162 @@ function invBuildInvoiceDraftFromText(text) {
   });
   return { vendor: '', orderedDate, rows };
 }
+
+// ─── Bargain Balloons — a second real vendor invoice shape ───
+//
+// Genuinely different layout from Loftus: a table (Product / SKU / Barcode / Price / Qty / Total)
+// with a wrapped, multi-line, free-text PRODUCT description per row, rather than Loftus's single
+// fixed-width text line per item. Built and verified against two real Bargain Balloons invoices
+// (foil-only and mixed latex+foil) via psExtractPdfText's actual raw output — not guessed at.
+// Confirmed directly: pdf.js's own line-grouping interleaves the SKU/price/qty/total line with the
+// product description's own wrapped lines AND a separate barcode-number line, in an order that
+// isn't simply "top to bottom of the visual cell" — this parser reconstructs the intended grouping
+// from that real, observed sequence, not from an assumed visual layout.
+const INV_BARGAIN_ROW_RE = /^\s*(\S+)\s+\$([\d,]+\.\d{2})\s+(\d+)\s+\$([\d,]+\.\d{2})\s*$/;
+const INV_BARGAIN_STOP_RE = /^\s*(PAYMENT|Subtotal|Shipping|SHIPPING|Total|THANK YOU|Powered by|Credit Card|Ground|\d+ Business Day)/i;
+// Every one of these repeats on EVERY page of a multi-page invoice (confirmed against a real
+// 4-page one) — skipped unconditionally rather than just once.
+const INV_BARGAIN_HEADER_RE = /^\s*(PRODUCT\s+SKU|Bargain Balloons|1-6255|Phone:|Email:|GST#|INVOICE TO|SHIP TO|Emily Leavitt|THE LEAVITT|1741 South|Payson|84651|#US\d+)/i;
+// A pure-digit line 6+ characters long is always the barcode's own printed number, never real
+// description text — confirmed against every real row across both test invoices.
+const INV_BARGAIN_BARCODE_RE = /^\d{6,}$/;
+function invIsBargainBalloonsInvoice(text) {
+  return /Bargain\s*Balloons/i.test(text || '');
+}
+// Recognized Decorator Shape family words, longest/most-specific first so "Starpoint"/"Starburst"
+// are checked before the plain "Star" they'd otherwise also match. Sourced from this app's own
+// FOIL_DECORATOR_GROUP_SEED family names (the same vocabulary Foil Inventory already organizes
+// around), not invented fresh for this parser.
+const INV_BARGAIN_SHAPE_WORDS = ['Starpoint', 'Starburst', 'Star', 'Heart', 'Circle', 'Cube', 'Diamond', 'Crescent', 'Orb', 'Square', 'Arch', 'Bobo'];
+// Splits one row's already-isolated PRODUCT description into a system + identity fields. Never
+// tries to precisely separate brand from color in the remaining free text (real examples proved
+// word order isn't consistent even within one invoice — e.g. "CTI Brand White..." vs "...Decomex
+// Latex..." puts the brand in a different position each time) — the same "leave it as one blob for
+// exact/manual matching" approach invParseInvoiceDescription already uses for Loftus. Returns null
+// only if no leading size at all could be found (not a recognizable item row).
+function invParseBargainRowFields(desc) {
+  let text = (desc || '').trim();
+  let sizeMatch = text.match(/^(\d+)"\s*/);
+  let sizeRaw, sizeKind;
+  if (sizeMatch) { sizeRaw = sizeMatch[1] + '"'; sizeKind = 'standard'; text = text.slice(sizeMatch[0].length); }
+  else if ((sizeMatch = text.match(/^(\d+)D\s+/i))) {
+    // "260D" — confirmed directly: size 260 (the "D" is just this vendor/brand's own suffix, not
+    // part of the size), brand Decomex (a fact about THIS vendor's naming, not inferred here).
+    sizeRaw = sizeMatch[1]; sizeKind = 'specialtyOnly'; text = text.slice(sizeMatch[0].length);
+  } else return null;
+
+  let perBagFromInvoice = null;
+  const packMatch = text.match(/\(\s*(\d+)\s*(?:Per Bag|Balloons Per Package)\s*\)/i);
+  if (packMatch) { perBagFromInvoice = parseInt(packMatch[1], 10); text = text.replace(packMatch[0], '').trim(); }
+
+  if (/\bLatex\b/i.test(text)) {
+    const kind = /\bLinking\b/i.test(text) ? 'linking' : /\bTwisting\b/i.test(text) ? 'twisting' : null;
+    text = text.replace(/\b(Standard|Linking|Twisting|Modelling|Modeling|Latex|Balloons?)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+    return { system: kind ? 'specialtyLatex' : 'standardLatex', kind, sizeRaw, sizeKind, perBagFromInvoice, colorRaw: text };
+  }
+  // Not Latex at all -> Foil. "Letter X"/"Number N" identifies a Letters & Numbers group's exact
+  // character directly from the invoice text (no manual character pick needed, unlike a modifier/
+  // topper foil pick where nothing is known ahead of time); otherwise, a known shape word (if any)
+  // identifies a Decorator Shape.
+  let foilCharType = null, foilChar = null;
+  let m = text.match(/\bLetter\s+([A-Za-z])\b/i);
+  if (m) { foilCharType = 'letters'; foilChar = m[1].toUpperCase(); text = text.replace(m[0], ' '); }
+  else if ((m = text.match(/\bNumber\s+(\d+)\b/i))) { foilCharType = 'numbers'; foilChar = m[1]; text = text.replace(m[0], ' '); }
+  let foilShape = null;
+  if (!foilCharType) {
+    for (const shape of INV_BARGAIN_SHAPE_WORDS) {
+      const re = new RegExp('\\b' + shape + '\\b', 'i');
+      if (re.test(text)) { foilShape = shape; text = text.replace(re, ' '); break; }
+    }
+  }
+  text = text.replace(/\b(Foil|Balloons?|Brand)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+  return { system: 'foil', foilCharType, foilChar, foilShape, sizeRaw, sizeKind, perBagFromInvoice, colorRaw: text };
+}
+// Splits the extracted text into {sku, unitPrice, qty, total, description} rows — verified against
+// two real invoices (a single-page foil-only one and a 4-page mixed latex+foil one) via direct
+// inspection of psExtractPdfText's own actual output, not assumed from the visual PDF layout.
+function invParseBargainRows(text) {
+  const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const rawRows = [];
+  let current = null;
+  lines.forEach(line => {
+    if (INV_BARGAIN_STOP_RE.test(line)) { current = null; return; }
+    const m = line.match(INV_BARGAIN_ROW_RE);
+    if (m) {
+      current = { sku: m[1], unitPrice: parseFloat(m[2].replace(/,/g, '')), qty: parseInt(m[3], 10), total: parseFloat(m[4].replace(/,/g, '')), descLines: [] };
+      rawRows.push(current);
+      return;
+    }
+    if (INV_BARGAIN_HEADER_RE.test(line)) return;
+    if (!current) return;
+    if (INV_BARGAIN_BARCODE_RE.test(line)) return;
+    current.descLines.push(line);
+  });
+  // A $0 line is always a promo freebie (confirmed against a real one: a stuffed-animal giveaway
+  // with its own SKU and a full description, priced at exactly $0.00) — reported directly to
+  // never bring these in, and there's nothing to receive into inventory for a $0 line regardless.
+  return rawRows.filter(r => r.total > 0).map(r => ({ ...r, description: r.descLines.join(' ') }));
+}
+function invBuildBargainDraftFromText(text) {
+  const rawRows = invParseBargainRows(text);
+  const dateMatch = (text || '').match(/#US\d+,\s*([A-Za-z]+ \d{1,2}, \d{4})/);
+  const rows = rawRows.map(r => {
+    const parsed = invParseBargainRowFields(r.description);
+    if (!parsed) return null;
+    const invSize = parsed.sizeKind === 'standard' && parsed.system === 'standardLatex' ? (INV_SIZE_FROM_PRODUCTION[parsed.sizeRaw] || null) : null;
+    let system = parsed.system, itemId = null, colorId = null, matchStatus, suggestions = [];
+    const mappingKey = invInvoiceMappingKey(parsed.sizeRaw + (parsed.foilChar || ''), parsed.colorRaw);
+    const remembered = INVOICE_COLOR_MAPPINGS.find(m => m.key === mappingKey);
+    const rememberedItem = remembered ? invFindItemGeneric(remembered.system, remembered.itemId) : null;
+    if (remembered && rememberedItem) {
+      system = remembered.system; itemId = remembered.itemId;
+      if (system === 'standardLatex') colorId = rememberedItem.colorId || null;
+      matchStatus = 'resolved';
+    } else if (system === 'standardLatex') {
+      const resolution = clResolveName(parsed.colorRaw);
+      const item = resolution.status === 'resolved' ? INVENTORY_ITEMS.find(i => i.colorId === resolution.entry.id && i.active !== false) : null;
+      if (resolution.status === 'resolved' && item) { colorId = resolution.entry.id; itemId = item.id; matchStatus = 'resolved'; }
+      else { matchStatus = !invSize ? 'badSize' : (resolution.status === 'resolved' ? 'noItem' : resolution.status); suggestions = invFuzzyColorSuggestions(parsed.colorRaw, 4); }
+    } else if (system === 'specialtyLatex') {
+      const spMatches = spFindByExactColorAndSize(parsed.colorRaw, parsed.sizeRaw, parsed.kind);
+      if (spMatches.length === 1) { itemId = spMatches[0].id; matchStatus = 'resolved'; }
+      else matchStatus = 'none';
+    } else { // foil
+      const foilMatches = foilFindByExactMatch(parsed.foilCharType, parsed.foilShape, parsed.sizeRaw, parsed.colorRaw);
+      if (foilMatches.length === 1) { itemId = foilMatches[0].id; matchStatus = 'resolved'; }
+      else matchStatus = 'none';
+    }
+    return {
+      id: invNewInvoiceRowId(),
+      stockNumber: r.sku, raw: r.description,
+      // A Letters & Numbers row's "size" (for INVOICE_COLOR_MAPPINGS' own key, and for matching)
+      // includes the character, since "34\" Letter M" and "34\" Letter A" are different SKUs at
+      // the same balloon size — sizeRaw itself stays the plain balloon size for display/invSize.
+      sizeRaw: parsed.sizeRaw, colorRaw: parsed.colorRaw, invSize, qty: r.qty,
+      system, colorId, itemId, matchStatus, suggestions,
+      foilCharType: parsed.foilCharType || null, foilChar: parsed.foilChar || null, foilShape: parsed.foilShape || null,
+      perBagFromInvoice: parsed.perBagFromInvoice || null,
+      // A resolved Letters & Numbers pick needs the character as this row's own "size" (matching
+      // how a foil order line is addressed — see invSubmitInvoiceOrder) — set immediately when the
+      // match came from an exact/remembered resolution; a manual pick sets this the same way (see
+      // invInvoiceSetRowColor).
+      size: (itemId && parsed.foilCharType) ? parsed.foilChar : null,
+      include: true,
+    };
+  }).filter(Boolean);
+  return { vendor: 'Bargain Balloons', orderedDate: dateMatch ? dateMatch[1] : '', rows };
+}
+// The one entry point both the upload and paste handlers call — detects which of the two known
+// vendor shapes the text actually is, rather than asking the user to pick a format up front.
+function invBuildInvoiceDraftAuto(text) {
+  return invIsBargainBalloonsInvoice(text) ? invBuildBargainDraftFromText(text) : invBuildInvoiceDraftFromText(text);
+}
 async function invHandleInvoiceFile(fileInput) {
   const file = fileInput.files[0];
   if (!file) return;
   try {
     const text = await psExtractPdfText(file);
-    invInvoiceDraft = invBuildInvoiceDraftFromText(text);
+    invInvoiceDraft = invBuildInvoiceDraftAuto(text);
     if (invInvoiceDraft.rows.length === 0) {
       alert("Couldn't find any recognizable line items in that PDF. If the layout is unusual, try \"Paste invoice text\" instead and paste the item table directly.");
       invInvoiceDraft = null;
@@ -14685,7 +14858,7 @@ async function invHandleInvoiceFile(fileInput) {
 }
 function invParseInvoicePaste() {
   const text = (document.getElementById('inv-invoice-paste') || {}).value || '';
-  invInvoiceDraft = invBuildInvoiceDraftFromText(text);
+  invInvoiceDraft = invBuildInvoiceDraftAuto(text);
   if (invInvoiceDraft.rows.length === 0) {
     alert("Couldn't find any recognizable line items in that text. Each item line should look like a stock invoice row: a stock number, quantities, a unit, a size + color description, and prices.");
     invInvoiceDraft = null;
@@ -14740,6 +14913,20 @@ function invInvoiceSetRowColor(rowId, value) {
     // A manual pick is a real, confirmed decision — remembered so the same vendor wording
     // resolves on its own next time (see INVOICE_COLOR_MAPPINGS's own comment).
     if (item) invInvoiceRememberMapping(row.sizeRaw, row.colorRaw, 'specialtyLatex', item.id);
+    invInvoiceRenderPreserveScroll();
+    return;
+  }
+  if (system === 'foil') {
+    const item = FOIL_ITEMS.find(i => i.id === id);
+    row.system = 'foil';
+    row.colorId = null;
+    row.itemId = item ? item.id : null;
+    row.matchStatus = item ? 'resolved' : 'noItem';
+    // A Letters & Numbers pick still needs a specific character to be a complete order line — the
+    // row's own parsed foilChar (from the invoice text) if the picked item is that shape of group;
+    // a Decorator Shape (or a group that doesn't match what was parsed) has no character to set.
+    row.size = (item && item.category === 'lettersNumbers') ? (row.foilChar || null) : null;
+    if (item) invInvoiceRememberMapping(row.sizeRaw + (row.foilChar || ''), row.colorRaw, 'foil', item.id);
     invInvoiceRenderPreserveScroll();
     return;
   }
@@ -14828,6 +15015,49 @@ function invInvoiceSubmitAddSpecialty(rowId) {
   invInvoiceAddColorOpenFor = null;
   invInvoiceRenderPreserveScroll();
 }
+// Same "create it without leaving the review" shortcut as invInvoiceSubmitAddSpecialty, for a
+// brand-new Foil item — branches on which shape the row itself already identified while parsing
+// (foilCharType for a Letters & Numbers character, foilShape for a Decorator Shape family; a row
+// with neither has nothing for this button to create, since there'd be no way to know which of the
+// two very different Foil record shapes it should become). A Letters & Numbers group is created
+// with every character pre-filled to 0 via foilBlankQuantities, exactly like the real Foil
+// Inventory Add form — this only registers the SKU, the invoice's own qty credits it for real once
+// the order is Marked Received. A Decorator Shape's "shape" is a real Shape Family
+// (PRINT_GROUPS/pgFindByName), matching how Foil Inventory itself models Decorator Shapes — find
+// the existing family by name first (never a duplicate), create one only if genuinely new.
+function invInvoiceSubmitAddFoil(rowId) {
+  const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
+  if (!row) return;
+  if (!row.foilCharType && !row.foilShape) { alert("This row's description didn't identify a letter/number or a shape — add it manually from Inventory → Foil first, then come back and pick it here."); return; }
+  const colorEl = document.getElementById('inv-invoice-newfoil-color-' + rowId);
+  const brandEl = document.getElementById('inv-invoice-newfoil-brand-' + rowId);
+  const color = (colorEl && colorEl.value.trim()) || '';
+  const brand = (brandEl && brandEl.value.trim()) || '';
+  if (!color) { alert('Enter a color first.'); return; }
+  if (!brand) { alert('Enter a brand first.'); return; }
+  if (row.foilCharType) {
+    const dup = foilFindDuplicateGroup(row.foilCharType, row.sizeRaw, color, brand);
+    const item = dup || { id: psNewFoilItemId(), category: 'lettersNumbers', charType: row.foilCharType, size: row.sizeRaw, color, brand, costPerFoil: null, storageLocation: '', quantities: foilBlankQuantities(row.foilCharType), active: true };
+    if (!dup) { FOIL_ITEMS.push(item); foilSaveItem(item); }
+    row.system = 'foil';
+    row.itemId = item.id;
+    row.matchStatus = 'resolved';
+    row.size = row.foilChar || null;
+    invInvoiceRememberMapping(row.sizeRaw + (row.foilChar || ''), row.colorRaw, 'foil', item.id);
+  } else {
+    const printGroupId = pgAddGroup('foilDecoratorShapes', row.foilShape).id;
+    const dup = foilDecoratorFindCollision(printGroupId, brand, color, row.sizeRaw, 'uninflated', null);
+    const item = dup || { id: psNewFoilItemId(), category: 'decoratorShapes', printGroupId, brand, color, size: row.sizeRaw, condition: 'uninflated', storageLocation: '', notes: '', quantity: 0, packagesFull: 0, hasPartialPackage: false, active: true };
+    if (!dup) { FOIL_ITEMS.push(item); foilSaveItem(item); }
+    row.system = 'foil';
+    row.itemId = item.id;
+    row.matchStatus = 'resolved';
+    row.size = null;
+    invInvoiceRememberMapping(row.sizeRaw, row.colorRaw, 'foil', item.id);
+  }
+  invInvoiceAddColorOpenFor = null;
+  invInvoiceRenderPreserveScroll();
+}
 function invInvoiceSetRowQty(rowId, value) {
   const row = invInvoiceDraft && invInvoiceDraft.rows.find(r => r.id === rowId);
   if (!row) return;
@@ -14868,6 +15098,14 @@ function invSubmitInvoiceOrder() {
       const label = item ? invGenericItemLabel('specialtyLatex', item) : r.colorRaw;
       return { system, itemId: r.itemId, size: null, qty: r.qty, label };
     }
+    if (system === 'foil') {
+      // A Letters & Numbers pick addresses one character (row.size, set when the item was
+      // resolved/picked — see invInvoiceSetRowColor/invInvoiceSubmitAddFoil); a Decorator Shape has
+      // no sub-address at all, same as Specialty Latex.
+      const item = FOIL_ITEMS.find(i => i.id === r.itemId);
+      const label = item ? invGenericItemLabel('foil', item) : r.colorRaw;
+      return { system, itemId: r.itemId, size: r.size || null, qty: r.qty, label };
+    }
     const item = invFindItem(r.itemId);
     const label = (item ? [item.brand, item.color].filter(Boolean).join(' ') : r.colorRaw) + ` — ${r.invSize}`;
     return { system: 'standardLatex', itemId: r.itemId, size: r.invSize, qty: r.qty, label };
@@ -14903,17 +15141,28 @@ function invInvoiceMatchBadgeHtml(status) {
 function invInvoiceColorOptionsHtml(row) {
   const sortedColors = COLOR_LIBRARY.filter(e => e.active !== false).sort((a, b) => a.colorName.localeCompare(b.colorName));
   const sortedSpecialty = SPECIALTY_ITEMS.filter(i => !i.deletedAt && i.active !== false).sort((a, b) => invGenericItemLabel('specialtyLatex', a).localeCompare(invGenericItemLabel('specialtyLatex', b)));
-  const selected = row.system === 'specialtyLatex' ? ('specialtyLatex|' + row.itemId) : (row.colorId ? ('standardLatex|' + row.colorId) : '');
+  const sortedFoil = FOIL_ITEMS.filter(i => !i.deletedAt && i.active !== false).sort((a, b) => invGenericItemLabel('foil', a).localeCompare(invGenericItemLabel('foil', b)));
+  const selected = row.system === 'specialtyLatex' ? ('specialtyLatex|' + row.itemId) : row.system === 'foil' ? ('foil|' + row.itemId) : (row.colorId ? ('standardLatex|' + row.colorId) : '');
   let html = `<option value="">— pick a color —</option>`;
   html += `<optgroup label="Standard Latex">` + sortedColors.map(e => `<option value="${invAttr('standardLatex|' + e.id)}" ${('standardLatex|' + e.id) === selected ? 'selected' : ''}>${psEscape(e.colorName)}${e.brand ? ' (' + psEscape(e.brand) + ')' : ''}</option>`).join('') + `</optgroup>`;
   if (sortedSpecialty.length) {
     html += `<optgroup label="Specialty Latex">` + sortedSpecialty.map(i => `<option value="${invAttr('specialtyLatex|' + i.id)}" ${('specialtyLatex|' + i.id) === selected ? 'selected' : ''}>${psEscape(invGenericItemLabel('specialtyLatex', i))}</option>`).join('') + `</optgroup>`;
   }
+  if (sortedFoil.length) {
+    html += `<optgroup label="Foil">` + sortedFoil.map(i => `<option value="${invAttr('foil|' + i.id)}" ${('foil|' + i.id) === selected ? 'selected' : ''}>${psEscape(invGenericItemLabel('foil', i))}</option>`).join('') + `</optgroup>`;
+  }
   return html;
 }
 // A row is ready once it has a real itemId — invSize only matters for Standard Latex (Specialty
-// Latex has no sub-size to require; see invSubmitInvoiceOrder's own line-building).
+// Latex has no sub-size to require; see invSubmitInvoiceOrder's own line-building). A Foil row is
+// also only ready once its own required sub-address is set: a Letters & Numbers pick needs a real
+// character (row.size) to be a complete order line, matching the incomplete-pick guard already
+// used for a foil modifier/topper elsewhere — a Decorator Shape has nothing further to require.
 function invInvoiceRowIsReady(r) {
+  if (r.system === 'foil') {
+    const item = FOIL_ITEMS.find(i => i.id === r.itemId);
+    return !!(r.include && r.itemId && r.qty > 0 && (!item || item.category !== 'lettersNumbers' || r.size));
+  }
   return !!(r.include && r.itemId && (r.system === 'specialtyLatex' || r.invSize) && r.qty > 0);
 }
 function invInvoiceDraftHtml() {
@@ -14955,7 +15204,15 @@ function invInvoiceDraftHtml() {
                 <button class="icon-btn" style="width:auto; padding:4px 8px; font-size:11px;" onclick="invInvoiceOpenAddColor('${r.id}')">Cancel</button>
               </div>
             </div>` : `<button class="icon-btn no-print" style="width:auto; padding:2px 8px; font-size:11px; color:var(--text-secondary); margin-top:4px;" onclick="invInvoiceOpenAddColor('${r.id}')"><i class="fa-solid fa-plus"></i> Add new Specialty Latex item</button>`)
-          : needsHelp && r.system !== 'specialtyLatex' ? (invInvoiceAddColorOpenFor === r.id ? `<div class="row" style="margin-top:4px;">
+          : needsHelp && r.system === 'foil' ? (invInvoiceAddColorOpenFor === r.id ? `<div class="row" style="margin-top:4px;">
+              <div class="settings-field" style="margin-bottom:0;"><input type="text" id="inv-invoice-newfoil-color-${r.id}" placeholder="Color name" value="${invAttr(invTitleCaseWords(r.colorRaw))}"></div>
+              <div class="settings-field" style="margin-bottom:0; display:flex; gap:4px;">
+                <input type="text" id="inv-invoice-newfoil-brand-${r.id}" placeholder="Brand" value="${invAttr(invInvoiceGuessBrand())}" style="flex:1;">
+                <button class="save-btn" style="width:auto; padding:4px 10px; font-size:12px;" onclick="invInvoiceSubmitAddFoil('${r.id}')">Add</button>
+                <button class="icon-btn" style="width:auto; padding:4px 8px; font-size:11px;" onclick="invInvoiceOpenAddColor('${r.id}')">Cancel</button>
+              </div>
+            </div>` : `<button class="icon-btn no-print" style="width:auto; padding:2px 8px; font-size:11px; color:var(--text-secondary); margin-top:4px;" onclick="invInvoiceOpenAddColor('${r.id}')"><i class="fa-solid fa-plus"></i> Add new Foil item</button>`)
+          : needsHelp && r.system !== 'specialtyLatex' && r.system !== 'foil' ? (invInvoiceAddColorOpenFor === r.id ? `<div class="row" style="margin-top:4px;">
               <div class="settings-field" style="margin-bottom:0;"><input type="text" id="inv-invoice-newcolor-name-${r.id}" placeholder="Color name" value="${invAttr(invTitleCaseWords(r.colorRaw))}"></div>
               <div class="settings-field" style="margin-bottom:0; display:flex; gap:4px;">
                 <input type="text" id="inv-invoice-newcolor-brand-${r.id}" placeholder="Brand" value="${invAttr(invInvoiceGuessBrand())}" style="flex:1;">
