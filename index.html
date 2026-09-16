@@ -14464,8 +14464,13 @@ const INV_INVOICE_ROW_RE = /^([A-Z0-9][A-Z0-9\-\/]{2,})\s+(\d+)\s+(\d+)\s+(\d+)\
 // The trailing pack-count suffix (CT or PK) is optional — not every row has one, and it's
 // discarded either way since Standard Package Qty is this business's own configured field, never
 // inferred from an invoice.
+// Reported directly with a real invoice example: "18" DELUXE EUCALYPTUS - 25 CT" matched fine, but
+// the very next line, "18" DELUXE SHAMROCK GREEN - 25" (same invoice, same vendor, no "CT" this
+// time), left "- 25" stuck on the color text and broke the exact match entirely — "I think this
+// was the direct match, Deluxe Shamrock Green Sempertex." A trailing hyphen+count is a pack count
+// either way; the unit word (CT/PK) is just sometimes there and sometimes not on the same invoice.
 function invStripInvoicePackSuffix(text) {
-  return (text || '').replace(/-?\s*\d+\s*(CT|PK)\s*$/i, '').replace(/-\s*$/, '').trim();
+  return (text || '').replace(/-?\s*\d+\s*(CT|PK)?\s*$/i, '').replace(/-\s*$/, '').trim();
 }
 // A description like `11" DELUXE BLACK - 100 CT` or `5" DELUXE COSMO PINK` — but a vendor invoice
 // also carries sizes with no Standard Latex bucket at all: Specialty Latex Twisting numbers (160/
