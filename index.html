@@ -10605,6 +10605,32 @@ function invSetTrackingUnit(unit) {
   invRenderSettingsSection();
 }
 function invUnitLabel() { return invTrackingUnit === 'balloons' ? 'balloons' : 'bags'; }
+// The business-wide "bags" vs "balloons" setting is a Standard Latex concept — every other
+// system's own accessor already fixes what its own numbers mean regardless of that setting
+// (Specialty Latex's getQty/setQty always work in individual balloons; a Foil count is always
+// discrete pieces, or whole packages for a "packages" Shape Family). Used both when WRITING a
+// ledger entry (so the stored record is honest) and when DISPLAYING one (so a transaction already
+// written under the old blanket `unit: trackingUnit` — before this distinction existed — still
+// reads correctly; it's derived from the transaction's own system/size/item shape, never taken
+// from whatever happened to be stored). Reported directly: a real Specialty Latex Adjustment
+// showed "-363 bags" when the number was actually 363 individual balloons.
+// Shared by both the ledger write (system/item/size are all already at hand there) and
+// invTxnUnitLabel's display-time lookup below (which only has the saved transaction doc, and
+// re-derives item/size from it — see that function's own comment on why it never trusts a
+// previously-stored `unit` value for anything but Standard Latex).
+function invSystemUnitLabel(system, item, size) {
+  if (!system || system === 'standardLatex') return invUnitLabel();
+  if (system === 'specialtyLatex') return 'balloons';
+  if (system === 'foil') {
+    if (size) return 'foils'; // a Letters & Numbers character — one count = one foil balloon
+    if (item && item.category === 'decoratorShapes' && foilDecoratorEffectiveMode(item) === 'packages') return 'packages';
+    return 'foils';
+  }
+  return 'pieces';
+}
+function invTxnUnitLabel(t) {
+  return invSystemUnitLabel(t.system, t.system === 'foil' ? foilFindItem(t.itemId) : null, t.size);
+}
 
 // The physical-count baseline session — see plan doc for why this replaced inferring
 // INITIAL_COUNT from "no transaction exists yet" (today's backstock numbers are explicitly
@@ -10865,9 +10891,29 @@ const INV_SYSTEMS = {
   foil: {
     label: 'Foil', viewId: 'inventory-foil', itemRef: (itemId) => window.fbFoilItemRef(itemId),
     // Letters & Numbers groups store quantities per character (size doubles as the character
-    // key); every other Foil category (Decorator Shapes, Themed) is one flat `quantity`.
-    getQty: (item, size) => size ? ((item.quantities && item.quantities[size]) || 0) : (item.quantity || 0),
-    setQty: (item, size, qty) => { if (size) { if (!item.quantities) item.quantities = {}; item.quantities[size] = qty; } else { item.quantity = qty; } },
+    // key); Decorator Shapes is one flat count EXCEPT a "packages" Shape Family, which tracks
+    // whole packages + an optional half-package flag instead (foilDecoratorEffectiveMode) — there
+    // is no fixed "balloons per package" for these, so a half package is a real, separate state,
+    // not a fraction of some known unit. Represented here as one number (packagesFull, plus 0.5
+    // for the half-package flag) purely so this accessor can stay a single number like every
+    // other system — foilUpdateDecoratorField/foilSubmitDecoratorAdd decompose it back into the
+    // two real fields. Themed has neither shape yet.
+    getQty: (item, size) => {
+      if (size) return (item.quantities && item.quantities[size]) || 0;
+      if (item.category === 'decoratorShapes' && foilDecoratorEffectiveMode(item) === 'packages') {
+        return (item.packagesFull || 0) + (item.hasPartialPackage ? 0.5 : 0);
+      }
+      return item.quantity || 0;
+    },
+    setQty: (item, size, qty) => {
+      if (size) { if (!item.quantities) item.quantities = {}; item.quantities[size] = qty; return; }
+      if (item.category === 'decoratorShapes' && foilDecoratorEffectiveMode(item) === 'packages') {
+        item.packagesFull = Math.floor(qty);
+        item.hasPartialPackage = qty - Math.floor(qty) >= 0.5;
+        return;
+      }
+      item.quantity = qty;
+    },
     findItem: (itemId) => FOIL_ITEMS.find(i => i.id === itemId),
     listItems: () => FOIL_ITEMS,
     // Only a Letters & Numbers group has anything to sub-select — a specific character to
@@ -10987,7 +11033,7 @@ function invApplyInventoryTransactions(entries) {
           // Polka Dot") were completely indistinguishable in the Activity ledger — exactly what
           // made a real mis-pick hard to even notice. See invActivityItemLabel's own use of this.
           sizeType: item.sizeType || null, pattern: item.pattern || item.shape || null,
-          type: e.type, unit: trackingUnit, delta, previousBalance, newBalance,
+          type: e.type, unit: invSystemUnitLabel(system, item, e.size), delta, previousBalance, newBalance,
           balloonsUsed: null, perBagAtTime: null, remainderBefore: null, remainderAfter: null, looseBefore: null, looseAfter: null,
           // Which production item this pull/return belongs to — see the batch fix for a real,
           // confirmed bug where several decor pieces on one job needing the same item+size shared
@@ -14179,7 +14225,7 @@ function invFmtQty(n) { return Number.isInteger(n) ? String(n) : n.toFixed(2); }
 // explicitly called out as "individual balloons," a genuinely different unit, on its own line.
 function invTxnDetailHtml(t) {
   const date = new Date(t.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  const unit = invUnitLabel(); // 'bags' or 'balloons' — whatever this business currently tracks Backstock in
+  const unit = invTxnUnitLabel(t); // Standard Latex: whatever this business currently tracks Backstock in; every other system: its own fixed unit, regardless of that setting
   const sign = t.delta > 0 ? '+' : '';
   const backstockLine = `${sign}${invFmtQty(t.delta)} ${unit} — Backstock is now ${invFmtQty(t.newBalance)} ${unit}`;
   const usageNote = (t.balloonsUsed != null && t.perBagAtTime != null)
@@ -14221,10 +14267,24 @@ function invHistoryHtml(itemId, size) {
 // carries its own denormalized color/brand/name identity (see invApplyInventoryTransactions) —
 // this reads that directly rather than re-joining against the live item, so a since-renamed or
 // since-deleted item's history still reads correctly here exactly like it does in per-item History.
-let invActivityFilter = { query: '', type: 'all', system: 'all' };
+let invActivityFilter = { query: '', type: 'all', system: 'all', itemId: null, itemLabel: '' };
 const INV_ACTIVITY_PAGE_SIZE = 150; // a reasonable cap for one render pass — narrowing the filters is the way to see further back, not infinite-scroll machinery for what should be a rare "let me check something" screen
 function invActivitySetFilter(field, value) {
   invActivityFilter[field] = value;
+  invRenderActivity();
+}
+// A per-item "View history" jump-in from a Foil/Specialty Latex card — unlike Standard Latex's own
+// per-size invHistoryHtml (an exact size match), this deliberately spans every sub-quantity of the
+// item (e.g. every character of a Letters & Numbers group) so its whole story reads as one list,
+// same as opening this screen and searching by hand would show. itemLabel is just for the small
+// "showing history for X" banner below — it doesn't affect what's matched.
+function invActivityViewForItem(itemId, itemLabel, system) {
+  invActivityFilter = { query: '', type: 'all', system: system || 'all', itemId, itemLabel: itemLabel || '' };
+  showView('inventory-activity');
+}
+function invActivityClearItemFilter() {
+  invActivityFilter.itemId = null;
+  invActivityFilter.itemLabel = '';
   invRenderActivity();
 }
 // sizeType/pattern only ever exist on a Specialty Latex transaction (see
@@ -14244,6 +14304,7 @@ function invActivityItemLabel(t) {
 function invActivityFilteredRows() {
   const q = invActivityFilter.query.trim().toLowerCase();
   return INVENTORY_TRANSACTIONS.filter(t => {
+    if (invActivityFilter.itemId && t.itemId !== invActivityFilter.itemId) return false;
     if (invActivityFilter.type !== 'all' && t.type !== invActivityFilter.type) return false;
     if (invActivityFilter.system !== 'all' && (t.system || 'standardLatex') !== invActivityFilter.system) return false;
     if (!q) return true;
@@ -14254,7 +14315,17 @@ function invActivityFilteredRows() {
 function invActivitySectionHtml() {
   const all = invActivityFilteredRows();
   const shown = all.slice(0, INV_ACTIVITY_PAGE_SIZE);
-  let html = `<div class="settings-field"><input type="text" placeholder="Search by color, item, job, or note…" value="${invAttr(invActivityFilter.query)}" oninput="invActivitySetFilter('query', this.value)"></div>`;
+  let html = '';
+  // The itemId filter isn't exposed as its own visible dropdown (it's set only by a card's "View
+  // history" link) — this banner is what makes an otherwise-invisible narrowing obvious, with an
+  // easy way back to the full feed.
+  if (invActivityFilter.itemId) {
+    html += `<div style="background:var(--info-bg); border:0.5px solid var(--info-text); border-radius:var(--radius-sm); padding:0.5rem 0.75rem; margin-bottom:0.5rem; font-size:12px; color:var(--info-text); display:flex; justify-content:space-between; align-items:center; gap:8px;">
+      <span>Showing history for <strong>${psEscape(invActivityFilter.itemLabel || 'this item')}</strong></span>
+      <button class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px; flex-shrink:0;" onclick="invActivityClearItemFilter()">Show all activity</button>
+    </div>`;
+  }
+  html += `<div class="settings-field"><input type="text" placeholder="Search by color, item, job, or note…" value="${invAttr(invActivityFilter.query)}" oninput="invActivitySetFilter('query', this.value)"></div>`;
   html += `<div class="row">
     <div class="settings-field" style="margin-bottom:0;"><label>Type</label>
       <select onchange="invActivitySetFilter('type', this.value)">
@@ -17118,7 +17189,7 @@ function spSetDraftField(field, value) {
     spRenderScreen();
   }
 }
-function spSubmitAdd() {
+async function spSubmitAdd() {
   if (!spAddDraft) return;
   const d = spAddDraft;
   const brand = resolveBrandValue(d.brand, d.brandOther);
@@ -17142,18 +17213,14 @@ function spSubmitAdd() {
   const dup = spFindCollision(d.kind, brand, color, sizeType, identityExtra, null);
   if (dup) { alert(`An item with this Brand/Color/Size${identityExtra ? '/' + (d.kind === 'printed' ? 'Pattern' : 'Shape') : ''} already exists.`); return; }
   const perBag = parseFloat(d.perBag) || 0;
-  // Individual Balloons mode: the typed Backstock number is a TOTAL balloon count, split via the
-  // same floor/modulo math used everywhere else into whole bags + a precise loose-balloon
-  // remainder — never a fractional backstock value. Bags mode is unchanged (no loose balloons).
-  let backstock, looseBalloons = 0;
-  if (d.backstockUnit === 'balloons') {
-    if (!perBag || perBag <= 0) { alert("Balloons/bag isn't set — set it before entering individual balloons."); return; }
-    const totalBalloons = parseFloat(d.backstock) || 0;
-    backstock = Math.floor(totalBalloons / perBag);
-    looseBalloons = totalBalloons - backstock * perBag;
-  } else {
-    backstock = parseFloat(d.backstock) || 0;
-  }
+  // A requested starting count is entered through the ledger once the record exists, not baked
+  // into it directly — same "new items start empty, the first real count is a tracked transaction"
+  // convention just applied to Foil's own Add flow (see foilSubmitDecoratorAdd). Both entry modes
+  // reduce to one total BALLOON count, matching INV_SYSTEMS.specialtyLatex's own accessor
+  // (backstock*perBag + looseBalloons) — bags mode just multiplies the typed bag count out first.
+  const enteredBackstock = parseFloat(d.backstock) || 0;
+  if (enteredBackstock > 0 && (!perBag || perBag <= 0)) { alert("Balloons/bag isn't set — set it before entering a starting count."); return; }
+  const startingBalloons = d.backstockUnit === 'balloons' ? enteredBackstock : enteredBackstock * perBag;
   const item = {
     id: psNewSpecialtyItemId(),
     kind: d.kind,
@@ -17166,12 +17233,30 @@ function spSubmitAdd() {
     descriptor: (d.descriptor || '').trim(),
     perBag,
     costPerBag: parseFloat(d.costPerBag) || 0,
-    backstock,
-    looseBalloons,
+    backstock: 0, looseBalloons: 0,
     active: true,
   };
   SPECIALTY_ITEMS.push(item);
-  spSaveItem(item);
+  try {
+    await window.fbSaveSpecialtyLatexItem(item);
+  } catch (err) {
+    console.error(err);
+    alert("Couldn't save that item — check your connection and try again.");
+    SPECIALTY_ITEMS = SPECIALTY_ITEMS.filter(i => i.id !== item.id);
+    return;
+  }
+  // The ledger's own transaction needs the item to already exist in Firestore (a fresh
+  // transaction.get against it) — exactly why this waits for the create above to resolve first.
+  if (startingBalloons !== 0) {
+    try {
+      await invApplyInventoryTransactions([{ system: 'specialtyLatex', itemId: item.id, type: 'ADJUSTMENT', delta: startingBalloons, note: 'Starting count entered when this item was added' }]);
+    } catch (err) {
+      // The record itself already exists (created successfully above) — it's simply left at 0,
+      // same as a freshly-created item with no count entered yet, not a half-valid state.
+      console.error(err);
+      alert("The item was created, but its starting count couldn't be saved — check your connection, then enter it again from the item's own Backstock field.");
+    }
+  }
   spAddOpen = false;
   spAddDraft = null;
   spKindTab = item.kind;
@@ -17199,25 +17284,33 @@ function spSetQtyUnitFor(itemId, unit) {
 // remainder — Backstock itself never becomes fractional. Bags mode is unchanged, and (matching
 // Standard Latex's own rule) a plain bags-mode entry resets any previously-known loose balloons,
 // since a direct count is the new whole truth.
+// Routed through the ledger (not a plain save) so a real count/restock shows up in Inventory
+// Activity — same gap and same fix as foilUpdateQuantity's own comment covers for Foil. Both entry
+// modes reduce to the same thing: an asserted TOTAL BALLOON count, which is exactly what
+// INV_SYSTEMS.specialtyLatex.getQty/setQty already work in (backstock*perBag + looseBalloons) —
+// bags mode just multiplies the typed bag count out to balloons first. That accessor returns null
+// (never guesses) when perBag isn't set, so — unlike the old plain-save version, which only
+// required perBag for "Individual Balloons" mode — a bags-mode entry now needs it too; this matches
+// how every downstream balloon-math consumer already treats a missing perBag as unconfigured, not
+// as "assume balloons don't matter here."
 function spSubmitBackstockEntry(itemId, value) {
   const item = spFindItem(itemId);
   if (!item) return;
   const actual = parseFloat(value);
   if (isNaN(actual) || actual < 0) return;
   const unit = spQtyUnitByItem[itemId] || 'bags';
-  if (unit === 'balloons') {
-    const perBag = item.perBag || 0;
-    if (!perBag || perBag <= 0) { alert("Balloons/bag isn't set for this item — set it before entering individual balloons."); return; }
-    const units = Math.floor(actual / perBag);
-    item.backstock = units;
-    item.looseBalloons = actual - units * perBag;
-  } else {
-    item.backstock = actual;
-    item.looseBalloons = 0;
-  }
-  spSaveItem(item);
-  delete spQtyUnitByItem[itemId]; // back to Bags for the next entry
-  spRenderResults();
+  const perBag = item.perBag || 0;
+  if (!perBag || perBag <= 0) { alert("Balloons/bag isn't set for this item — set it before entering a count."); return; }
+  const newTotalBalloons = unit === 'balloons' ? actual : actual * perBag;
+  const previousQty = invSystemFor('specialtyLatex').getQty(item);
+  const delta = newTotalBalloons - previousQty;
+  delete spQtyUnitByItem[itemId]; // back to Bags for the next entry, regardless of outcome below
+  if (delta === 0) { spRenderResults(); return; }
+  invApplyInventoryTransactions([{ system: 'specialtyLatex', itemId, type: 'ADJUSTMENT', delta }]).catch(err => {
+    console.error('Specialty Latex quantity update failed:', err);
+    alert(err.message || "Couldn't save that count — check your connection and try again.");
+    spRenderResults(); // revert the input back to the last known-good value
+  });
 }
 // Reclassifying an already-saved item's Print Group — separate from the add-form's draft-based
 // "+ Add new group" reveal since there's no in-progress draft here to preserve; a plain prompt()
@@ -17908,6 +18001,7 @@ function spItemCardHtml(item) {
       <div class="settings-field" style="margin-bottom:0"><label>Cost/bag</label><input type="number" step="0.01" min="0" value="${item.costPerBag}" onchange="spUpdateField('${item.id}','costPerBag',this.value)"></div>
     </div>`;
     html += psTagsFieldHtml(item.tags, `spUpdateField('${item.id}','tags',this.value)`);
+    html += `<div style="margin-top:0.3rem;"><button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary);" onclick="invActivityViewForItem('${item.id}','${psJsKeyAttr(invGenericItemLabel('specialtyLatex', item))}','specialtyLatex')"><i class="fa-solid fa-clock-rotate-left"></i> View history</button></div>`;
     html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="spOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="spDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
@@ -18621,11 +18715,25 @@ function foilUpdateField(itemId, field, value) {
     : field === 'tags' ? psParseTagsInput(value) : value;
   foilSaveItem(item);
 }
+// Routed through the ledger (not a plain save) so a physical count/restock of a Letters & Numbers
+// character shows up in Inventory Activity — reported directly: manual Foil additions had "no
+// record of it," which traced back to this and foilUpdateDecoratorField being fire-and-forget
+// writes with no transaction history at all, unlike Standard Latex's own Backstock field. Computes
+// a delta from the field's OWN previous value (same "assert the true count" pattern
+// invUpdateSizeField's backstock case already uses) rather than mutating the item directly —
+// invApplyInventoryTransactions re-reads the item fresh inside its own transaction, so nothing here
+// needs to race that.
 function foilUpdateQuantity(itemId, character, value) {
   const item = foilFindItem(itemId);
   if (!item) return;
-  item.quantities[character] = parseFloat(value) || 0;
-  foilSaveItem(item);
+  const newValue = parseFloat(value) || 0;
+  const delta = newValue - ((item.quantities && item.quantities[character]) || 0);
+  if (delta === 0) return;
+  invApplyInventoryTransactions([{ system: 'foil', itemId, size: character, type: 'ADJUSTMENT', delta }]).catch(err => {
+    console.error('Foil quantity update failed:', err);
+    alert(err.message || "Couldn't save that count — check your connection and try again.");
+    foilRenderResults(); // revert the input back to the last known-good value
+  });
 }
 // Delete/restore/permanent-delete mirrors invDeleteColor/invRestoreItem/invPermanentlyDeleteItem
 // exactly — soft delete by default (deletedAt + move to a trashed array), always recoverable from
@@ -18817,6 +18925,7 @@ function foilItemCardHtml(item) {
     <div class="settings-field" style="margin-bottom:0"><label>Storage location</label><input type="text" value="${invAttr(item.storageLocation)}" placeholder="optional" onchange="foilUpdateField('${item.id}','storageLocation',this.value)"></div>
   </div>`;
   html += psTagsFieldHtml(item.tags, `foilUpdateField('${item.id}','tags',this.value)`);
+  html += `<div style="margin-top:0.3rem;"><button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary);" onclick="invActivityViewForItem('${item.id}','${psJsKeyAttr(invGenericItemLabel('foil', item))}','foil')"><i class="fa-solid fa-clock-rotate-left"></i> View history</button></div>`;
   html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
     <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
     <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
@@ -19545,6 +19654,13 @@ async function foilSubmitDecoratorAdd() {
 
   const group = pgFindGroup(printGroupId);
   const effectiveMode = condition === 'inflated' ? 'individual' : (group && group.quantityMode === 'packages' ? 'packages' : 'individual');
+  // A requested starting count is entered through the ledger, not baked into the created record —
+  // same "new items start empty, the first real count is a tracked transaction" convention Standard
+  // Latex already uses (invAddColor always creates at 0 backstock). Computed here, before the
+  // record itself is created at 0 below, so the two pieces stay obviously in sync.
+  const startingQty = effectiveMode === 'packages'
+    ? (parseInt(d.packagesFull, 10) || 0) + (d.hasPartialPackage ? 0.5 : 0)
+    : (parseInt(d.quantity, 10) || 0);
 
   const item = {
     id: psNewFoilItemId(),
@@ -19553,9 +19669,7 @@ async function foilSubmitDecoratorAdd() {
     brand, color, size, condition,
     storageLocation: (d.storageLocation || '').trim(),
     notes: (d.notes || '').trim(),
-    quantity: effectiveMode === 'individual' ? (parseInt(d.quantity, 10) || 0) : 0,
-    packagesFull: effectiveMode === 'packages' ? (parseInt(d.packagesFull, 10) || 0) : 0,
-    hasPartialPackage: effectiveMode === 'packages' ? !!d.hasPartialPackage : false,
+    quantity: 0, packagesFull: 0, hasPartialPackage: false,
     active: true,
   };
 
@@ -19566,6 +19680,13 @@ async function foilSubmitDecoratorAdd() {
   try {
     await window.fbSaveFoilItem(item);
     foilLogSaveOutcome('foilSubmitDecoratorAdd', item);
+    // A nonzero starting count is a second, separate write against the now-real record — the
+    // ledger's own transaction needs the item to already exist in Firestore (it does a fresh
+    // transaction.get against it), which is exactly why this waits for the create above to
+    // resolve first rather than firing both at once.
+    if (startingQty !== 0) {
+      await invApplyInventoryTransactions([{ system: 'foil', itemId: item.id, type: 'ADJUSTMENT', delta: startingQty, note: 'Starting count entered when this item was added' }]);
+    }
     // Do NOT push item into FOIL_ITEMS here — Foil's live onSnapshot listener (foilStartListeners)
     // is the single source of truth for that array and reassigns it wholesale from the server's
     // own data. Awaiting the write above gives that listener time to fire first (it sees this same
@@ -19581,19 +19702,42 @@ async function foilSubmitDecoratorAdd() {
     foilRenderScreen();
     foilShowSavedToast('foil-decorator-results-root');
   } catch (err) {
+    // The record itself may already exist (created successfully) even if the starting-count write
+    // is what failed — it's simply left at 0, exactly like a freshly-created item with no count
+    // entered yet, so nothing here is in a half-valid state. The draft/form stay open so retrying
+    // just means re-submitting the same starting count rather than losing what was typed.
     foilLogSaveOutcome('foilSubmitDecoratorAdd', item, err);
     foilDecoratorAddSaving = false;
     foilDecoratorAddError = { code: err.code, message: err.message };
     foilRenderScreen(); // draft/form still open and filled exactly as the user left it
   }
 }
-// Plain saves, matching Specialty Latex/Letters & Numbers — no ledger for Decorator Shapes either.
+// Quantity fields route through the ledger (see foilUpdateQuantity's own comment on why) — every
+// other field here (Storage location, Notes, Tags) isn't a tracked quantity and stays a plain save,
+// same as everywhere else in this app. A "packages" Shape Family edits packagesFull/hasPartialPackage
+// instead of quantity (foilDecoratorEffectiveMode) — both funnel through the same combined-number
+// accessor INV_SYSTEMS.foil.getQty/setQty already uses, so either field's edit alone still produces
+// one correct delta against the item's current combined total.
 function foilUpdateDecoratorField(itemId, field, value) {
   const item = foilFindItem(itemId);
   if (!item) return;
-  if (field === 'quantity' || field === 'packagesFull') item[field] = parseInt(value, 10) || 0;
-  else if (field === 'hasPartialPackage') item[field] = !!value;
-  else if (field === 'tags') item[field] = psParseTagsInput(value);
+  if (field === 'quantity' || field === 'packagesFull' || field === 'hasPartialPackage') {
+    const sys = invSystemFor('foil');
+    const previousQty = sys.getQty(item, null);
+    let newQty;
+    if (field === 'quantity') newQty = parseInt(value, 10) || 0;
+    else if (field === 'packagesFull') newQty = (parseInt(value, 10) || 0) + (item.hasPartialPackage ? 0.5 : 0);
+    else newQty = (item.packagesFull || 0) + (value ? 0.5 : 0);
+    const delta = newQty - previousQty;
+    if (delta === 0) return;
+    invApplyInventoryTransactions([{ system: 'foil', itemId, type: 'ADJUSTMENT', delta }]).catch(err => {
+      console.error('Foil quantity update failed:', err);
+      alert(err.message || "Couldn't save that count — check your connection and try again.");
+      foilRenderDecoratorFamilyItems(); // revert the input back to the last known-good value
+    });
+    return;
+  }
+  if (field === 'tags') item[field] = psParseTagsInput(value);
   else item[field] = value;
   foilSaveItem(item);
   foilRenderDecoratorFamilyItems();
@@ -19804,6 +19948,7 @@ function foilDecoratorItemCardHtml(item, familyLabel) {
       <div class="settings-field" style="margin-bottom:0"><label>Notes</label><input type="text" value="${invAttr(item.notes)}" placeholder="optional" onchange="foilUpdateDecoratorField('${item.id}','notes',this.value)"></div>
     </div>`;
     html += psTagsFieldHtml(item.tags, `foilUpdateDecoratorField('${item.id}','tags',this.value)`);
+    html += `<div style="margin-top:0.3rem;"><button class="icon-btn" style="width:auto; padding:3px 8px; font-size:11px; color:var(--text-secondary);" onclick="invActivityViewForItem('${item.id}','${psJsKeyAttr(foilItemLabel(item))}','foil')"><i class="fa-solid fa-clock-rotate-left"></i> View history</button></div>`;
     html += `<div style="display:flex; justify-content:flex-end; gap:8px;">
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px; border:0.5px solid var(--border-strong); border-radius:var(--radius-sm);" onclick="foilOpenDecoratorEditDetails('${item.id}')"><i class="fa-solid fa-pen"></i> Edit Details</button>
       <button class="icon-btn" style="width:auto; padding:6px 14px; font-size:12px;" onclick="foilDeleteItem('${item.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
