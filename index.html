@@ -5947,6 +5947,87 @@ function irRemoveModifier(itemId, modId) {
   item.modifiers = (item.modifiers || []).filter(m => m.id !== modId);
   irRenderShell();
 }
+// Import Review's own counterpart to Production's psFoilPicker* family (psFoilPickerHtml and its
+// search/pick/character helpers) — the same type-ahead search plus Letters & Numbers character
+// grid, just addressed by review item + modifier id instead of job + line index, since a review
+// item isn't a real production line yet. Direct request: "I want to be able to add foils from this
+// page... I can't do it til I import it" — Import Review's modifier editor never offered this
+// picker at all before, only the plain generic Foil-inventory dropdown buried inside "Not
+// inventory-backed / Foil / ..." with no dedicated way to reach it, unlike Production's own
+// dedicated "+ Add a foil balloon" button.
+let irFoilSearchDraft = {}; // `${itemId}|${modId}` -> in-progress search text, while picking
+function irFoilPickerKey(itemId, modId) { return itemId + '|' + modId; }
+function irFoilPickerSearch(itemId, modId, value) {
+  const key = irFoilPickerKey(itemId, modId);
+  irFoilSearchDraft[key] = value;
+  const container = document.getElementById('ir-foil-suggest-' + key.replace(/[^a-zA-Z0-9]/g, '-'));
+  if (!container) return;
+  const q = value.trim().toLowerCase();
+  if (!q) { container.style.display = 'none'; container.innerHTML = ''; return; }
+  const matches = FOIL_ITEMS.filter(i => !i.deletedAt && i.active !== false && invGenericItemLabel('foil', i).toLowerCase().includes(q)).slice(0, 8);
+  if (matches.length === 0) {
+    container.innerHTML = `<div class="inv-color-suggest-item" style="color:var(--text-tertiary); font-style:italic; cursor:default;">No match — add it from Settings → Foil Inventory, then search again</div>`;
+    container.style.display = 'block';
+    return;
+  }
+  container.innerHTML = matches.map(i =>
+    `<div class="inv-color-suggest-item" onmousedown="event.preventDefault(); irFoilPickerPick('${psJsKeyAttr(itemId)}','${psJsKeyAttr(modId)}','${psJsKeyAttr(i.id)}')">${psEscape(invGenericItemLabel('foil', i))}</div>`
+  ).join('');
+  container.style.display = 'block';
+}
+function irFoilPickerAbandonSoon(itemId, modId) {
+  const key = irFoilPickerKey(itemId, modId);
+  setTimeout(() => {
+    if (irFoilSearchDraft[key] !== undefined) { delete irFoilSearchDraft[key]; irRenderShell(); }
+  }, 150);
+}
+function irFoilPickerPick(itemId, modId, foilItemId) {
+  const item = IMPORT_REVIEW_DRAFT && IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  const mod = irFindModifier(item, modId);
+  if (!mod) return;
+  mod.inventoryRef = { system: 'foil', itemId: foilItemId, size: null };
+  delete irFoilSearchDraft[irFoilPickerKey(itemId, modId)];
+  irRenderShell();
+}
+function irFoilPickerSetChar(itemId, modId, char) {
+  const item = IMPORT_REVIEW_DRAFT && IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  const mod = irFindModifier(item, modId);
+  if (!mod || !mod.inventoryRef) return;
+  mod.inventoryRef.size = char;
+  irRenderShell();
+}
+function irFoilPickerHtml(itemId, mod) {
+  const key = irFoilPickerKey(itemId, mod.id);
+  const sanitized = key.replace(/[^a-zA-Z0-9]/g, '-');
+  const inputId = 'ir-foil-search-' + sanitized;
+  const item = mod.inventoryRef && mod.inventoryRef.itemId ? foilFindItem(mod.inventoryRef.itemId) : null;
+  const draft = irFoilSearchDraft[key];
+  const inputValue = draft !== undefined ? draft : (item ? invGenericItemLabel('foil', item) : '');
+  let html = `<div style="position:relative; margin-bottom:6px;">
+    <input type="text" id="${inputId}" placeholder="Start typing a shape, letter, number, or theme..." value="${invAttr(inputValue)}"
+      oninput="irFoilPickerSearch('${psJsKeyAttr(itemId)}','${psJsKeyAttr(mod.id)}', this.value)"
+      onfocus="irFoilPickerSearch('${psJsKeyAttr(itemId)}','${psJsKeyAttr(mod.id)}', this.value)"
+      onblur="invHideColorSuggestionsSoon('${inputId}'); irFoilPickerAbandonSoon('${psJsKeyAttr(itemId)}','${psJsKeyAttr(mod.id)}')">
+    <div id="ir-foil-suggest-${sanitized}" class="inv-color-suggest" style="display:none;"></div>
+  </div>`;
+  if (item && item.category === 'lettersNumbers' && item.charType !== 'phrases') {
+    const chars = foilCharsFor(item.charType);
+    html += `<div style="display:flex; flex-wrap:wrap; gap:4px; margin:-2px 0 6px;">
+      ${chars.map(c => `<button type="button" class="icon-btn" style="width:auto; padding:2px 8px; font-size:11px;${mod.inventoryRef.size === c ? ' background:var(--accent-light); border-color:var(--accent);' : ''}" onclick="irFoilPickerSetChar('${psJsKeyAttr(itemId)}','${psJsKeyAttr(mod.id)}','${psJsKeyAttr(c)}')">${psEscape(c)}</button>`).join('')}
+    </div>`;
+    if (!mod.inventoryRef.size) html += `<div style="font-size:11px; color:var(--warning-text); margin:-2px 0 6px;">Pick which character above.</div>`;
+  }
+  return html;
+}
+// Dedicated add button (alongside the generic one) so a foil balloon gets the nice type-ahead
+// picker immediately — same reasoning as Production's own psAddFoilModifier.
+function irAddFoilModifier(itemId) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
+  if (!item) return;
+  if (!item.modifiers) item.modifiers = [];
+  item.modifiers.push({ id: psNewModifierId(), label: 'Foil balloon', inventoryRef: null, qty: 1, generatesTask: false, note: '', foilSlot: true });
+  irRenderShell();
+}
 function irModifiersEditorHtml(item) {
   return psModifierListHtml(item.modifiers || [], 'Add-ons / modifiers <span style="font-weight:400;">(optional — job-specific extras like "+ Red Starbursts")</span>', mod => psModifierRowHtml(mod,
     `irUpdateModifierField('${item.id}','${mod.id}','label', this.value)`,
@@ -5954,8 +6035,10 @@ function irModifiersEditorHtml(item) {
     `irSetModifierInventoryRef('${item.id}','${mod.id}', this.value)`,
     `irUpdateModifierField('${item.id}','${mod.id}','note', this.value)`,
     `irUpdateModifierField('${item.id}','${mod.id}','generatesTask', this.checked)`,
-    `irRemoveModifier('${item.id}','${mod.id}')`
-  ), `irAddModifier('${item.id}')`);
+    `irRemoveModifier('${item.id}','${mod.id}')`,
+    (mod.foilSlot || (mod.inventoryRef && mod.inventoryRef.system === 'foil')) ? irFoilPickerHtml(item.id, mod) : null
+  ), `irAddModifier('${item.id}')`,
+  `<button class="icon-btn" style="width:auto; padding:6px 12px; font-size:12px;" onclick="irAddFoilModifier('${item.id}')"><i class="fa-solid fa-plus"></i> Add a foil balloon</button>`);
 }
 // The "these are always the same" answer to a suggested match — same mechanism Review & Pull's
 // own Always Match already uses (clAddAlias, already audited there): adds this exact raw text as
