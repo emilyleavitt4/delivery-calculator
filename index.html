@@ -4805,6 +4805,19 @@ function psCycleStaffStatus(jobId) {
   job.staffingStatus = STAFF_STATUS_ORDER[(STAFF_STATUS_ORDER.indexOf(current) + 1) % STAFF_STATUS_ORDER.length];
   psSaveJob(job);
 }
+// The only way to reach 'complete' once real Install/Strike staffing occurrences exist — see
+// psStatusBtnHtml's own comment on why the derived Short/Overstaffed/Fully-staffed badge can't
+// just be clicked to cycle the way the old manual button did. Direct report: with real staffing
+// configured, there was no way left to mark a job done at all — Delete was the only remaining
+// button, which removes the job entirely rather than archiving it. A one-way "yes, this job's
+// staffing is done" action, not a cycle — un-completing still works the existing way, via the
+// Complete button that appears once archived (psCycleStaffStatus cycles it back to 'open').
+function psMarkStaffingComplete(jobId) {
+  const job = psFindJob(jobId);
+  if (!job) return;
+  job.staffingStatus = 'complete';
+  psSaveJob(job);
+}
 
 function psDeleteJob(jobId) {
   if (!confirm('Delete this job? This removes it from both Production and Staffing. This can\'t be undone.')) return;
@@ -6019,7 +6032,13 @@ function psStatusBtnHtml(job, view) {
     const aggregate = psAggregateStaffStatus(job);
     if (aggregate) {
       const label = aggregate === 'short' ? 'Short' : (aggregate === 'over' ? 'Overstaffed' : 'Fully staffed');
-      return `<span class="ps-status-btn ps-staffstatus-${aggregate === 'short' ? 'open' : 'scheduled'}" style="cursor:default;" title="Derived from Install/Strike staffing">${label}</span>`;
+      const badge = `<span class="ps-status-btn ps-staffstatus-${aggregate === 'short' ? 'open' : 'scheduled'}" style="cursor:default;" title="Derived from Install/Strike staffing">${label}</span>`;
+      // A separate, explicit control rather than making the badge itself clickable — its text is
+      // real information (are we adequately staffed), not a stand-in for "click to complete," and
+      // shouldn't do double duty as one. This is the only way back to psMarkStaffingComplete once
+      // real staffing data exists (see that function's own comment on the gap this closes).
+      const completeBtn = `<button class="icon-btn" style="width:auto; padding:4px 8px; flex-shrink:0;" onclick="event.stopPropagation(); psMarkStaffingComplete('${job.id}')" title="Mark this job's staffing complete" aria-label="Mark staffing complete"><i class="fa-solid fa-check"></i></button>`;
+      return badge + completeBtn;
     }
     const s = job.staffingStatus || 'open';
     return `<button class="ps-status-btn ps-staffstatus-${s}" onclick="event.stopPropagation(); psCycleStaffStatus('${job.id}')">${STAFF_STATUS_LABELS[s]}</button>`;
