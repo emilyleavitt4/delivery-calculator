@@ -6817,6 +6817,11 @@ function psTopperRowHtml(key, idx, row, canRemove) {
     </div>`;
   if (system === 'standardLatex') {
     html += row.color.trim() ? psColorBrandChoiceHtml(key, row.color) : '';
+    // Reported directly: a topper's color+qty were filled in, but with no Size ever picked, the
+    // requirement-generation code (psComputeJobRequirements) silently drops the whole topper —
+    // never an error, it just never shows up anywhere to pull. Matches the existing incomplete-pick
+    // warning already shown below for a Foil Letters & Numbers topper with no character chosen yet.
+    if (row.color.trim() && !row.size) html += `<div style="font-size:11px; color:var(--warning-text); margin:2px 0 0;">Pick a size above — until you do, this topper won't be tracked as real inventory or show up to pull.</div>`;
   } else if (foilItem && foilItem.category === 'lettersNumbers' && foilItem.charType !== 'phrases') {
     const chars = foilCharsFor(foilItem.charType);
     html += `<div style="display:flex; flex-wrap:wrap; gap:4px; margin:4px 0 0;">
