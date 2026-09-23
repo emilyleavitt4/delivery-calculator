@@ -6860,7 +6860,14 @@ function psFootageEditorHtml(line, r, sanitizedKey) {
   const currentOverride = (typeof line.customLinear === 'number' && line.customLinear > 0) ? line.customLinear : '';
   const placeholder = typeof r.linearFt === 'number' ? String(r.linearFt) : 'e.g. 12';
   const hint = typeof r.linearFt === 'number' ? `blank uses the template's own ${r.linearFt} ft` : 'the footage entered for this job';
-  return `<div class="settings-field"><label>Linear feet <span style="font-weight:400;">(${hint})</span></label><input type="number" step="0.5" min="0" id="pi-edit-linear-${sanitizedKey}" placeholder="${psEscape(placeholder)}" value="${currentOverride}"></div>`;
+  // Direct confusion, worth heading off explicitly: this template's own topper deduction
+  // (psTopperFt) is SUBTRACTED from whatever gets typed here, to arrive at the actual
+  // balloon-wrapped length — the two aren't independent numbers. Reported directly: entering the
+  // already-wrapped length here (thinking of it as "excluding the topper") while a topper
+  // deduction was still active meant it got subtracted a SECOND time, understating the real total.
+  const topperFt = psTopperFt(r);
+  const topperNote = topperFt ? `<div style="font-size:11px; color:var(--text-secondary); margin:-0.2rem 0 0.4rem;">Enter the TOTAL height including the topper — this template already subtracts ${topperFt} ft for it before calculating.</div>` : '';
+  return `<div class="settings-field"><label>Linear feet <span style="font-weight:400;">(${hint})</span></label><input type="number" step="0.5" min="0" id="pi-edit-linear-${sanitizedKey}" placeholder="${psEscape(placeholder)}" value="${currentOverride}"></div>${topperNote}`;
 }
 // A job-only override for one or more of this line's calculated sizes (see psApplySizeOverride).
 // Always shows all 5 balloon sizes, not just the ones the formula currently produces — a job can
