@@ -10899,6 +10899,29 @@ function invStandardLatexOutstandingSplitFor(jobId, itemId, size, amount) {
   const fromOpenBin = Math.max(0, amount - fromLoose - fromPool);
   return { fromLoose, fromPool, fromOpenBin };
 }
+// Same "already answered, don't ask again" idea as invStandardLatexOutstandingSplit's own
+// fromOpenBin, but scoped to ONE production item rather than the whole job. Reported directly
+// against real data: confirming "Yes, enough" for one line item's own need (e.g. Freeform Garland's
+// Pastel Blue) immediately made a completely different line item needing the SAME color+size in the
+// SAME job (Accent Pops' own, never-asked-about Pastel Blue need) read "Out of stock" instead of
+// getting its own "Maybe" — invStandardLatexOutstandingSplit's job+item+size scope (correct for its
+// own job, prorating a RETURN across siblings — see its own comment) meant one sibling's
+// confirmation silently spoke for every other sibling's own independent need too. Net PULL minus
+// RETURN, same as the job-wide version, but filtered to THIS row's own productionItemId — every
+// confirmedOpenBinUsed transaction has always carried one (see psPrepConfirmOpenBin), so there's no
+// legacy gap to bridge here the way invBalloonsPulledForJob's own exact/legacy split has to.
+function invOpenBinAlreadyConfirmedForItem(jobId, itemId, size, productionItemId) {
+  const txns = INVENTORY_TRANSACTIONS
+    .filter(t => t.jobId === jobId && t.itemId === itemId && t.size === size && (t.productionItemId || null) === (productionItemId || null) && (t.type === 'PULL' || t.type === 'RETURN'))
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt);
+  let outstanding = false;
+  txns.forEach(t => {
+    if (t.type === 'PULL' && t.openBinConfirmed) outstanding = true;
+    else if (t.type === 'RETURN') outstanding = false;
+  });
+  return outstanding;
+}
 
 // Resolves the signed-in user to a display name (via TEAM_MEMBERS) plus the raw email, so history
 // stays legible ("Sheila") while still keeping the real, unspoofable identity for a genuine audit
@@ -12795,14 +12818,13 @@ function psReviewPullRows(job) {
       // itself, and never lets anything actually get pulled off a guess (see
       // psPrepConfirmOpenBin, the only path that can turn this into a real confirmed pull).
       const openStatus = sd.openStatus;
-      // A job that already got one real Yes/Missing-N answer about this exact open bin (see
-      // psPrepConfirmOpenBin) never gets asked again for the same pull — that bin's contents are
-      // already spoken for by that answer, so re-offering "Maybe" here would suggest checking the
-      // same bin a second time for balloons already accounted as used or confirmed absent.
+      // A production item that already got one real Yes/Missing-N answer about this exact open bin
+      // (see psPrepConfirmOpenBin) never gets asked again for the same pull — that bin's contents
+      // are already spoken for by that answer, so re-offering "Maybe" here would suggest checking
+      // the same bin a second time for balloons already accounted as used or confirmed absent.
       // NET outstanding, not "ever happened" — a fully-Returned confirmation clears the pending
-      // list (see invStandardLatexOutstandingSplit), so a job that changed its mind can ask
-      // "Maybe" again fresh; only a still-outstanding confirmation (full or the leftover from a
-      // Missing-N partial one) blocks re-asking.
+      // list, so a job that changed its mind can ask "Maybe" again fresh; only a still-outstanding
+      // confirmation (full or the leftover from a Missing-N partial one) blocks re-asking.
       //
       // Reported directly against real data: Fashion White showed "Out of stock" with Open Bin
       // still set to Partial and a real prior loose count of 13 on file — "it should be a maybe
@@ -12811,10 +12833,21 @@ function psReviewPullRows(job) {
       // guessed), but that count is ordinary Inventory data, not a per-job confirmation — an open
       // bin keeps changing after it's set, so a stale count locking this into "Out of stock"
       // forever directly contradicts the very rule stated above (ANY non-Empty status earns
-      // "Maybe," no matter the shortfall size). Only psPrepConfirmOpenBin's own per-job answer
-      // (openBinAlreadyConfirmed) is specific and final enough to skip asking again — a general
-      // looseBalloons count no longer is.
-      const openBinAlreadyConfirmed = invStandardLatexOutstandingSplit(job.id, row.inventoryItemId, row.size).fromOpenBin > 0;
+      // "Maybe," no matter the shortfall size). Only psPrepConfirmOpenBin's own answer is specific
+      // and final enough to skip asking again — a general looseBalloons count no longer is.
+      //
+      // SCOPED PER PRODUCTION ITEM, not the whole job — reported directly against real data again:
+      // confirming "Yes, enough" for one item's own Pastel Blue need ("I clicked yes, so it pulled
+      // that amount... but now for the second part it thinks all the pastel blue is out of stock
+      // when it is not and I could still pull these") immediately made a completely different
+      // production item's own, never-asked-about need for the same color+size read "Out of stock"
+      // too. invStandardLatexOutstandingSplit's job+item+size scope is deliberately job-wide for
+      // its OWN purpose (prorating a Return across siblings sharing one pooled ledger record — see
+      // its own comment) — reusing that same aggregate here meant one sibling's confirmation
+      // silently spoke for every other sibling's own independent need. invOpenBinAlreadyConfirmedForItem
+      // nets the exact same PULL/RETURN history but filtered to this row's own productionItemId, so
+      // a sibling item's answer never pre-empts this one's own "Maybe" chance.
+      const openBinAlreadyConfirmed = invOpenBinAlreadyConfirmedForItem(job.id, row.inventoryItemId, row.size, row.productionItemId);
       if (!openBinAlreadyConfirmed && openStatus !== 'Empty') {
         const shortfall = stillNeeded - available;
         return Object.assign({}, row, { alreadyPulled, stillNeeded, available, shortfall, openStatus, status: 'maybeShort' });
