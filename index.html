@@ -5824,18 +5824,24 @@ function irColorRowHtml(item, idx, value) {
   const resolved = isNote || isBizResolved || resolution.status === 'resolved';
   let hintHtml = '', chipsHtml = '';
   if (!resolved && text) {
-    // Business-owned inventory is checked FIRST and never silently guessed between multiple
-    // matches — every plausible match becomes its own selectable chip, exactly like the
-    // ambiguous-brand picker Review & Pull already offers for Standard Latex.
-    const bizMatches = spFindByExactColorText(text);
-    const suggestions = clSearch(text).slice(0, 4);
-    hintHtml = `<div class="ir-decision-hint">${bizMatches.length ? 'This matches inventory you already have:' : suggestions.length ? 'Did you mean one of these?' : "Not in your Color Library yet — add it, or mark it a general note."}</div>`;
+    // Standard Latex (Main/Misc) suggestions always come first and take priority for the capped
+    // slots below — reported directly: a common color like "White" could fan out into a dozen-plus
+    // Specialty Latex prints sharing that same base color ("Qualatex White — Zebra", "Sempertex
+    // White — Cow", ...), burying the plain Standard Latex colors she actually wanted underneath
+    // all of that noise. Specialty Latex only fills whatever slots Standard Latex doesn't use, and
+    // the combined total is capped rather than dumping every possible match — "+ Add as new" always
+    // stays available regardless, and typing a more specific value re-narrows both lists on blur
+    // (irScheduleColorRecompute), so nothing here blocks getting to an uncommon color by name.
+    const MAX_COLOR_SUGGESTIONS = 5;
+    const suggestions = clSearch(text).slice(0, MAX_COLOR_SUGGESTIONS);
+    const bizMatches = spFindByExactColorText(text).slice(0, Math.max(0, MAX_COLOR_SUGGESTIONS - suggestions.length));
+    hintHtml = `<div class="ir-decision-hint">${suggestions.length ? 'Did you mean one of these?' : bizMatches.length ? 'This matches inventory you already have:' : "Not in your Color Library yet — add it, or mark it a general note."}</div>`;
     chipsHtml = `<div class="ir-color-suggestions">
-      ${bizMatches.map(m => `<button class="ir-chip-btn" onclick="irResolveColorToBusinessInventory('${item.id}',${idx},'specialtyLatex','${m.id}')">${psEscape(invGenericItemLabel('specialtyLatex', m))} <span style="opacity:0.7;">(${psEscape(INV_SYSTEMS.specialtyLatex.label)})</span></button>`).join('')}
       ${suggestions.map(s => `<span style="display:inline-flex; align-items:center; gap:1px;">
         <button class="ir-chip-btn" onclick="irResolveColorRow('${item.id}',${idx},'${s.colorName.replace(/'/g, "\\'")}')">${psEscape(s.colorName)}</button>
         <button class="ir-chip-btn" onclick="irAlwaysMatchColor('${item.id}',${idx},'${s.id}')" title="Always treat &quot;${invAttr(text)}&quot; as ${invAttr(s.colorName)} — future imports with this exact text resolve automatically">⭐</button>
       </span>`).join('')}
+      ${bizMatches.map(m => `<button class="ir-chip-btn" onclick="irResolveColorToBusinessInventory('${item.id}',${idx},'specialtyLatex','${m.id}')">${psEscape(invGenericItemLabel('specialtyLatex', m))} <span style="opacity:0.7;">(${psEscape(INV_SYSTEMS.specialtyLatex.label)})</span></button>`).join('')}
       <button class="ir-chip-btn" onclick="irAddColorAsNew('${item.id}',${idx})">+ Add "${psEscape(text)}" as new</button>
       <button class="ir-chip-btn" onclick="irMarkColorGeneralNote('${item.id}',${idx})">General note</button>
     </div>`;
