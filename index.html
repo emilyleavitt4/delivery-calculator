@@ -5627,7 +5627,10 @@ function irItemCardHtml(item) {
     if (decisions.includes('classification')) {
       html += `<div>
         <div class="ir-decision-q">What type of decor is this?</div>
-        <select class="ir-pill-select" onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select>
+        <div class="ir-decision-row">
+          <select class="ir-pill-select" onchange="irUpdateItemField('${item.id}','classification', this.value)">${imClassificationOptionsHtml(item.classification)}</select>
+          <button class="ir-text-action" onclick="irConfirmClassification('${item.id}')">Looks right</button>
+        </div>
       </div>`;
     }
 
@@ -5747,12 +5750,34 @@ function irItemCardHtml(item) {
 
 // ─── Item edit actions ────────────────────────────────────────────────────────
 
+// Both irUpdateItemField's classification branch and irConfirmClassification below need to clear
+// the exact same stale reasons — the initial-import note that this raw text had no saved mapping,
+// multiple competing ones, or only a fuzzy match. irRecomputeItemStatus deliberately preserves that
+// note forever ("keep original-match context") since it's useful historical context, but reusing
+// the SAME note to decide whether classification is still an open decision means an item a person
+// already reviewed and confirmed correct can never actually clear — direct report: classification,
+// template, and every color were all manually confirmed right, and it still permanently showed "1
+// thing needs your input" with nothing left to change. A real look (either an explicit pick, or the
+// "Looks right" confirmation when the original guess needed no correction) is what actually
+// resolves this decision, so both paths strip it here rather than leaving it for
+// irRecomputeItemStatus to keep re-adding.
+function irClearMappingUncertainty(item) {
+  item.reasons = item.reasons.filter(r => !r.startsWith('No saved mapping') && !r.startsWith('Multiple saved mappings') && !r.startsWith('Low-confidence match'));
+}
+function irConfirmClassification(id) {
+  const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === id);
+  if (!item) return;
+  irClearMappingUncertainty(item);
+  irRecomputeItemStatus(item);
+  irRenderShell();
+}
 function irUpdateItemField(id, field, value) {
   const item = IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === id);
   if (!item) return;
   if (field === 'qty') item.qty = parseFloat(value) || 1;
   else if (field === 'customLinear') item.customLinear = parseFloat(value) || null;
   else item[field] = value;
+  if (field === 'classification') irClearMappingUncertainty(item);
   irRecomputeItemStatus(item);
   irRenderShell();
 }
