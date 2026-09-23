@@ -5636,7 +5636,7 @@ function irItemCardHtml(item) {
         <div class="ir-decision-q">${needsTemplate ? 'How do you build this?' : 'How many feet is this?'}</div>`;
       if (needsTemplate) {
         html += `<div class="ir-decision-row">
-          <select class="ir-pill-select" onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">Choose one…</option>${psItemOptionsHtml(item.recipeId)}</select>
+          <select class="ir-pill-select" onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">Choose one…</option>${irItemOptionsHtml(item.recipeId)}</select>
           <button class="ir-text-action" onclick="irCreateNewTemplateForItem('${item.id}')">+ New template</button>
         </div>`;
         if (recipe && recipe.needsSetup) {
@@ -5687,10 +5687,20 @@ function irItemCardHtml(item) {
           html += `<div class="settings-field" style="margin-bottom:0.6rem;">
             <label>Production template</label>
             <div style="display:flex; gap:6px;">
-              <select style="flex:1;" onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">— choose one —</option>${psItemOptionsHtml(item.recipeId)}</select>
+              <select style="flex:1;" onchange="irUpdateItemField('${item.id}','recipeId', this.value)"><option value="">— choose one —</option>${irItemOptionsHtml(item.recipeId)}</select>
               <button class="icon-btn" style="width:auto; padding:6px 10px; font-size:12px; white-space:nowrap;" onclick="irCreateNewTemplateForItem('${item.id}')"><i class="fa-solid fa-plus"></i> New</button>
             </div>
           </div>`;
+          // Same inline setup editor the primary "How do you build this?" treatment already shows
+          // for a needsSetup template — missing here entirely before this fix, which is exactly why
+          // "+ New" on an already-resolved item looked like it did nothing: a real template WAS
+          // created and selected, there was just no visible sign of it anywhere on the page.
+          if (recipe && recipe.needsSetup) {
+            html += `<div class="ir-setup-block">
+              ${ptTemplateFieldsEditorHtml(recipe)}
+              <button class="save-btn" style="width:auto; padding:6px 14px;" onclick="irCompleteTemplateSetup('${item.id}','${recipe.id}')"><i class="fa-solid fa-check"></i> Complete Template Setup</button>
+            </div>`;
+          }
         }
         html += `<div class="row">
           <div class="settings-field" style="margin-bottom:0.6rem;"><label>Location (optional)</label><input type="text" value="${invAttr(item.location)}" onchange="irUpdateItemField('${item.id}','location', this.value)"></div>
@@ -5752,6 +5762,20 @@ function irUpdateItemField(id, field, value) {
 // almost certainly means you want the next invoice using this same name to find it automatically.
 // The inline field/task editor (ptTemplateFieldsEditorHtml, same body Settings uses) then renders
 // right here because irItemCardHtml already shows it whenever the selected recipe needsSetup.
+// Same options as psItemOptionsHtml (every "ready," fully-configured template), plus the
+// currently selected one even when it's a fresh needsSetup placeholder that psItemOptionsHtml's
+// own ready-only list deliberately excludes everywhere else it's used (Production's Add Item,
+// Import Mapping Rules — a needsSetup template should never be offered as a real choice from a
+// blank picker there). Reported directly: "+ New" appeared to do nothing — a real template WAS
+// created and the item's own recipeId WAS set to it, but the dropdown had no matching <option> to
+// show as selected, so it silently fell back to "— choose one —" with no visible sign anything had
+// happened. Scoped to Import Review's own two callers only; psItemOptionsHtml itself is untouched.
+function irItemOptionsHtml(selectedId) {
+  const selectedRecipe = selectedId ? RECIPES.find(r => r.id === selectedId) : null;
+  let html = psItemOptionsHtml(selectedId);
+  if (selectedRecipe && selectedRecipe.needsSetup) html += `<option value="${selectedRecipe.id}" selected>${psEscape(selectedRecipe.display)} (needs setup)</option>`;
+  return html;
+}
 function irCreateNewTemplateForItem(itemId) {
   const item = IMPORT_REVIEW_DRAFT && IMPORT_REVIEW_DRAFT.reviewItems.find(i => i.id === itemId);
   if (!item) return;
